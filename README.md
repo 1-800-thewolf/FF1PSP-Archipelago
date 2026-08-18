@@ -1,8 +1,8 @@
-# Final Fantasy I (PSP — 20th Anniversary Edition) Archipelago Randomizer
+# Final Fantasy 1 (PSP — 20th Anniversary Edition) Archipelago Randomizer
 
 ![randomizer thumbnail]([THUMBNAIL IMAGE URL HERE])
 
-An [Archipelago](https://archipelago.gg) multiworld randomizer for **Final Fantasy (PSP, ULUS-10251)**, played in the PPSSPP emulator.
+An [Archipelago](https://archipelago.gg) multiworld randomizer for Final Fantasy 1, played in the PPSSPP emulator.
 
 Current version: **0.1.0**
 
@@ -15,9 +15,9 @@ Current version: **0.1.0**
 
 ## What Is This?
 
-This turns FF1 PSP into an Archipelago multiworld randomizer. Every chest, every key item, and every "talk to the guy who gives you the thing" is a location. What you get back is whatever the multiworld decided to put there — which might be a Ninja job scroll for your Thief, or a Warrior's sword sitting in somebody else's world.
+This turns FF1 PSP into an Archipelago multiworld randomizer. Play on your own or with your friends. Chests and Key Items are locations that can hold a random item.
 
-You might sail out of Cornelia with the Canoe and no Ship. You might walk into a shop and find a spell nobody in your party can cast, sitting next to a hint about where your Levistone shards went.
+You might find an early Canoe and have to sneak into the Ice Cavern early to find your Ship, or perhaps you'll see a spell tome for sale but decide to buy hints to learn what's on a floor of Mount Gulg so you can path smarter.
 
 **What is Archipelago?**
 
@@ -29,36 +29,36 @@ You might sail out of Cornelia with the Canoe and no Ship. You might walk into a
 
 ## Features
 
-**Open Progression — the world doesn't wait for the Ship.**
-- `early` carves a foot trail from Cornelia to Mount Duergar and a Canoe river linking the Crescent Lake water system to the Ice Cavern rivers. The Canoe alone opens the southern continent.
-- `extended` adds a trail from Mount Duergar to the Western Keep and a river from Duergar to Melmond. The whole Cornelia/Marsh section becomes sphere 1 and the Earth crystal is reachable on the Canoe.
-- Northern Docks gives the north its own port, so the Ship isn't a single-key bottleneck.
+**Open Progression — Ship, Canoe, or Foot?**
+- Open world options let you venture out on foot immediately, allow more options for travel with Canoe, or open up most of the southern continent by foot.
+- Option to put Northern Docks in the world, providing the option to access more of the game before the Airship.
 - The Levistone can be broken into shards, so the airship becomes a collection goal instead of one chest.
 
 **All four PSP bonus dungeons are real AP content.** Earthgift Shrine, Hellfire Chasm, Lifespring Grotto, and Whisperwind Cove each carry a configurable number of AP locations, so you decide how much of the Soul of Chaos you're signing up for. Turn them off entirely with one option if you'd rather not.
 
-**Job Scrolls — specialty items that rewrite a party member.** One scroll per job in your party, each a permanent, build-defining upgrade:
+**Job Scrolls offer specialty items that pump up party members.** So far, one scroll per job:
 - Blood Knight — lifesteal and armor penetration on physical attacks
-- Stealth Ninja — much better steals; damaging floors hurt less, and with enough of them, actually heal you
+- Stealth Ninja — much better steals; damaging floors hurt less or heal you
 - Grand Master — gains attack and max HP as they take damage
-- Crimson Wizard — restores mana from damage taken, and heals from mana spent
-- White Cleric — Dia spells hurt every boss; Dia-family casts heal the caster and grant INT
-- Necrocaster — instant-death spells become reliable, and spells deal damage instead of whiffing
+- Crimson Wizard — restores mana from damage taken and heals from mana spent
+- White Cleric — Dia spells hurt every boss, heal the caster, and grant temporary INT
+- Necrocaster — instant-death spells become reliable, and spells deal damage instead of missing
 
-**Optional Slot Magic.** Throw out the MP pool and play the NES/Pixel Remaster vancian system — charges per spell level. Pair it with shuffled magic shops if you want Flare to show up as a level 1 spell, which is exactly as unbalanced as it sounds. That's the point.
+**Optional Slot Magic.** Throw out the MP pool and play the NES/Pixel Remaster vancian system with charges per spell level.
 
-**Difficulty knobs that actually bite.**
-- Monster Power % and Boss Difficulty % scale the whole bestiary
-- Harder Overworld Encounters and Harder Dungeon Encounters pull tougher hand-authored pools per zone and per dungeon
-- Dangerous Forests — forest tiles run their own, meaner encounter table, hand-picked per overworld zone
-- Regional Ocean Encounters, Northern River Encounters, Boss Minions, and encounters on Chaos' floor
-- Encounter Rate %, XP Boost %, and Gil Boost % if you'd rather tune the other direction
+**Take on the challenge you've always wanted**
+- Monster Power and Boss Difficulty turn up the heat, all the way to 500% of the base game's difficulty.
+- Harder Overworld Encounters and Harder Dungeon Encounters pull tougher hand-authored pools per zone and per dungeon.
+- Dangerous Forests places scary, hand-picked encounters for those unfortunate enough to find them.
+- New Regional Ocean Encounters and Northern River Encounters bring hand-crafted aquatic fights to every corner of the overworld.
+- Boss Minions, ranging from a nuisance to absurd extra difficulty.
+- Change settings on the fly, such as Encounter Rate, XP Boost, and Gil Boost.
 
-**Shops are a whole system.** Randomized prices, shuffled magic shops, extra items per shop, AP items offered for sale, hints for sale in gear shops, exotic and priceless gear that normally doesn't exist in stores, and auto-sell for junk your party can't use.
+**Shops built for a randomizer.** Randomization doesn't stop at shuffled stock and randomized prices. Purchase AP items from shops, buy yourself hints, and take full control of the quality of the goods for sale, ranging from mundane starting gear to exotic and priceless equipment that never appears in a vanilla store.
 
-**Configurable goal.** Crystals Needed (0–4) decides how many Fiends must fall before the Black Orb shatters. Lute Tablets breaks the Lute into pieces, with Required / Percentage / Extra knobs so you control both how many you need and how many exist. Then Chaos.
+**Configurable goal.** Choose how many Fiends need to be defeated to break the Black Orb. An option to break the Lute into Lute Tablets. Then Chaos.
 
-**Quality of life, on by default.** Auto Dash, message speed, cursor memory, spell chance colors, and tracker support.
+**Quality of life.** Auto Dash, Super Dash, message speed, cursor memory, spell chance colors, and a full, custom tracker built right into the AP client.
 
 **DeathLink**, with a severity setting so you decide how much a friend dying should cost you.
 
@@ -66,11 +66,7 @@ You might sail out of Cornelia with the Canoe and no Ship. You might walk into a
 
 ## How It Works
 
-**The apworld** generates your seed like any Archipelago world — items, locations, logic, spoiler.
-
-**The FF1 PSP Client** does the heavy lifting. On connect it bakes your seed's settings directly into a patched copy of your ISO (encounter tables, shop stock, prices, spell data, job sprites, text banks), then launches PPSSPP on it. While you play, it talks to PPSSPP's debugger to watch for checks, deliver incoming items, and keep both sides in sync.
-
-Your original ISO is never modified. The patched copy is cached per seed.
+**The FF1 PSP Client** manages the randomizer for you. On connect it bakes your seed's settings directly into a patched copy of your ISO, then launches PPSSPP automatically. While you play, it talks to PPSSPP's debugger to watch for checks, deliver incoming items, and keep both sides in sync.
 
 ---
 
@@ -78,7 +74,7 @@ Your original ISO is never modified. The patched copy is cached per seed.
 
 ### Requirements
 
-- **A legally-obtained ISO of _Final Fantasy_ for PSP (20th Anniversary Edition), US region, disc id `ULUS-10251`.** This is the US retail UMD dump. Other regions and the digital releases are **not** supported — the client verifies the disc id in the ISO header and refuses anything else. `.iso` and `.cso` both work. No game files are distributed here and none will be provided; dump your own disc.
+- **A legally-obtained ISO of _Final Fantasy_ for PSP (20th Anniversary Edition), US region, disc id `ULUS-10251`.** It is probably called `Final Fantasy Original - 20th Anniversary Edition (USA) (En,Ja) (FW3.03).iso`. No game files are distributed here and none will be provided; acquire the iso yourself, please.
 - **[PPSSPP](https://www.ppsspp.org/download/)** — Windows 64-bit build. You don't need to configure anything: the client patches PPSSPP's ini for you (remote debugger port and memory access mode) on first launch.
 - **[Archipelago](https://github.com/ArchipelagoMW/Archipelago/releases) 0.6.0 or later**
 
@@ -86,7 +82,7 @@ Your original ISO is never modified. The patched copy is cached per seed.
 
 **1. Install the apworld**
 
-Download `ff1psp.apworld` from the [latest release]([REPO URL HERE]/releases/latest) and launch it, or manually place it in your Archipelago `custom_worlds` folder, normally here:
+Download `ff1psp.apworld` from the [latest release](https://github.com/1-800-thewolf/FF1PSP-Archipelago/releases/latest) and launch it, or manually place it in your Archipelago `custom_worlds` folder, normally here:
 ```
 C:\ProgramData\Archipelago\custom_worlds\
 ```
@@ -107,9 +103,9 @@ If you're new to Archipelago, the general process is:
 
 **4. Point the client at PPSSPP and your ISO**
 
-The **first time** you connect, the client asks for two paths: your PPSSPP executable and your FF1 ISO. It remembers both — you won't be asked again unless you change them.
+The **first time** you connect, the client may ask for two paths: your PPSSPP executable and your FF1 ISO. It remembers both so you won't be asked again unless you change them.
 
-**Important**: connect in the client _first_, then let it launch the game. The client starts PPSSPP itself so it's guaranteed to be connected before the game boots. Don't open PPSSPP yourself.
+**Important**: Just connect in the client to your slot. It automatically launches the game for you. Don't open PPSSPP yourself.
 
 **5. Play**
 
@@ -124,9 +120,9 @@ The client bakes your seed into a patched ISO copy and launches it. Start a New 
 
 Each player needs a YAML. Generate a template from the Archipelago Launcher, or use the web options page.
 
-There are a **lot** of options. They're grouped into tabs: Goal, Scale, World, Bonus Dungeons, Party, Quality of Life, Bonus Abilities, Shops, Magic, Loot, Enemies, and Death Link. Every option carries a description in the template — read them, they're written for players.
+There are a **lot** of options. They're grouped into tabs: Goal, Scale, World, Bonus Dungeons, Party, Quality of Life, Bonus Abilities, Shops, Magic, Loot, Enemies, and Death Link. Every option carries a description in the template.
 
-If you want a good first seed, the defaults are a good first seed. If you want to change exactly one thing, set `open_progression` to `early`.
+If you want a place to start, the defaults will be a great experience. When you're ready to mix things up and turn up the difficulty, there are plenty of tools.
 
 Key options to consider:
 - `open_progression` — how much of the world is walkable or canoe-able before the Ship (`early` recommended for a first run)
@@ -146,7 +142,6 @@ Key options to consider:
 - Your original ISO is never written to. The client patches a cached copy per seed.
 - The client must stay running and connected for checks to register and items to arrive.
 - Don't launch PPSSPP yourself — let the client do it, so the debugger comes up correctly.
-- Save anywhere is still save anywhere. Reloading a save doesn't lose received items.
 
 ---
 
@@ -154,7 +149,7 @@ Key options to consider:
 
 Run `/ff1psp_logs` in the client's command box. It writes a single zip with the client log, the bake manifest, and the state breadcrumbs the client left behind. Attach that zip to your bug report or drop it in the Discord — it's the fastest way to get an answer, and usually the only way to diagnose a bake or sync issue.
 
-- Bug reports: [Issues]([REPO URL HERE]/issues)
+- Bug reports: [Issues](https://github.com/1-800-thewolf/FF1PSP-Archipelago/issues)
 - Discussion and support: [FF1 PSP Archipelago Discord]([DISCORD INVITE HERE])
 - Not in the main AP server yet? [Archipelago Discord](https://discord.gg/archipelago)
 
@@ -166,10 +161,10 @@ Developed by **1.800.thewolf**
 
 Thanks to the Archipelago community for the tooling, documentation, and patience, and to the PPSSPP team for a debugger good enough to build a randomizer on top of.
 
-Thanks to the playtesters who ran broken builds, filed real bug reports, and sent me their debug bundles instead of "it crashed."
+Thanks to the playtesters who ran broken builds so you don't have to.
 
 ### AI Disclosure
 
-"Big chunk of this project built with help from Claude. Helped with: PSP reverse engineering, MIPS hooks and ISO patching, the AP client, apworld code, and a lot of bug hunts."
+"Big chunk of this project built with help from AI. Helped with: PSP reverse engineering, MIPS hooks and ISO patching, the AP client, apworld code, and a lot of bug hunts."
 
 Not copy-paste. Every feature designed by me first, implemented iteratively, then played and re-tested in the actual game until it worked right. Plenty of these took days, live debugger sessions, and multiple rewrites to actually fix, and several were reported by the testers credited above. AI wrote some code, I own the design, review, and final call on what ships. Bugs still mine to fix.
