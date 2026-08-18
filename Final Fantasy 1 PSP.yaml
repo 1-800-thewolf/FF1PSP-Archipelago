@@ -1,0 +1,1061 @@
+﻿# Q. What is this file?
+# A. This file contains options which allow you to configure your multiworld experience while allowing
+#    others to play how they want as well.
+#
+# Q. How do I use it?
+# A. The options in this file are weighted. This means the higher number you assign to a value, the
+#    more chances you have for that option to be chosen. For example, an option like this:
+#
+#    map_shuffle:
+#      on: 5
+#      off: 15
+#
+#    Means you have 5 chances for map shuffle to occur, and 15 chances for map shuffle to be turned
+#    off.
+#
+# Q. I've never seen a file like this before. What characters am I allowed to use?
+# A. This is a .yaml file. You are allowed to use most characters.
+#    To test if your yaml is valid or not, you can use this website:
+#        http://www.yamllint.com/
+#    You can also verify that your Archipelago options are valid at this site:
+#        https://archipelago.gg/check
+
+# Your name in-game, limited to 16 characters.
+#     {player} will be replaced with the player's slot number.
+#     {PLAYER} will be replaced with the player's slot number, if that slot number is greater than 1.
+#     {number} will be replaced with the counter value of the name.
+#     {NUMBER} will be replaced with the counter value of the name, if the counter value is greater than 1.
+name: Player{number}
+
+# Used to describe your yaml. Useful if you have multiple files.
+description: Default Final Fantasy 1 PSP Template
+
+game: Final Fantasy 1 PSP
+requires:
+  version: 0.6.7 # Version of Archipelago required for this yaml to work as expected.
+  game:
+    Final Fantasy 1 PSP: 0.0.1 # Version of the world required for this yaml to work as expected.
+
+Final Fantasy 1 PSP:
+  ################
+  # Game Options #
+  ################
+  progression_balancing:
+    # A system that can move progression earlier, to try and prevent the player from getting stuck and bored early.
+    # 
+    # A lower setting means more getting stuck. A higher setting means less getting stuck.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 99
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-99: 0 # random value between 0 and 99
+    disabled: 0 # equivalent to 0
+    normal: 50 # equivalent to 50
+    extreme: 0 # equivalent to 99
+
+  accessibility:
+    # Set rules for reachability of your items/locations.
+    # 
+    # **Full:** ensure everything can be reached and acquired.
+    # 
+    # **Minimal:** ensure what is needed to reach your goal can be acquired.
+    full: 50
+    minimal: 0
+
+  ########
+  # Goal #
+  ########
+  crystals_needed:
+    # 💠 How many of the four Crystals (defeated Fiends) you need before the
+    # Black Orb in the Chaos Shrine will shatter, opening the way to Chaos.
+    # 0 = the orb opens right away.
+    # 
+    # See Lute Tablets Required for the other key required to win.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 4
+    4: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-4: 0 # random value between 0 and 4
+
+  lute_tablets_required:
+    # 🪕 How many Lute Tablets you need to collect to reach the very end of
+    # the game. The Lute is broken into pieces; collect this many to win.
+    # 0 = off (the Lute is a single randomized item).
+    # 
+    # See Crystals Needed for the other key required to win.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 99
+    10: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-99: 0 # random value between 0 and 99
+
+  lute_tablets_percentage:
+    # 🪕 How many Lute Tablet pieces exist in the whole multiworld, as a percent
+    # of Lute Tablets Required (Lute Tablets Extra is then added on top). 100 =
+    # exactly Required, 150 = 50% extra tablets. Extra tablets found above
+    # Required don't do anything.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 100
+    # Maximum value is 1000
+    150: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-100-1000: 0 # random value between 100 and 1000
+
+  lute_tablets_extra:
+    # 🪕 How many extra Lute Tablet pieces exist on top of
+    # Lute Tablets Percentage (a flat count, not a percent).
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 98
+    0: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-98: 0 # random value between 0 and 98
+
+  #########
+  # Scale #
+  #########
+  encounter_rate:
+    # Random-encounter rate as a percent.
+    # 
+    # 0 = no random encounters at all, 100 = vanilla rate, 500 = x5.
+    # 
+    # This setting can be changed mid-game from the Boost tab.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 500
+    50: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-500: 0 # random value between 0 and 500
+
+  xp_boost_percentage:
+    # Experience rewarded from battles, as a percent of vanilla.
+    # 
+    # 100 = vanilla, 200 = double XP, 10 = one-tenth.
+    # 
+    # This setting can be changed mid-game from the Boost tab.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 10
+    # Maximum value is 500
+    250: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-10-500: 0 # random value between 10 and 500
+
+  gil_boost_percentage:
+    # 💰 Gil dropped by battles, as a percent of vanilla.
+    # 
+    # 100 = vanilla, 0 = no gil ever drops, 500 = x5.
+    # 
+    # This setting can be changed mid-game from the Boost tab.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 500
+    250: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-500: 0 # random value between 0 and 500
+
+  monster_power_percentage:
+    # 🏋🏻‍♂️ Regular monster strength, as a percent of vanilla. Applies to
+    # every enemy that is not a boss (bosses use Boss Difficulty instead).
+    # 
+    # 100 = vanilla. 10 = pushover mobs (10% stats). 200 = twice as difficult.
+    # Scales HP, offense and defenses.
+    # 
+    # Spells that have a chance to miss (Sleep, Dark, Death, Warp...) get less
+    # reliable as this rises, roughly half as likely to land at 200%.
+    # 
+    # This setting can be changed mid-game from the Boost tab.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 10
+    # Maximum value is 500
+    100: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-10-500: 0 # random value between 10 and 500
+
+  boss_difficulty_percentage:
+    # 🏋🏻‍♂️ Boss strength, as a percent of vanilla.
+    # 
+    # 100 = vanilla. 10 = pushover bosses (10% stats). 200 = twice as difficult
+    # (200% HP and offense, plus massive defense), a huge jump.
+    # 
+    # Expect to grind a lot for any value above 200, and around 300 most
+    # bosses one-shot your party members.
+    # 
+    # This setting can be changed mid-game from the Boost tab.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 10
+    # Maximum value is 500
+    100: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-10-500: 0 # random value between 10 and 500
+
+  #########
+  # World #
+  #########
+  open_progression:
+    # ⛰️ How much of the world opens up early on foot/canoe:
+    # 
+    # off      (0)  -- vanilla routing. The southern continent needs the Ship.
+    # early    (1)  -- carves a foot trail from Cornelia to Mount Duergar, and
+    #                  a Canoe river linking the Crescent Lake water system to
+    #                  the Ice Cavern rivers. The Canoe opens up the entire
+    #                  southern continent.
+    # extended (2)  -- also adds a foot trail from Mount Duergar to the
+    #                  Western Keep, and a new Canoe river linking Mount Duergar 
+    #                  to Melmond. The whole Cornelia/Marsh section is sphere 1
+    #                  and the Earth crystal is reachable with only the Canoe.
+    'off': 0
+    early: 50
+    extended: 0
+
+  northern_docks:
+    # ⚓ Adds two ship docks to the northern continents: one south of Onrac,
+    # one south of the Mirage Tower desert. Much more of the map becomes
+    # reachable by ship, well before you get the airship.
+    # 
+    # Pairs well with Regional Ocean Encounters.
+    'false': 0
+    'true': 50
+
+  levistone_shards_required:
+    # 🪨 Set this above 0 to break the Levistone into shards. Collect this
+    # many Levistone Shards to assemble the Levistone and raise the airship.
+    # 0 = off (the Levistone is a single randomized item).
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 9
+    0: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-9: 0 # random value between 0 and 9
+
+  levistone_shards_percentage:
+    # 🪨 How many Levistone Shard pieces exist in the whole multiworld, as a
+    # percent of Levistone Shards Required (Levistone Shards Extra is then added
+    # on top). 100 = exactly Required, 150 = 50% extra shards. Extra shards found
+    # above Required don't do anything.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 100
+    # Maximum value is 1000
+    150: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-100-1000: 0 # random value between 100 and 1000
+
+  levistone_shards_extra:
+    # 🪨 How many extra Levistone Shard pieces exist on top of
+    # Levistone Shards Percentage (a flat count, not a percent).
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 8
+    0: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-8: 0 # random value between 0 and 8
+
+  loot_in_normally_empty_chests:
+    # 📦 Puts real loot in the chests that are empty in vanilla. 
+    # 
+    # These empty chests are in Marsh Cave, Mt Gulg, and Citadel of Trials.
+    # 
+    # Turn this off to leave those chests empty.
+    'false': 0
+    'true': 50
+
+  ##################
+  # Bonus Dungeons #
+  ##################
+  exclude_bonus_dungeons:
+    # 🚫 Keep all Soul-of-Chaos bonus-dungeon content out of the item pool.
+    # This includes all dynamic and static chests from Earthgift Shrine,
+    # Hellfire Chasm, Lifespring Grotto, and Whisperwind Cove.
+    # 
+    # Turn this on to skip all those bonus dungeons.
+    'false': 50
+    'true': 0
+
+  earthgift_ap_locations:
+    # 🏔️ Number of procedural chests in Earthgift Shrine (5 floors) that
+    # become AP locations. After you open this many chests here, additional
+    # chests work like vanilla chests.
+    # 
+    # 0 = none, and this dungeon's static boss-chamber chest is also dropped.
+    # Forced to 0 by Exclude Bonus Dungeons.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 20
+    5: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-20: 0 # random value between 0 and 20
+
+  hellfire_ap_locations:
+    # 🌋 Number of procedural chests in Hellfire Chasm (10 floors) that
+    # become AP locations. After you open this many chests here, additional
+    # chests work like vanilla chests.
+    # 
+    # 0 = none, and this dungeon's static boss-chamber chest is also dropped.
+    # Forced to 0 by Exclude Bonus Dungeons.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 40
+    10: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-40: 0 # random value between 0 and 40
+
+  lifespring_ap_locations:
+    # 🌊 Number of procedural chests in Lifespring Grotto (20 floors) that
+    # become AP locations. After you open this many chests here, additional
+    # chests work like vanilla chests.
+    # 
+    # 0 = none, and this dungeon's static boss-chamber chest is also dropped.
+    # Forced to 0 by Exclude Bonus Dungeons.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 60
+    15: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-60: 0 # random value between 0 and 60
+
+  whisperwind_ap_locations:
+    # 💨 Number of procedural chests in Whisperwind Cove (40 floors) that
+    # become AP locations. After you open this many chests here, additional
+    # chests work like vanilla chests.
+    # 
+    # 0 = none, and this dungeon's static boss-chamber chest is also dropped.
+    # Forced to 0 by Exclude Bonus Dungeons.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 64
+    40: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-64: 0 # random value between 0 and 64
+
+  #########
+  # Party #
+  #########
+  starting_job_1:
+    # Job for party member 1 (top of the menu).
+    # random_job picks a random job for the party member,
+    # adhering to Party Diversity (below) if enabled.
+    random_job: 50
+    warrior: 0
+    thief: 0
+    monk: 0
+    red_mage: 0
+    white_mage: 0
+    black_mage: 0
+    choose_at_game_start: 0
+
+  starting_job_2:
+    # Job for party member 2.
+    # random_job picks a random job for the party member,
+    # adhering to Party Diversity (below) if enabled.
+    random_job: 50
+    warrior: 0
+    thief: 0
+    monk: 0
+    red_mage: 0
+    white_mage: 0
+    black_mage: 0
+    choose_at_game_start: 0
+
+  starting_job_3:
+    # Job for party member 3.
+    # random_job picks a random job for the party member,
+    # adhering to Party Diversity (below) if enabled.
+    random_job: 50
+    warrior: 0
+    thief: 0
+    monk: 0
+    red_mage: 0
+    white_mage: 0
+    black_mage: 0
+    choose_at_game_start: 0
+
+  starting_job_4:
+    # Job for party member 4 (bottom of the menu).
+    # random_job picks a random job for the party member,
+    # adhering to Party Diversity (below) if enabled.
+    random_job: 50
+    warrior: 0
+    thief: 0
+    monk: 0
+    red_mage: 0
+    white_mage: 0
+    black_mage: 0
+    choose_at_game_start: 0
+
+  party_diversity:
+    # ☯️ When on, random jobs avoid stacking the same job: never
+    # 3 or more of one job; never two separate pairs. So it will not roll
+    # 2 White Mages + 2 Warriors, or 3 Thieves.
+    # 
+    # Jobs you picked yourself aren't changed.
+    'false': 0
+    'true': 50
+
+  white_and_black_magics:
+    # ☯️ When on, random jobs avoid stacking all one magic color.
+    # There will be at least one white magic user and at least one black magic user.
+    # White: White Mage, Warrior, Monk (only if dabble in magic is on)
+    # Black: Black Mage, Thief
+    # Both: Red Mage
+    # 
+    # Jobs you picked yourself aren't changed.
+    'false': 0
+    'true': 50
+
+  ###################
+  # Quality of Life #
+  ###################
+  auto_dash:
+    # 🏃 Start with the Config "Dash" setting on, so the party
+    # auto runs without you holding the dash button.
+    # 
+    # Super Dash is always available in every seed: with Config "Dash" on,
+    # hold the Dash button to move at double speed anywhere. Towns, dungeons,
+    # the overworld, the ship, the canoe and the airship.
+    # 
+    # Off = Config "Dash" starts off, and you can turn it on any time from
+    # the in game Config menu to get both auto dash and Super Dash.
+    'false': 0
+    'true': 50
+
+  message_speed:
+    # 💬 Starting value for the Config "Message Speed" setting.
+    # 
+    # This only sets the default at new game.
+    slow: 0
+    medium: 0
+    fast: 50
+    instant: 0
+
+  cursor_mode:
+    # 🖐️ Starting value for the Config "Cursor" setting.
+    # 
+    #   default -- menu cursors start at the top every time you open a menu.
+    #   memory  -- menus remember where the cursor was and put it back.
+    # 
+    # This only sets the default at new game.
+    # Change Cursor in the Config menu whenever you like.
+    default: 0
+    memory: 50
+
+  spell_chance_colors:
+    # 🎨 Color the battle "miss!!" text by the odds the spell actually had of
+    # landing on that target, so a near-miss looks different from a cast that
+    # never had a chance.
+    # 
+    #   white  -- 0% chance; the target was immune.
+    #   yellow -- 1% to 15%; small chance, but possible.
+    #   red    -- over 15%; it had a real chance of working.
+    # 
+    # This even covers spells sent at your party!
+    # It will show you how close Quake was to killing your whole party.
+    'false': 0
+    'true': 50
+
+  naked_monks:
+    # 🥋 A Monk's defense actually goes up with their starting Clothes
+    # removed, so with this on, starting Monks auto-sell their Clothes and
+    # Staff. Nothing stops you re-arming a Monk later.
+    'false': 0
+    'true': 50
+
+  ###################
+  # Bonus Abilities #
+  ###################
+  monk_thief_dabble_in_magic:
+    # ✨ Monk and Thief can learn a little magic. They each learn only 1 spell
+    # per spell level, and they gain max MP very slowly.
+    # 
+    # The Thief can learn spells like Sleep and Confuse; the Monk can learn
+    # spells like Protect and NulBlaze. (With Shuffle Magic Shops on, those will
+    # be other random spells instead.)
+    # 
+    # This changes these classes from having zero options in battle
+    # (always attack) to having 1 or 2 things they can do per long rest.
+    'false': 0
+    'true': 50
+
+  thief_steal:
+    # 🎁 Thieves (and Ninja) scavenge after battle. If a thief spots an
+    # item to take, there is a sound effect and an extra sprite shows up briefly
+    # next to your thief.
+    # 
+    # The chance is based on Agility, and Luck gives an extra chance to find
+    # lower-tier loot. More thieves means more chances at extra loot.
+    'false': 0
+    'true': 50
+
+  thief_extra_crit:
+    # 🗡️ Thieves (and Ninja) get an extra chance to land a critical
+    # hit, based on their Agility.
+    # 
+    # When your thief scores an extra crit from this, there's an extra
+    # sound effect.
+    'false': 0
+    'true': 50
+
+  job_scroll_boosts:
+    # 📜 Adds Job Scrolls to the item pool, one for each job in your party.
+    # Each grants a permanent boost to the matching party member.
+    # 
+    # - 🩸⚔️ Blood Knight Scroll: gain lifesteal and armor penetration with
+    #   physical attacks.
+    # - 🥷🎁 Stealth Ninja Scroll: much better steals (needs Thieves Steal on;
+    #   without it, this half of the scroll does nothing). Damaging floors
+    #   also deal less damage. With more Stealth Thieves or Ninja, damaging
+    #   floors actually heal you and restore mana each step.
+    # - 🥋💪 Grand Master Scroll: as they take damage, they gain attack and max
+    #   HP, and heal.
+    # - 🎩🩸 Crimson Wizard Scroll: restore mana based on damage taken, and heal
+    #   based on mana spent.
+    # - 🪄☀️ White Cleric Scroll: Dia spells hurt all bosses. Also, casting a
+    #   Dia-family spell heals the caster and grants temporary INT.
+    # - ☠️🔮 Necrocaster Scroll: instant-kill spells are far more reliable
+    #   (Death/Quake/Scourge/Warp/Kill hit more often), and spells deal damage
+    #   instead of nothing when they miss. Kill deals a little more
+    #   damage than Flare.
+    'false': 0
+    'true': 50
+
+  #########
+  # Shops #
+  #########
+  shop_item_pool:
+    # ❔💰 Which weapons, armor and items get shuffled into shops. Each level
+    # is a strict superset of the one below:
+    # 
+    #   unshuffled  (0) -- shops keep their vanilla inventories (no shuffle).
+    #   mundane     (1) -- shuffle, but only ordinary stock: what vanilla town
+    #                      shops sell (Nunchaku, Rapier, Potion, Knight's Armor)
+    #                      plus plain treasure gear (Flame Sword, Ice Brand,
+    #                      Diamond Armor, etc.). No exotic gear.
+    #   exotic      (2) -- also exotic weapons, armor and items (Duel Rapier,
+    #                      Genji gear, Curtains, Emergency Exit, etc.), but not
+    #                      activatable weapons and priceless gear (like Black Robe).
+    #   activatable (3) -- also exotic weapons that cast a free spell when used
+    #                      (Wizard's Staff, Thor's Hammer, Healing Staff, etc.) plus
+    #                      fangs (White/Red/Blue/Vampire Fang, Cockatrice Claw).
+    #                      This equipment costs an extra x1.5.
+    #   all         (4) -- also priceless gear and consumables (Ultima, Barbarian
+    #                      Sword, Excalibur, Stat Pills, Apples, etc.). Priceless
+    #                      items cost an extra x2.
+    # 
+    # (Magic shops are covered by Shuffle Magic Shops instead.)
+    unshuffled: 0
+    mundane: 0
+    exotic: 50
+    activatable: 0
+    all: 0
+
+  shop_max_extra_items:
+    # 🏪 Max number of EXTRA normal items added to each shop, on top of the
+    # stock it would carry anyway.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 6
+    2: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-6: 0 # random value between 0 and 6
+
+  shop_ap_offers:
+    # 🛒 Max number of Archipelago items for sale in each shop.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 6
+    3: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-6: 0 # random value between 0 and 6
+
+  shop_max_hints:
+    # 🔮 Max number of HINTS for sale in each shop.
+    # 
+    # Sold at Weapon and Armor shops, purchased hints reveal the ap item at
+    # a location or a set of locations within your world.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 3
+    2: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-3: 0 # random value between 0 and 3
+
+  randomize_prices:
+    # Randomize gil prices (items, weapons, armor, spells).
+    'false': 0
+    'true': 50
+
+  item_price_range_low:
+    # 🪙🧤 Low bound (percent of vanilla) for randomized item, weapon and
+    # armor prices. So 25 here means an item can randomly cost as little as a
+    # quarter of its vanilla price (never below 5 gil).
+    # Needs Randomize Prices on.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 1
+    # Maximum value is 1000
+    25: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-1-1000: 0 # random value between 1 and 1000
+
+  item_price_range_high:
+    # 🪙🧤 High bound (percent of vanilla) for randomized item, weapon and
+    # armor prices. So 200 here means an item can randomly cost as much as 2
+    # times its vanilla price.
+    # Needs Randomize Prices on.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 1
+    # Maximum value is 10000
+    200: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-1-10000: 0 # random value between 1 and 10000
+
+  #########
+  # Magic #
+  #########
+  slot_magic:
+    # 🪄 Replace the MP pool with NES/Pixel-Remaster-style spell slots.
+    # 
+    # Each spell level has its own pool of charges.
+    # 
+    # This setting is not balanced around Shuffle Magic Shops. Flare could land
+    # as a level 1 spell with this vancian system.
+    'false': 50
+    'true': 0
+
+  spells_hit_low_hp_enemies:
+    # 🎯 Your spells that can miss hit more on low health enemies.
+    # Soften up enemies to more reliably land spells like Break or Sleep.
+    'false': 0
+    'true': 50
+
+  spell_tomes:
+    # 📙 Adds Spell Tomes to the item pool. A tome is a consumable item
+    # that can be consumed to teach its spell to a party member that can
+    # learn it. Shops still sell spells normally.
+    'false': 0
+    'true': 50
+
+  shuffle_magic_shops:
+    # 🔮 Shuffle which spells each magic shop sells. Gil and MP costs are
+    # still based on vanilla prices.
+    # 
+    # Each class learns the same number of spells from each shop as vanilla, so
+    # the White Mage learns all 4 spells in Cornelia's white shop, the Red Mage
+    # learns 2 of them, and later the Red Wizard learns those 2 plus 1 more.
+    'false': 0
+    'true': 50
+
+  spell_gil_price_range_low:
+    # 🪙🔮 Low bound (percent of vanilla) for randomized spell gil prices.
+    # So 25 here means a spell can randomly cost as little as a quarter of its
+    # vanilla gil price.
+    # Independent from item prices. Needs Randomize Prices on.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 1
+    # Maximum value is 1000
+    25: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-1-1000: 0 # random value between 1 and 1000
+
+  spell_gil_price_range_high:
+    # 🪙🔮 High bound (percent of vanilla) for randomized spell gil prices.
+    # So 200 here means a spell can randomly cost as much as 2 times its vanilla
+    # gil price.
+    # Independent from item prices. Needs Randomize Prices on.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 1
+    # Maximum value is 10000
+    200: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-1-10000: 0 # random value between 1 and 10000
+
+  randomize_spell_mana_costs:
+    # 🪄 Randomize each spell's MP cost.
+    'false': 0
+    'true': 50
+
+  costly_best_spells:
+    # 🪄 Best spells cost more mana.
+    # 
+    # With Randomize Spell Mana Costs on, these roll their MP cost over the upper
+    # half of the mana-cost range instead of the whole range, so a lucky roll
+    # can't make them dirt cheap.
+    # 
+    # For Slot Magic, these are instead more likely to cost higher-level
+    # spell slots.
+    # 
+    #     'Cure', 'Dia', 'Protect', 'Blink', 'Blindna', 'Silence', 'NulShock',
+    #     'Invis', 'Cura', 'Diara', 'NulBlaze', 'Heal', 'Poisona', 'Fear',
+    #     'NulFrost', 'Vox', 'Curaga', 'Life', 'Diaga', 'Healara', 'Stona',
+    #     'Exit', 'Protera', 'Invisira', 'Curaja', 'Diaja', 'NulDeath', 'Healaga',
+    #     'Full-Life', 'Holy', 'NulAll', 'Dispel', 'Fire', 'Sleep', 'Focus',
+    #     'Thunder', 'Blizzard', 'Dark', 'Temper', 'Slow', 'Fira', 'Hold',
+    #     'Thundara', 'Focara', 'Sleepra', 'Haste', 'Confuse', 'Blizzara', 'Firaga',
+    #     'Scourge', 'Teleport', 'Slowra', 'Thundaga', 'Death', 'Quake', 'Stun',
+    #     'Blizzaga', 'Break', 'Saber', 'Blind', 'Flare', 'Stop', 'Warp',
+    #     'Kill'
+    ['Temper', 'Haste', 'Flare', 'Full-Life', 'Holy', 'Heal', 'Healara', 'Healaga']
+
+  spell_mana_cost_range_low:
+    # 🪄 Low bound (percent of vanilla) for randomized spell MP costs.
+    # So 50 here means a spell can randomly cost as little as half its vanilla
+    # MP cost.
+    # Needs Randomize Spell Mana Costs on.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 1
+    # Maximum value is 1000
+    50: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-1-1000: 0 # random value between 1 and 1000
+
+  spell_mana_cost_range_high:
+    # 🪄 High bound (percent of vanilla) for randomized spell MP costs.
+    # So 250 here means a spell can randomly cost as much as 2.5 times its
+    # vanilla MP cost (capped at 99 MP).
+    # Needs Randomize Spell Mana Costs on.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 1
+    # Maximum value is 1000
+    250: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-1-1000: 0 # random value between 1 and 1000
+
+  ########
+  # Loot #
+  ########
+  blood_magic:
+    # 🩸 Activating equipment (spell-on-use gear like Thor's Hammer, Judgment
+    # Staff, Healing Staff, Black Robe) costs the user 10% of their max HP.
+    # 
+    # Activatable gear stops being a free infinite spell.
+    # 
+    # (Equipment Runes Required gates whether you can activate at all. This
+    # governs what it costs once you can.)
+    'false': 50
+    'true': 0
+
+  equipment_runes_required:
+    # 🗝️ Set this above 0 to lock equipment activation (Healing Helm, Thor's
+    # Hammer, White/Black Robe, etc.) behind Equipment Runes. Collect this
+    # many to earn the Equipment Rune Key, which unlocks activation for good.
+    # 0 = off, so equipment activates normally.
+    # 
+    # Related: Blood Magic sets what activating costs. Shop Item Pool's
+    # "activatable" level decides whether shops stock this gear.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 50
+    0: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-50: 0 # random value between 0 and 50
+
+  equipment_runes_percentage:
+    # 🗝️ How many Equipment Rune pieces exist in the whole multiworld, as a
+    # percent of Equipment Runes Required (Equipment Runes Extra is then added on
+    # top). 100 = exactly Required, 150 = 50% extra runes. Extra runes found
+    # above Required don't do anything.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 100
+    # Maximum value is 1000
+    150: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-100-1000: 0 # random value between 100 and 1000
+
+  equipment_runes_extra:
+    # 🗝️ How many extra Equipment Rune pieces exist on top of
+    # Equipment Runes Percentage (a flat count, not a percent).
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 49
+    0: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-49: 0 # random value between 0 and 49
+
+  exotic_loot_amount:
+    # 💍 How much exotic or high-end equipment (Genji set, Sun Blade,
+    # Thor's Hammer, Elven Cloak, Black Robe, etc.) to shuffle into the
+    # multiworld, on a scale from 0 (none) to 10 (the entire exotic pool).
+    # 
+    # Mundane loot (Flame Sword, Diamond Armor, Aegis Shield, etc.) fills
+    # in the loot pool gaps.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 10
+    7: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-10: 0 # random value between 0 and 10
+
+  priceless_loot_amount:
+    # 💎 How much priceless equipment (Ultima, Excalibur, Masamune, Rune Axe,
+    # Judgment Staff, Ragnarok, Ribbon, etc.) to shuffle into the multiworld, on a
+    # scale from 0 (none) to 10 (the entire priceless pool). By default, there
+    # are restrictions on who can equip priceless gear (see Only Advanced Jobs
+    # Equip Priceless Gear).
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 10
+    3: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-10: 0 # random value between 0 and 10
+
+  only_advanced_jobs_equip_priceless_gear:
+    # 🛡️ Lock priceless gear (the same gear Priceless Loot Amount and
+    # Shop Item Pool call priceless) so only promoted jobs can equip it. A
+    # Warrior cannot wield the Barbarian Sword until they class-change into a Knight,
+    # and nobody wears a Ribbon pre-promotion.
+    # 
+    # Off: Priceless gear keeps whatever equip permissions it would otherwise
+    # have in vanilla (Ribbon = anyone, Barbarian Sword = Warrior, Knight, Red Mage,
+    # Red Wizard).
+    'false': 0
+    'true': 50
+
+  shuffle_who_equips_what:
+    # 🧤 Randomize which jobs can equip which weapons and armor.
+    # 
+    # This keeps the overall distribution intact: Ninja can still equip
+    # nearly everything, Monk still almost nothing.
+    'false': 50
+    'true': 0
+
+  auto_sell_unusable_items:
+    # 💰 When you get equipment that NOBODY in your party can ever equip 
+    # you are paid its shop sell value.
+    # 
+    # Never sold: consumables, anything you bought in a store, your starting
+    # inventory, and activatable gear.
+    'false': 0
+    'true': 50
+
+  starting_gil:
+    # 💰 Gil the party starts a new game with. 500 = vanilla.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 0
+    # Maximum value is 99999
+    500: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-0-99999: 0 # random value between 0 and 99999
+
+  ###########
+  # Enemies #
+  ###########
+  regional_ocean_encounters:
+    # 🌊 The sea has regions. The world's four ocean quadrants get their own
+    # encounter pools. The starting sea around Cornelia is left vanilla. Sail
+    # into the open ocean and the monsters get harder to match where you are.
+    # 
+    # Pairs well with Northern Docks.
+    'false': 0
+    'true': 50
+
+  northern_river_encounters:
+    # 🛶 Northern rivers get their own encounter pool.
+    # 
+    # With this on, the rivers of the northern continent draw from a separate,
+    # harder, themed pool of monsters.
+    'false': 50
+    'true': 0
+
+  dangerous_forests:
+    # 🌳 Watch out for forest tiles! Random encounters in forests are
+    # significantly harder than the surrounding overworld encounters.
+    # These encounters are carefully hand-picked per overworld zone.
+    'false': 50
+    'true': 0
+
+  harder_overworld_encounters:
+    # 👹 Overworld zones throw a harder, hand-picked pool of monsters
+    # at you.
+    'false': 50
+    'true': 0
+
+  harder_dungeon_encounters:
+    # 🐲 Dungeons are much tougher, on a deliberately rising curve. Most roll
+    # from the next dungeon's difficulty tier; several use hand-picked pools
+    # instead.
+    'false': 50
+    'true': 0
+
+  boss_minions:
+    # 👥 Bosses bring friends.
+    # 
+    # off       -- vanilla; bosses fight alone.
+    # light     -- +1 minor minion.
+    # difficult -- +3 minor minions.
+    # absurd    -- +3 minor minions and 1 elite minion.
+    'off': 0
+    light: 50
+    difficult: 0
+    absurd: 0
+
+  chaos_floor_encounters:
+    # 👑 Random encounters on Chaos' floor. In the vanilla game, there are
+    # no encounters on the last floor of the Chaos Shrine, just before Chaos.
+    # Turn this off to leave that floor quiet.
+    'false': 0
+    'true': 50
+
+  ##############
+  # Death Link #
+  ##############
+  death_link:
+    # 💀 When you die, everyone who enabled death link dies. Of course, the
+    # reverse is true too.
+    # 
+    # For FF1 PSP, "dying" means a total party wipe (every party member KO'd).
+    # Receiving a death kills Death Link Severity of your living party members
+    # (see that option).
+    'false': 50
+    'true': 0
+
+  death_link_severity:
+    # 💀 How many party members are killed when a death link is received.
+    #
+    # You can define additional values between the minimum and maximum values.
+    # Minimum value is 1
+    # Maximum value is 4
+    3: 50
+    random: 0
+    random-low: 0 # random value weighted towards lower values
+    random-high: 0 # random value weighted towards higher values
+    random-range-1-4: 0 # random value between 1 and 4
+
+  ###########################
+  # Item & Location Options #
+  ###########################
+  local_items:
+    # Forces these items to be in their native world.
+    []
+
+  non_local_items:
+    # Forces these items to be outside their native world.
+    []
+
+  start_inventory:
+    # Start with the specified amount of these items. Example: "Bomb: 1"
+    {}
+
+  start_inventory_from_pool:
+    # Start with the specified amount of these items and don't place them in the world. Example: "Bomb: 1"
+    # 
+    # The game decides what the replacement items will be.
+    {}
+
+  start_hints:
+    # Start with these item's locations prefilled into the ``!hint`` command.
+    []
+
+  start_location_hints:
+    # Start with these locations and their item prefilled into the ``!hint`` command.
+    []
+
+  exclude_locations:
+    # Prevent these locations from having an important item.
+    []
+
+  priority_locations:
+    # Prevent these locations from having an unimportant item.
+    []
+
+  item_links:
+    # Share part of your item pool with other players.
+    []
+
+  plando_items:
+    # Generic items plando.
+    []

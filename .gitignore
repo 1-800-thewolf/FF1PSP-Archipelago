@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+.ap/
+*.approj
+*.apworld
+.idea/
