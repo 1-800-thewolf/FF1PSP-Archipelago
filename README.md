@@ -84,7 +84,7 @@ Play with the classic NES/Pixel Remaster Vancian system with charges per spell l
 <img width="598" height="416" alt="Boost tab for on-the-fly settings in the client" src="https://github.com/user-attachments/assets/d6e82787-97c5-4634-8987-6555dd50de7a" />
 
 ### Shops Built for a Randomizer
-Randomization doesn't stop at shuffled stock and randomized prices. Purchase AP items from shops, buy yourself hints, and take full control of the quality of the goods for sale, ranging from mundane starting gear to exotic and priceless equipment that never appears in a vanilla store.
+Randomization doesn't stop at shuffled stock and randomized prices. Purchase AP items from shops, buy yourself hints, and take full control of the quality of the goods for sale, ranging from mundane to exotic to priceless.
 
 ### Configurable Goal
 Choose how many Fiends need to be defeated to break the Black Orb. An option to break the Lute into Lute Tablets. Then Chaos.
