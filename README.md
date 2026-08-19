@@ -1,6 +1,7 @@
 # Final Fantasy 1 (PSP — 20th Anniversary Edition) Archipelago Randomizer
 
-![randomizer thumbnail]([THUMBNAIL IMAGE URL HERE])
+<img width="624" height="351" alt="ff1 rando thumbnail" src="https://github.com/user-attachments/assets/c50a4567-90cc-4ab1-a07b-f80871c11300" />
+
 
 An [Archipelago](https://archipelago.gg) multiworld randomizer for Final Fantasy 1, played in the PPSSPP emulator.
 
@@ -9,7 +10,7 @@ Current version: **0.1.0**
 ---
 
 ## Video Tutorial:
-> [VIDEO TUTORIAL URL HERE]
+> https://youtu.be/06Fc8MNaMPo
 
 ---
 
@@ -135,7 +136,7 @@ C:\ProgramData\Archipelago\custom_worlds\
 
 Open the Archipelago Launcher and launch Archipelago Options Creator
 
-<img width="802" height="347" alt="image" src="https://github.com/user-attachments/assets/a7eb2a9d-9878-4e23-adcd-65597487b5a1" />
+<img width="602" height="260" alt="image" src="https://github.com/user-attachments/assets/a7eb2a9d-9878-4e23-adcd-65597487b5a1" />
 
 Select Final Fantasy 1 PSP on the left and put in your name
 
@@ -146,6 +147,7 @@ Edit the settings according to how you want to play. When you're satisfied, *Exp
 <img width="529" height="354" alt="image" src="https://github.com/user-attachments/assets/8d5ee641-154c-41a3-969d-de90b0bccc8b" />
 
 
+> Alternatively, you can generate the options yaml and edit it directly. See my [other video tutorial here on](https://youtu.be/Tjp0x-ZtOP0?si=rlQFVsDvVAf-CgSV&t=78) how to edit a yaml.
 
 **3. Generate the game**
 
@@ -194,9 +196,10 @@ The **first time** you connect, the client may ask for two paths: your PPSSPP ex
 **8. Play**
 
 The client bakes your seed into a patched ISO copy and launches it. Start a New Game from the title screen. The client must stay running and connected for the whole session.
+I recommend saving to the top save slot immediately. If you play multiple times and load the wrong save slot, it can send the wrong checks. Best practice is to always use the top save slot for the game you're currently playing.
 
-![client connected, game launching]([SCREENSHOT: client window + PPSSPP HERE])
-> *Caption: the client after a successful connect — bake progress on the left, item log on the right.*
+<img width="754" height="557" alt="image" src="https://github.com/user-attachments/assets/219bf3f6-4367-4295-afed-41286231abca" />
+
 
 ---
 
