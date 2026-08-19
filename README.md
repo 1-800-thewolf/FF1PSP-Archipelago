@@ -74,7 +74,7 @@ You might find an early Canoe and have to sneak into the Ice Cavern early to fin
 
 ### Requirements
 
-- **A legally-obtained ISO of _Final Fantasy_ for PSP (20th Anniversary Edition), US region, disc id `ULUS-10251`.** It is probably called `Final Fantasy Original - 20th Anniversary Edition (USA) (En,Ja) (FW3.03).iso`. No game files are distributed here and none will be provided; acquire the iso yourself, please.
+- **A legally-obtained ISO of _Final Fantasy_ for PSP (20th Anniversary Edition), US region, disc id `ULUS-10251`.** It is probably called `Final Fantasy Original - 20th Anniversary Edition (USA) (En,Ja) (FW3.03).iso`. No game files are distributed here and none will be provided; please acquire the iso yourself.
 - **[PPSSPP](https://www.ppsspp.org/download/)** — Windows 64-bit build. You don't need to configure anything: the client patches PPSSPP's ini for you (remote debugger port and memory access mode) on first launch.
 - **[Archipelago](https://github.com/ArchipelagoMW/Archipelago/releases) 0.6.0 or later**
 
@@ -150,7 +150,7 @@ Key options to consider:
 Run `/ff1psp_logs` in the client's command box. It writes a single zip with the client log, the bake manifest, and the state breadcrumbs the client left behind. Attach that zip to your bug report or drop it in the Discord — it's the fastest way to get an answer, and usually the only way to diagnose a bake or sync issue.
 
 - Bug reports: [Issues](https://github.com/1-800-thewolf/FF1PSP-Archipelago/issues)
-- Discussion and support: [FF1 PSP Archipelago Discord]([DISCORD INVITE HERE])
+- Discussion and support: [FF1 PSP Archipelago Discord](https://discord.com/channels/731205301247803413/1500609270620885032)
 - Not in the main AP server yet? [Archipelago Discord](https://discord.gg/archipelago)
 
 ---
