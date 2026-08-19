@@ -31,7 +31,8 @@ You might find an early Canoe and have to sneak into the Ice Cavern early to fin
 
 **Open Progression — Ship, Canoe, or Foot?**
 - Open world options let you venture out on foot immediately, allow more options for travel with Canoe, or open up most of the southern continent by foot.
-<img width="488" height="225" alt="image" src="https://github.com/user-attachments/assets/36f57a8d-24d2-4858-a897-9d53a885923a" />
+<img width="701" height="390" alt="extended open world" src="https://github.com/user-attachments/assets/9449d0a6-b9cc-40ce-8f1d-3d304830e1b5" />
+
  
 - Option to put Northern Docks in the world, providing the option to access more of the game before the Airship.
 - The Levistone can be broken into shards, so the airship becomes a collection goal instead of one chest.
