@@ -31,6 +31,8 @@ You might find an early Canoe and have to sneak into the Ice Cavern early to fin
 
 **Open Progression — Ship, Canoe, or Foot?**
 - Open world options let you venture out on foot immediately, allow more options for travel with Canoe, or open up most of the southern continent by foot.
+<img width="488" height="225" alt="image" src="https://github.com/user-attachments/assets/36f57a8d-24d2-4858-a897-9d53a885923a" />
+ 
 - Option to put Northern Docks in the world, providing the option to access more of the game before the Airship.
 - The Levistone can be broken into shards, so the airship becomes a collection goal instead of one chest.
 
@@ -40,13 +42,21 @@ You might find an early Canoe and have to sneak into the Ice Cavern early to fin
 - Blood Knight — lifesteal and armor penetration on physical attacks
 - Stealth Ninja — much better steals; damaging floors hurt less or heal you
 - Grand Master — gains attack and max HP as they take damage
+<img width="695" height="397" alt="Grand Master" src="https://github.com/user-attachments/assets/769e34f9-76ed-40f9-b1e4-2accb21a2793" />
+
+
 - Crimson Wizard — restores mana from damage taken and heals from mana spent
 - White Cleric — Dia spells hurt every boss, heal the caster, and grant temporary INT<img width="624" height="267" alt="image" src="https://github.com/user-attachments/assets/85f5ba2c-de2f-4f2e-a457-b1e682477146" />
 
 
 - Necrocaster — instant-death spells become reliable, and spells deal damage instead of missing
 
+<img width="692" height="398" alt="cleric and necro example focused" src="https://github.com/user-attachments/assets/93a019cf-e1c1-487a-a15b-26d8c5e58454" />
+
+
+
 **Optional Slot Magic.** Throw out the MP pool and play the NES/Pixel Remaster vancian system with charges per spell level.
+<img width="427" height="101" alt="image" src="https://github.com/user-attachments/assets/8dde0e2b-cb06-48d5-a064-8751ac7261d1" />
 
 **Take on the challenge you've always wanted**
 - Monster Power and Boss Difficulty turn up the heat, all the way to 500% of the base game's difficulty.
@@ -55,6 +65,9 @@ You might find an early Canoe and have to sneak into the Ice Cavern early to fin
 - New Regional Ocean Encounters and Northern River Encounters bring hand-crafted aquatic fights to every corner of the overworld.<img width="488" height="207" alt="image" src="https://github.com/user-attachments/assets/05bcaf37-993c-4ccd-9a76-ebac39687745" />
 
 - Boss Minions, ranging from a nuisance to absurd extra difficulty.
+
+  <img width="488" height="274" alt="image" src="https://github.com/user-attachments/assets/07fe890e-959e-4431-a148-43b590945bff" />
+
 - Change settings on the fly, such as Encounter Rate, XP Boost, and Gil Boost.<img width="598" height="416" alt="image" src="https://github.com/user-attachments/assets/d6e82787-97c5-4634-8987-6555dd50de7a" />
 
 
@@ -62,14 +75,21 @@ You might find an early Canoe and have to sneak into the Ice Cavern early to fin
 
 **Configurable goal.** Choose how many Fiends need to be defeated to break the Black Orb. An option to break the Lute into Lute Tablets. Then Chaos.
 
-**Quality of life.** Auto Dash, Super Dash, message speed, cursor memory, spell chance colors, and a full, custom tracker built right into the AP client.
-
+**Quality of life.** 
+-  Super Dash
+-  Spell "MISS!!" get colors to show how close you were to it hitting
+  
 <img width="468" height="267" alt="image" src="https://github.com/user-attachments/assets/b4cd320e-96de-4b1d-a8a1-38b0e035cb34" />
+
+-  Full, custom tracker built right into the AP client.
 
 <img width="600" height="302" alt="image" src="https://github.com/user-attachments/assets/f70a5061-66ab-4a62-8a27-a2ceb8273257" />
 
 
+
 **DeathLink**, with a severity setting so you decide how much a friend dying should cost you.
+
+<img width="650" height="370" alt="image" src="https://github.com/user-attachments/assets/a1725854-0b8f-493d-b321-c0b6e648a267" />
 
 ---
 
