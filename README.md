@@ -41,7 +41,9 @@ You might find an early Canoe and have to sneak into the Ice Cavern early to fin
 - Stealth Ninja — much better steals; damaging floors hurt less or heal you
 - Grand Master — gains attack and max HP as they take damage
 - Crimson Wizard — restores mana from damage taken and heals from mana spent
-- White Cleric — Dia spells hurt every boss, heal the caster, and grant temporary INT
+- White Cleric — Dia spells hurt every boss, heal the caster, and grant temporary INT<img width="624" height="267" alt="image" src="https://github.com/user-attachments/assets/85f5ba2c-de2f-4f2e-a457-b1e682477146" />
+
+
 - Necrocaster — instant-death spells become reliable, and spells deal damage instead of missing
 
 **Optional Slot Magic.** Throw out the MP pool and play the NES/Pixel Remaster vancian system with charges per spell level.
@@ -50,15 +52,22 @@ You might find an early Canoe and have to sneak into the Ice Cavern early to fin
 - Monster Power and Boss Difficulty turn up the heat, all the way to 500% of the base game's difficulty.
 - Harder Overworld Encounters and Harder Dungeon Encounters pull tougher hand-authored pools per zone and per dungeon.
 - Dangerous Forests places scary, hand-picked encounters for those unfortunate enough to find them.
-- New Regional Ocean Encounters and Northern River Encounters bring hand-crafted aquatic fights to every corner of the overworld.
+- New Regional Ocean Encounters and Northern River Encounters bring hand-crafted aquatic fights to every corner of the overworld.<img width="488" height="207" alt="image" src="https://github.com/user-attachments/assets/05bcaf37-993c-4ccd-9a76-ebac39687745" />
+
 - Boss Minions, ranging from a nuisance to absurd extra difficulty.
-- Change settings on the fly, such as Encounter Rate, XP Boost, and Gil Boost.
+- Change settings on the fly, such as Encounter Rate, XP Boost, and Gil Boost.<img width="598" height="416" alt="image" src="https://github.com/user-attachments/assets/d6e82787-97c5-4634-8987-6555dd50de7a" />
+
 
 **Shops built for a randomizer.** Randomization doesn't stop at shuffled stock and randomized prices. Purchase AP items from shops, buy yourself hints, and take full control of the quality of the goods for sale, ranging from mundane starting gear to exotic and priceless equipment that never appears in a vanilla store.
 
 **Configurable goal.** Choose how many Fiends need to be defeated to break the Black Orb. An option to break the Lute into Lute Tablets. Then Chaos.
 
 **Quality of life.** Auto Dash, Super Dash, message speed, cursor memory, spell chance colors, and a full, custom tracker built right into the AP client.
+
+<img width="468" height="267" alt="image" src="https://github.com/user-attachments/assets/b4cd320e-96de-4b1d-a8a1-38b0e035cb34" />
+
+<img width="600" height="302" alt="image" src="https://github.com/user-attachments/assets/f70a5061-66ab-4a62-8a27-a2ceb8273257" />
+
 
 **DeathLink**, with a severity setting so you decide how much a friend dying should cost you.
 
