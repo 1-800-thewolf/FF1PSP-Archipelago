@@ -223,7 +223,7 @@ Key options to consider:
 
 ---
 
-## Something Broke
+## Something Broke?
 
 Run `/ff1psp_logs` in the client's command box. It writes a single zip with the client log, the bake manifest, and the state breadcrumbs the client left behind. Attach that zip to your bug report or drop it in the Discord — it's the fastest way to get an answer, and usually the only way to diagnose a bake or sync issue.
 
