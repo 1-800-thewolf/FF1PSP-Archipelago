@@ -184,38 +184,162 @@ def _iso_is_ff1(path: str) -> bool:
         return False
 
 
-def _iso_candidates(ppsspp_exe: str):
-    roots = set()
+def _iso_install_roots(ppsspp_exe: str):
+    """Every PPSSPP install directory worth scanning whole. The exe dir is the
+    real one when the exe was found; the standard install paths are added blind
+    so a player who dropped the ISO into the Program Files PPSSPP folder (or a
+    subfolder they made inside it) is still found when the exe was not."""
+    roots = []
+    if ppsspp_exe:
+        roots.append(os.path.dirname(ppsspp_exe))
+    for base in (os.environ.get("ProgramFiles", ""),
+                 os.environ.get("ProgramFiles(x86)", ""),
+                 os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs"),
+                 r"C:\Program Files", r"C:\Program Files (x86)"):
+        if base:
+            roots.append(os.path.join(base, "PPSSPP"))
+    for steam in (r"C:\Program Files (x86)\Steam", r"C:\Program Files\Steam"):
+        roots.append(os.path.join(steam, "steamapps", "common", "PPSSPP"))
+    roots.append(os.path.join(os.path.expanduser("~"), "Documents", "PPSSPP"))
+    return roots
+
+
+def _prune_nested(roots):
+    """Drop any root that lives under another root -- the scan is recursive, so
+    a nested root only walks the same tree twice. Order is preserved."""
+    norm = [os.path.normcase(os.path.normpath(r)) for r in roots]
+    keep, kept = [], set()
+    for r, n in zip(roots, norm):
+        if any(n != m and n.startswith(m + os.sep) for m in norm):
+            continue
+        if n not in kept:
+            kept.add(n)
+            keep.append(r)
+    return keep
+
+
+# Documents can be enormous (176k files / 73k dirs on the dev box, 65 s to walk
+# whole), so the wide roots are depth-capped and every scan runs under a wall
+# clock budget. Depth 4 reaches Documents/games/psp/randomizer/x.iso -- the
+# nesting players actually use -- and costs 0.3 s to depth 3, ~8 s cold to 4,
+# which only ever gets paid when nothing shallower verified first.
+ISO_EXTS = (".iso", ".cso")
+ISO_MIN_BYTES = 8 << 20          # FF1 UMD is ~570 MB; nothing real is smaller
+ISO_SCAN_SECONDS = 20.0          # whole search, all roots
+ISO_SKIP_DIRS = {"node_modules", "__pycache__", "site-packages", "appdata",
+                 "$recycle.bin", "system volume information", "windows",
+                 "onedrivetemp", "ppsspp_state", "venv", ".venv"}
+
+
+def _iter_isos(root: str, max_depth: int, deadline: float):
+    """Yield ISO/CSO paths under root, shallowest directories first, pruning
+    junk dirs and stopping at max_depth or when the deadline passes."""
+    if not os.path.isdir(root):
+        return
+    level = [root]
+    depth = 0
+    while level and depth <= max_depth:
+        nxt = []
+        for d in level:
+            if time.time() > deadline:
+                return
+            try:
+                with os.scandir(d) as it:
+                    ents = list(it)
+            except OSError:
+                continue
+            for e in ents:
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        if (e.name.lower() not in ISO_SKIP_DIRS
+                                and not e.name.startswith(".")):
+                            nxt.append(e.path)
+                    elif (e.name.lower().endswith(ISO_EXTS)
+                          and e.stat().st_size >= ISO_MIN_BYTES):
+                        yield e.path      # .cso is also a D3D shader ext, so
+                                          # the size gate keeps a 40 KB shader
+                                          # blob out of the 1 MB header read
+                except OSError:
+                    continue
+        level = nxt
+        depth += 1
+
+
+def _iso_roots(ppsspp_exe: str):
+    """(root, max_depth) pairs in search order. Install dirs are walked deep --
+    they are small; the user folders are capped because they are not."""
+    home = os.path.expanduser("~")
+    roots = [(r, 8) for r in _iso_install_roots(ppsspp_exe)]
     if ppsspp_exe:
         exedir = os.path.dirname(ppsspp_exe)
-        roots.add(os.path.join(exedir, "PSP", "GAME"))
-        roots.add(os.path.join(exedir, "memstick", "PSP", "GAME"))
-    docs = os.path.join(os.path.expanduser("~"), "Documents", "PPSSPP",
-                        "PSP", "GAME")
-    roots.add(docs)
-    roots.add(os.path.join(os.path.expanduser("~"), "Downloads"))
+        roots.append((os.path.join(exedir, "memstick", "PSP", "GAME"), 8))
+    for wide in (os.path.join(home, "Downloads"),
+                 os.path.join(home, "Documents"),
+                 os.path.join(home, "OneDrive", "Documents"),
+                 os.path.join(home, "Desktop")):
+        roots.append((wide, 4))
+    # a root nested inside another root would walk the same tree twice, but the
+    # inner one may carry a deeper cap, so keep whichever reaches further.
+    best = {}
+    order = []
+    for r, d in roots:
+        k = os.path.normcase(os.path.normpath(r))
+        if k in best:
+            best[k] = (r, max(best[k][1], d))
+            continue
+        best[k] = (r, d)
+        order.append(k)
     out = []
-    for r in roots:
-        for ext in ("*.iso", "*.cso", "*.ISO", "*.CSO"):
-            out += glob.glob(os.path.join(r, "**", ext), recursive=True)
+    for k in order:
+        r, d = best[k]
+        parent = next((m for m in order
+                       if m != k and k.startswith(m + os.sep)), None)
+        if parent and best[parent][1] >= d + k.count(os.sep) - parent.count(os.sep):
+            continue
+        out.append((r, d))
     return out
+
+
+def _iso_candidates(ppsspp_exe: str, deadline: float = 0.0):
+    """Every ISO/CSO worth testing, shallowest first within each root."""
+    deadline = deadline or (time.time() + ISO_SCAN_SECONDS)
+    seen, out = set(), []
+    for root, depth in _iso_roots(ppsspp_exe):
+        for c in _iter_isos(root, depth, deadline):
+            k = os.path.normcase(os.path.normpath(c))
+            if k not in seen:
+                seen.add(k)
+                out.append(c)
+    return out
+
+
+def _looks_like_ff1(path: str) -> bool:
+    n = os.path.basename(path).lower()
+    return "final fantasy" in n and not any(
+        x in n for x in (" ii", " iii", " iv", "complete", "crystal",
+                         "dissidia", "tactics"))
 
 
 def find_iso(ppsspp_exe: str = "", saved: str = "") -> str:
     if saved and os.path.isfile(saved):
         return saved
-    cands = _iso_candidates(ppsspp_exe)
-    # verified FF1 first; fall back to filename heuristic if none verify
-    for c in cands:
-        if _iso_is_ff1(c):
-            return c
-    for c in cands:
-        n = os.path.basename(c).lower()
-        if "final fantasy" in n and not any(x in n for x in
-                                            (" ii", " iii", " iv", "complete",
-                                             "crystal", "dissidia", "tactics")):
-            return c
-    return ""
+    deadline = time.time() + ISO_SCAN_SECONDS
+    # Verify as we walk and return on the first real FF1 image -- the usual
+    # install (ISO in the PPSSPP folder or Downloads) never pays for the deep
+    # Documents sweep. Name-only matches are remembered as a fallback.
+    fallback = ""
+    seen = set()
+    for root, depth in _iso_roots(ppsspp_exe):
+        for c in _iter_isos(root, depth, deadline):
+            k = os.path.normcase(os.path.normpath(c))
+            if k in seen:          # overlapping roots must not re-read 1 MB
+                continue
+            seen.add(k)
+            if _iso_is_ff1(c):
+                return c
+            if not fallback and _looks_like_ff1(c):
+                fallback = c
+    return fallback
 
 
 # ---------------------------------------------------------------- ini patching ---

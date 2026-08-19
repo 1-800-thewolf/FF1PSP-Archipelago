@@ -15,9 +15,36 @@ only triggered by ~PSP magic). Cave-bearing (larger) builds go through
 build_iso -> _relocate_eboot (the grow-by-append repacker below), which moves
 a grown ELF to a fresh extent and rewrites the directory record + PVD.
 """
-import struct, os, shutil
+import struct, os, shutil, glob
 
-ISO_DEFAULT = r"C:\ff1 psp ap main\PPSSPP\PSP\GAME\Final Fantasy Original - 20th Anniversary Edition (USA) (En,Ja) (FW3.03).iso"
+# Where the FF1 ISO sits on a DEVELOPMENT machine. This is a convenience for the
+# offline tests and the re_only/ scripts, which call load_boot_elf() with no
+# argument; the shipped client never depends on it (it always passes the explicit
+# path the player picked, saved in launcher.json).
+#
+# Two locations are searched because the dev ISO has lived in both, and the
+# filename is not stable between dumps ("Final Fantasy Original - 20th ..." vs
+# "Final Fantasy - 20th ..."), so match on the part they share. ffrpsp_tables.ISO
+# resolves the same way -- keep the two in step.
+_ISO_DIRS = (
+    r"C:\ff1 psp ap main\PPSSPP\PSP\GAME",
+    os.path.join(os.path.expanduser("~"), "Documents", "Games"),
+)
+_ISO_GLOB = "Final Fantasy*20th Anniversary*.iso"
+
+
+def _find_iso():
+    for d in _ISO_DIRS:
+        hits = sorted(glob.glob(os.path.join(d, _ISO_GLOB)))
+        if hits:
+            return hits[0]
+    # Nothing on disk. Hand back the historical path so "file not found" messages
+    # still name a concrete location instead of a glob pattern.
+    return os.path.join(_ISO_DIRS[0], "Final Fantasy Original - 20th "
+                        "Anniversary Edition (USA) (En,Ja) (FW3.03).iso")
+
+
+ISO_DEFAULT = _find_iso()
 SECTOR = 2048
 VADDR = 0x8804000
 SEG_FILE_OFF = 0x54          # PH0 p_offset within the ELF
