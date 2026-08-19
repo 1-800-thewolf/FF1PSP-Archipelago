@@ -1,9 +1,9 @@
 {
     "game": "Final Fantasy 1 PSP",
     "compatible_version": 6,
-    "version": 11,
+    "version": 12,
     "world_version": "0.1.0",
-    "minimum_ap_version": "0.6.0",
+    "minimum_ap_version": "0.6.7",
     "authors": [
         "1-800-thewolf"
     ]

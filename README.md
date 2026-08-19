@@ -122,7 +122,7 @@ Your original ISO is never modified. The client patches a cached copy per seed.
 
 - **A legally-obtained ISO of _Final Fantasy_ for PSP (20th Anniversary Edition), US region, disc id `ULUS-10251`.** It is probably called `Final Fantasy Original - 20th Anniversary Edition (USA) (En,Ja) (FW3.03).iso`. No game files are distributed here and none will be provided; please acquire the iso yourself.
 - **[PPSSPP](https://www.ppsspp.org/download/)** — Windows 64-bit build. You don't need to configure anything: the client patches PPSSPP's ini for you (remote debugger port and memory access mode) on first launch.
-- **[Archipelago](https://github.com/ArchipelagoMW/Archipelago/releases) 0.6.0 or later**
+- **[Archipelago](https://github.com/ArchipelagoMW/Archipelago/releases) 0.6.7 or later**
 
 ### Steps
 

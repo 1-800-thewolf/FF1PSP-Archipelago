@@ -432,6 +432,147 @@ for _cat, _gid in LOOT_GEAR:
     )
 
 
+# ---- name groups (datapackage) -------------------------------------------
+# What they buy the player: `!hint Weapons`, `!hint Marsh Cave`, and yaml
+# exclude_locations / priority_locations / plando by group name instead of by
+# individual location name.
+#
+# DERIVED, never hand-listed: item groups come off the id space (ids.is_* /
+# item_cat_gid) and location groups off the id space + the location naming
+# scheme, so anything registered above joins its group automatically. The one
+# hand-maintained table is _AREA_PREFIXES -- a location whose name matches no
+# prefix silently lands in no area group, which test_name_groups.py fails on.
+#
+# Group membership IS part of the datapackage (AutoWorld.get_data_package_data
+# folds item_name_groups / location_name_groups into the checksum), so editing
+# this block means bumping archipelago.json "version".
+
+def _group_add(groups, key, name):
+    groups.setdefault(key, set()).add(name)
+
+
+_SPELL_TOME_SET = frozenset(SPELL_TOME_ITEM_NAMES)
+
+
+def _build_item_name_groups():
+    g = {}
+    for name, iid in ITEM_NAME_TO_ID.items():
+        # Event/gate tokens and the Victory token are synthetic: they never enter
+        # anyone's pool, so a hint or a plando naming them would be a dead end.
+        if ID.is_event(iid) or ID.is_victory(iid):
+            continue
+        if ID.is_gil(iid):
+            _group_add(g, "Gil", name)
+        elif ID.is_exp(iid):
+            _group_add(g, "Experience Bags", name)
+        elif ID.is_job_item(iid):
+            _group_add(g, "Job Scrolls", name)
+        elif ID.is_tablet(iid) or ID.is_shard(iid) or ID.is_rune(iid):
+            # Lute Tablet / Levistone Shard / Equipment Rune: N copies that
+            # assemble one thing at a yaml-set threshold.
+            _group_add(g, "Assembly Pieces", name)
+            if ID.is_shard(iid):
+                _group_add(g, "Vehicles", name)
+        elif ID.is_vehicle(iid):
+            # Ship: granted by a story-flag write rather than an inventory record,
+            # but the player reasons about it exactly like a key item.
+            _group_add(g, "Key Items", name)
+            _group_add(g, "Vehicles", name)
+        elif ID.is_item(iid):
+            cat, _gid = ID.item_cat_gid(iid)
+            if cat == 0:
+                _group_add(g, "Key Items", name)
+                if name in (LOGIC.CANOE, LOGIC.LEVISTONE):
+                    _group_add(g, "Vehicles", name)
+            elif cat == 1:
+                if name not in _SPELL_TOME_SET:
+                    _group_add(g, "Consumables", name)
+            elif cat == 2:
+                _group_add(g, "Weapons", name)
+                _group_add(g, "Equipment", name)
+            elif cat == 3:
+                _group_add(g, "Armor", name)
+                _group_add(g, "Equipment", name)
+    # Spell tomes carry the school split the magic shops use: spell_data indexes
+    # 0..31 are white, 32..63 black (SPELL_TOME_ITEM_NAMES is in that order).
+    for _i, _tn in enumerate(SPELL_TOME_ITEM_NAMES):
+        _group_add(g, "Spell Tomes", _tn)
+        _group_add(g, "White Magic Tomes" if _i < 32 else "Black Magic Tomes", _tn)
+    return {k: frozenset(v) for k, v in g.items()}
+
+
+# Location-name prefix -> area group. Longest-first at lookup: "Castle Cornelia"
+# must beat "Cornelia", and the per-floor/per-wing names ("Mount Gulg B4",
+# "Marsh Cave B3", "Sunken Shrine Depths") deliberately collapse into the one
+# dungeon a player would name in a hint. Ice Cave == Cavern of Ice (the Levistone
+# pair uses the short name). Every registered location must match one prefix.
+_AREA_PREFIXES = (
+    ("Castle Cornelia", "Castle Cornelia"),
+    ("Cavern of Earth", "Cavern of Earth"),
+    ("Cavern of Ice", "Cavern of Ice"),
+    ("Ice Cave", "Cavern of Ice"),
+    ("Chaos Shrine", "Chaos Shrine"),
+    ("Citadel of Trials", "Citadel of Trials"),
+    ("Cornelia", "Cornelia"),
+    ("Crescent Lake", "Crescent Lake"),
+    ("Dragon Caves", "Dragon Caves"),
+    ("Earthgift Shrine", "Earthgift Shrine"),
+    ("Elfheim", "Elfheim"),
+    ("Elven Castle", "Elven Castle"),
+    ("Flying Fortress", "Flying Fortress"),
+    ("Gaia", "Gaia"),
+    ("Giant's Cavern", "Giant's Cavern"),
+    ("Hellfire Chasm", "Hellfire Chasm"),
+    ("Lefein", "Lefein"),
+    ("Lifespring Grotto", "Lifespring Grotto"),
+    ("Marsh Cave", "Marsh Cave"),
+    ("Matoya's Cave", "Matoya's Cave"),
+    ("Melmond", "Melmond"),
+    ("Mirage Tower", "Mirage Tower"),
+    ("Mount Duergar", "Mount Duergar"),
+    ("Mount Gulg", "Mount Gulg"),
+    ("Onrac", "Onrac"),
+    ("Pravoka", "Pravoka"),
+    ("Sage's Cave", "Sage's Cave"),
+    ("Sunken Shrine", "Sunken Shrine"),
+    ("Waterfall Cavern", "Waterfall Cavern"),
+    ("Western Keep", "Western Keep"),
+    ("Whisperwind Cove", "Whisperwind Cove"),
+)
+_AREA_PREFIXES_BY_LEN = tuple(sorted(_AREA_PREFIXES, key=lambda p: -len(p[0])))
+
+# The four Soul of Chaos dungeons, by the display name their locations carry.
+_BONUS_DUNGEON_NAMES = tuple(_d[1] for _d in LOGIC.BONUS_DUNGEONS)
+
+
+def _build_location_name_groups():
+    g = {}
+    for name, lid in LOCATION_NAME_TO_ID.items():
+        # Kind, straight off the id space -- the same split the client uses to
+        # decide how a check is detected (purchase / dynamic counter / story
+        # flag / static chest bit).
+        if ID.is_shop_loc(lid):
+            _group_add(g, "Shops", name)
+        elif ID.is_dyn_chest(lid):
+            _group_add(g, "Chests", name)
+            _group_add(g, "Bonus Dungeon Chests", name)
+        elif ID.BASE + ID.NPC_OFF <= lid < ID.BASE + ID.NPC_OFF + 0x100:
+            _group_add(g, "NPCs", name)
+        else:
+            _group_add(g, "Chests", name)
+        for prefix, area in _AREA_PREFIXES_BY_LEN:
+            if name.startswith(prefix):
+                _group_add(g, area, name)
+                break
+        if name.startswith(_BONUS_DUNGEON_NAMES):
+            _group_add(g, "Bonus Dungeons", name)
+    return {k: frozenset(v) for k, v in g.items()}
+
+
+ITEM_NAME_GROUPS = _build_item_name_groups()
+LOCATION_NAME_GROUPS = _build_location_name_groups()
+
+
 class FF1PSPItem(Item):
     game = GAME
 
@@ -463,6 +604,8 @@ class FF1PSPWorld(World):
 
     item_name_to_id = ITEM_NAME_TO_ID
     location_name_to_id = LOCATION_NAME_TO_ID
+    item_name_groups = ITEM_NAME_GROUPS
+    location_name_groups = LOCATION_NAME_GROUPS
 
     def create_item(self, name: str) -> FF1PSPItem:
         return FF1PSPItem(name, ITEM_NAME_TO_CLASS[name], ITEM_NAME_TO_ID[name], self.player)
