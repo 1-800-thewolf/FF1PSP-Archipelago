@@ -313,7 +313,8 @@ def _donor_pool(recs, reserved):
               n.endswith("J1.PCK") or n.endswith("J2.PCK")))]
 
 
-def reserved_names(extern_active: bool, caravan_active: bool) -> set:
+def reserved_names(extern_active: bool, caravan_active: bool,
+                   extra=()) -> set:
     """dpk records another baker owns this run, so ms2 must not reuse their
     space OR their index slot. One region, one owner.
 
@@ -322,10 +323,14 @@ def reserved_names(extern_active: bool, caravan_active: bool) -> set:
       * bake_caravan_offer relocates the grown FM_SHOPUS bundle into
         FM_SHOPJ1 -- also a J1-named donor, and it runs AFTER ms2_bake in
         patch_iso, so an MS2 pack parked there gets overwritten silently.
+      * `extra` carries donors a baker that ran BEFORE us already consumed --
+        job_sprite_bake relocates the grown JOB_*.PCK sprite packs and reports
+        exactly which donor extents it took. Reserving after the fact is just
+        as load-bearing as reserving ahead: those bytes are live now.
 
     Both bakers only relocate when their content actually grew, but reserving
     unconditionally while the feature is on is the cheap, safe direction."""
-    out = set()
+    out = set(extra)
     if extern_active:
         out |= {us_j[1][:16].split("\0")[0] for us_j in _EXTERN_RESERVED}
     if caravan_active:
@@ -335,7 +340,7 @@ def reserved_names(extern_active: bool, caravan_active: bool) -> set:
 
 # ------------------------------------------------------------------ the bake --
 def bake_minion_packs(iso_path: str, plan, extern_active: bool = True,
-                      caravan_active: bool = False) -> None:
+                      caravan_active: bool = False, extra_reserved=()) -> None:
     """For each (fid, groups) in the plan, ensure MS2_<fid>.PCK contains the
     GIM pair of every add monster: rebuild + relocate the pack if it grew, or
     CREATE it via donor-record steal when the fid ships without one (DLC
@@ -367,7 +372,8 @@ def bake_minion_packs(iso_path: str, plan, extern_active: bool = True,
         # SHOP_MSG/FM_SHOPUS entries, so the add GIM lookup found nothing ->
         # null monster-kind object -> "CPU Jump to 00000000", RA 0x088fba28,
         # on entering the fight.
-        _reserved = reserved_names(extern_active, caravan_active)
+        _reserved = reserved_names(extern_active, caravan_active,
+                                   extra_reserved)
         alloc = _Allocator(_donor_pool(recs, _reserved),
                            all_offsets=(r["off"] for r in recs.values()))
 

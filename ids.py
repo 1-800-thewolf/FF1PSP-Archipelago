@@ -96,6 +96,34 @@ def dyn_chest_dungeon_ord(lid):
     code = lid - BASE - DYNCHEST_OFF
     return code // DYNCHEST_STRIDE, code % DYNCHEST_STRIDE   # (dungeon, ordinal)
 
+def dyn_chest_pending(dungeon, cap, checked):
+    """(next ordinal to send, ordinals still unchecked) for one bonus dungeon.
+
+    `checked` is any container of location ids -- the client passes its
+    sent_locations. The next ordinal is the LOWEST unchecked one under the cap,
+    NOT the count of checked ones: those agree only while the checked set is a
+    contiguous prefix, and it is not the client's alone to fill. sent_locations
+    also absorbs the server's `checked_locations`, so a !collect by a finished
+    player marks every location holding one of THEIR items as checked --
+    dynamic-chest ordinals this player never opened included. Counting then
+    lands on an ordinal that is already checked, _bonus_dyn_loop's
+    `lid not in sent_locations` guard eats the mailbox ring entry without
+    sending anything, and the counter can never move again: from that chest on
+    the dungeon shows the same box name forever and sends no check while the
+    on-disc cave keeps stripping the vanilla grant (live 2026-08-30, Yine: a
+    collect punched Hellfire ordinal 7 and froze it at chest 15, and nine
+    collected Whisperwind ordinals froze that one at chest 10).
+
+    The cap is clamped to DYNCHEST_STRIDE: ordinals past the stride alias into
+    the next dungeon's id block (see the ceiling note in options.py), so they
+    are never offered and the count reaching 0 lets the cave fall back to
+    vanilla loot instead of stripping grants nothing replaces.
+    """
+    cap = min(cap, DYNCHEST_STRIDE)
+    unsent = [o for o in range(cap)
+              if dyn_chest_loc_id(dungeon, o) not in checked]
+    return (unsent[0] if unsent else cap), len(unsent)
+
 # --- EXP-bag items: synthetic filler that grants a FIXED EXP amount to ALL four
 # party members on receipt. There is NO native game item; the client applies it by
 # adding to each member's P_EXP save field (grant_exp). The EXP amount is encoded in
@@ -134,6 +162,40 @@ def is_rune(iid):                return iid == BASE + RUNE_OFF
 SHARD_OFF = 0x000D0000
 def shard_item_id():             return BASE + SHARD_OFF
 def is_shard(iid):               return iid == BASE + SHARD_OFF
+
+# --- trap items: synthetic filler-replacing items (trap_percentage yaml) whose
+# whole effect is client-side mischief (kill/status/sap the party, boost the next
+# battle's monsters). No native game item; the
+# client enqueues the trap at grant time (it rides the received-counter pipeline,
+# so a death/reload rollback re-fires it exactly like a re-granted EXP bag) and
+# fires it at a random upcoming battle. kind = small stable ordinal, one AP item
+# id per kind. Ordinals are FROZEN and retired ones (5, Monster Magnet) leave a
+# permanent gap -- see TRAP_ITEMS / RETIRED_TRAP_KINDS in ff1psp.__init__. ---
+TRAP_OFF = 0x000E0000
+def trap_item_id(kind):          return BASE + TRAP_OFF + kind
+def is_trap(iid):                return BASE + TRAP_OFF <= iid < BASE + TRAP_OFF + 0x100
+def trap_kind(iid):              return iid - BASE - TRAP_OFF
+
+# --- party-member items: synthetic progression items (starting_party_members
+# yaml) that restore a MISSING starting-party member. Encoded by BASE job id
+# 0..5 like the job scrolls (its own id space so the client can tell them
+# apart); a party with duplicate jobs simply has duplicate copies of one id.
+# NOT a game item -- the client treats them counter-only and matches received
+# copies against the slot_data "missing_party" plan (bottom rows first) to
+# revive the member's save record. See the reduced-party memory. ---
+PARTY_OFF = 0x000F0000
+def party_member_item_id(job):   return BASE + PARTY_OFF + job
+def is_party_member(iid):        return BASE + PARTY_OFF <= iid < BASE + PARTY_OFF + 0x100
+def party_member_job(iid):       return iid - BASE - PARTY_OFF
+
+# --- bestiary (bestiarysanity) locations: one per sampled monster id. The key
+# is the MONSTER id (0x00-0xCA, the kill-count index at save+0x1198), NOT the
+# bestiary display order. Chronodia (0xC3-0xCA) has no formation records and is
+# never registered. ---
+BESTIARY_OFF = 0x00100000
+def bestiary_loc_id(mon):        return BASE + BESTIARY_OFF + mon
+def is_bestiary_loc(lid):        return BASE + BESTIARY_OFF <= lid < BASE + BESTIARY_OFF + 0x100
+def bestiary_loc_mon(lid):       return lid - BASE - BESTIARY_OFF
 
 # --- event (gate) items: synthetic progression tokens (Bridge, Canal, ...) the
 # world precollects / places at event locations. They are NOT game items; the

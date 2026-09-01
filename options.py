@@ -121,8 +121,26 @@ class MonsterPowerPercentage(Range):
     default = 100
 
 
-
 # --- Random starting party -------------------------------------------------
+class StartingPartyMembers(Range):
+    """👥 How many of the 4 party members you begin the game with.
+    The rest go MISSING, fully removed from the party, and enter the multiworld
+    item pool as items named for their job (e.g. "Warrior"). A joining member
+    rapidly gains levels at their first battle victory. Logic knows your party
+    is short, so a 1-member start does not get asked to do 4-member things.
+
+    A missing member's Starting Job cannot be 'choose_at_game_start'
+    (generation fails)."""
+    internal_name = "starting_party_members"
+    display_name = "Starting Party Members"
+    range_start = 1
+    range_end = 4
+    default = 4
+    # UNHIDDEN 2026-08-29: all three phases live-verified (gen, client
+    # soft-dead/join loops, and the full Phase-3 hiding -- menus, battle
+    # sprites, shops, item targeting, save/load file previews v289).
+
+
 # One option per party member (top-to-bottom menu order). Each is a weighted
 # Choice over the 6 jobs (players put weights in their yaml the normal AP way);
 # `choose_at_game_start` keeps whatever the game's own character-creation screen
@@ -194,7 +212,7 @@ class WhiteAndBlackMagics(DefaultOnToggle):
     White: White Mage, Warrior, Monk (only if dabble in magic is on)
     Black: Black Mage, Thief
     Both: Red Mage
-    
+
     Jobs you picked yourself aren't changed."""
     internal_name = "white_and_black_magics"
     display_name = "White And Black Magics"
@@ -501,6 +519,30 @@ class NorthernRiverEncounters(Toggle):
     display_name = "Northern River Encounters"
 
 
+class BestiarysanityPercent(Range):
+    """📖 Monsters hold AP items. This is the percentage of the seed's
+    huntable monsters that hold a check.
+
+    50 makes half of viable monsters hold checks; 100 puts every
+    huntable monster in this seed into the pool.
+    Use the AP client's Bestiary tab for tracking.
+    """
+    internal_name = "bestiarysanity_percent"
+    display_name = "Bestiarysanity Percent"
+    range_start = 0
+    range_end = 100
+    default = 0
+
+
+class BestiaryProgression(DefaultOnToggle):
+    """📖 Allow progression items on bestiary checks (bestiarysanity only).
+    If on, any item can hide behind a monster hunt, so a required item
+    may sit on a bestiary check.
+    """
+    internal_name = "bestiary_progression"
+    display_name = "Bestiary Progression"
+
+
 class ThiefSteal(DefaultOnToggle):
     """🎁 Thieves (and Ninja) scavenge after battle. If a thief spots an
     item to take, there is a sound effect and an extra sprite shows up briefly
@@ -537,7 +579,8 @@ class JobScrollBoosts(DefaultOnToggle):
     Each grants a permanent boost to the matching party member.
 
     - 🩸⚔️ Blood Knight Scroll: gain lifesteal and armor penetration with
-      physical attacks.
+      physical attacks. Undead enemies have no blood to drain, so hitting
+      them heals nothing.
     - 🥷🎁 Stealth Ninja Scroll: much better steals (needs Thieves Steal on;
       without it, this half of the scroll does nothing). Damaging floors
       also deal less damage. With more Stealth Thieves or Ninja, damaging
@@ -579,7 +622,7 @@ class ShopApOffers(Range):
 class ShopMaxHints(Range):
     """🔮 Max number of HINTS for sale in each shop.
 
-    Sold at Weapon and Armor shops, purchased hints reveal the ap item at
+    Sold at Weapon and Armor shops, purchased hints reveal the AP item at
     a location or a set of locations within your world."""
     internal_name = "shop_max_hints"
     display_name = "Max Hints Per Gear Shop"
@@ -629,7 +672,7 @@ class OnlyAdvancedJobsEquipPricelessGear(DefaultOnToggle):
 
 
 class AutoSellUnusableItems(DefaultOnToggle):
-    """💰 When you get equipment that NOBODY in your party can ever equip 
+    """💰 When you get equipment that NOBODY in your party can ever equip,
     you are paid its shop sell value.
 
     Never sold: consumables, anything you bought in a store, your starting
@@ -644,10 +687,10 @@ class OpenProgression(Choice):
       off      (0)  -- vanilla routing. The southern continent needs the Ship.
       early    (1)  -- carves a foot trail from Cornelia to Mount Duergar, and
                        a Canoe river linking the Crescent Lake water system to
-                       the Ice Cavern rivers. The Canoe opens up the entire
+                       the Cavern of Ice rivers. The Canoe opens up the entire
                        southern continent.
       extended (2)  -- also adds a foot trail from Mount Duergar to the
-                       Western Keep, and a new Canoe river linking Mount Duergar 
+                       Western Keep, and a new Canoe river linking Mount Duergar
                        to Melmond. The whole Cornelia/Marsh section is sphere 1
                        and the Earth crystal is reachable with only the Canoe.
     """
@@ -671,9 +714,9 @@ class NorthernDocks(DefaultOnToggle):
 
 
 class LootInNormallyEmptyChests(DefaultOnToggle):
-    """📦 Puts real loot in the chests that are empty in vanilla. 
+    """📦 Puts real loot in the chests that are empty in vanilla.
 
-    These empty chests are in Marsh Cave, Mt Gulg, and Citadel of Trials.
+    These empty chests are in Marsh Cave, Mount Gulg, and Citadel of Trials.
 
     Turn this off to leave those chests empty."""
     internal_name = "loot_in_normally_empty_chests"
@@ -682,7 +725,7 @@ class LootInNormallyEmptyChests(DefaultOnToggle):
 
 class SpellTomes(DefaultOnToggle):
     """📙 Adds Spell Tomes to the item pool. A tome is a consumable item
-    that can be consumed to teach its spell to a party member that can
+    that teaches its spell to a party member that can
     learn it. Shops still sell spells normally."""
     internal_name = "spell_tomes"
     display_name = "Spell Tomes"
@@ -695,14 +738,14 @@ class SpellTomes(DefaultOnToggle):
 # stay changed (see ApClient._movement_loop). Spell Chance Colors is on-disc.
 class AutoDash(DefaultOnToggle):
     """🏃 Start with the Config "Dash" setting on, so the party
-    auto runs without you holding the dash button.
+    auto-runs without you holding the dash button.
 
     Super Dash is always available in every seed: with Config "Dash" on,
     hold the Dash button to move at double speed anywhere. Towns, dungeons,
     the overworld, the ship, the canoe and the airship.
 
     Off = Config "Dash" starts off, and you can turn it on any time from
-    the in game Config menu to get both auto dash and Super Dash."""
+    the in-game Config menu to get both auto dash and Super Dash."""
     internal_name = "auto_dash"
     display_name = "Auto Dash"
 
@@ -899,13 +942,15 @@ def resolve_party_jobs(option_values, rng, diversity=False,
 # block. Two separate failures follow, both live-diagnosed 2026-08-09 on a seed
 # whose Whisperwind cap was 100:
 #
-#   1. Nothing past ordinal 63 is ever CHECKED. _bonus_dyn_loop.next_ordinal
-#      counts `range(DYNCHEST_STRIDE)`, so once ordinals 0..63 are sent it
-#      returns 64 forever: ordinal 64 sends once and the counter freezes. Worse,
-#      `remain = cap - nxt` stays positive, so the on-disc cave keeps STRIPPING
-#      the vanilla grant while no AP check is sent. Every chest past the 65th
-#      gave the player nothing at all: no vanilla item, no AP item, no check.
-#      Re-entering does not help; this is not a per-run limit.
+#   1. Nothing past ordinal 63 is ever CHECKED. ids.dyn_chest_pending clamps
+#      its scan to `min(cap, DYNCHEST_STRIDE)`, so ordinals 64+ are never
+#      offered. Since 2026-08-30 that at least fails CLEANLY:
+#      remain drops to 0 with the last in-stride ordinal, the on-disc cave stops
+#      stripping, and the surplus chests hand out their vanilla loot. Before the
+#      clamp, `remain = cap - nxt` stayed positive and the cave kept STRIPPING
+#      with no AP check behind it: every chest past the 65th gave the player
+#      nothing at all -- no vanilla item, no AP item, no check. Re-entering does
+#      not help; this is not a per-run limit.
 #   2. For dungeons 0..2 a past-stride ordinal COLLIDES with a real location in
 #      the next dungeon (dungeon 0 ordinal 64 == dungeon 1 ordinal 0), so two
 #      locations share one id. Whisperwind (the last block) collides with
@@ -928,8 +973,9 @@ def resolve_party_jobs(option_values, rng, diversity=False,
 #      sequentially from a single counter over (dungeon, ordinal) pairs. Densest,
 #      but dyn_chest_dungeon_ord stops being pure arithmetic.
 #
-# Whichever is chosen, next_ordinal's `range(DYNCHEST_STRIDE)` must be widened to
-# match, or the caps will silently stop working again at the old bound. The
+# Whichever is chosen, the `min(cap, DYNCHEST_STRIDE)` clamp in
+# ids.dyn_chest_pending must be widened to match, or the caps will silently
+# stop working again at the old bound. The
 # client-side name repair (_register_dyn_chest_names) already tolerates any of
 # these: it derives names from the same dyn_chest_loc_id and withholds only ids
 # that two (dungeon, ordinal) pairs claim.
@@ -1147,6 +1193,21 @@ class LevistoneShardsExtra(Range):
     default = 0
 
 
+class TrapPercentage(Range):
+    """💣 Chance for each filler item in your pool to be replaced with a
+    trap instead. Traps trigger at the start of the next battle:
+    Silence, Ink, Poison Darts, Death. Traps can be dodged and resisted
+    like normal hostile abilities and spells."""
+    internal_name = "trap_percentage"
+    display_name = "Trap Percentage"
+    range_start = 0
+    range_end = 100
+    # v276: was 10 while only ~1/3 of the pool's filler could roll a trap
+    # (balance slots only, ~122 of ~374 items -> ~12 traps). EVERY filler slot
+    # rolls now (~234 eligible), so 5 holds a default seed at that same ~12.
+    default = 5
+
+
 class FF1DeathLink(DeathLink):
     """💀 When you die, everyone who enabled death link dies. Of course, the
     reverse is true too.
@@ -1236,6 +1297,13 @@ ON_DISC_OPTIONS = {
 ON_DISC_ALWAYS = ("shop_spell_level", "bikke_ship_split",
                   "giant_cave_gate", "mystic_door_gate", "prince_gate_split",
                   "shop_buy_mailbox",
+                  # trap_round_zero: the round-zero trap cave. NOT yaml-gated --
+                  # with an unarmed TRP1 mailbox it is a byte-exact replay of the
+                  # two words it displaces, so a trapless seed is unaffected, and
+                  # a toggle could only ever be set wrong (traps already have
+                  # trap_percentage). Being ON_DISC_ALWAYS also means a seed
+                  # generated before it existed still bakes the cave.
+                  "trap_round_zero",
                   # Magic-defence rework. Deliberately NOT a yaml toggle: every
                   # leg is a runtime no-op while Monster Power and Boss
                   # Difficulty are both 100%, so a default seed is unaffected,
@@ -1281,6 +1349,7 @@ ff1psp_option_groups = [
         LifespringApLocations, WhisperwindApLocations,
     ]),
     OptionGroup("Party", [
+        StartingPartyMembers,
         StartingJob1, StartingJob2, StartingJob3, StartingJob4,
         PartyDiversity, WhiteAndBlackMagics,
     ]),
@@ -1320,6 +1389,10 @@ ff1psp_option_groups = [
         RegionalOceanEncounters, NorthernRiverEncounters, DangerousForests,
         HarderOverworldEncounters, HarderDungeonEncounters, BossMinions,
         ChaosFloorEncounters,
+        BestiarysanityPercent, BestiaryProgression,
+    ]),
+    OptionGroup("Traps", [
+        TrapPercentage,
     ]),
     OptionGroup("Death Link", [
         FF1DeathLink, DeathLinkSeverity,
@@ -1338,6 +1411,7 @@ class FF1PSPOptions(PerGameCommonOptions):
     starting_gil: StartingGil
     boss_difficulty_percentage: BossDifficultyPercentage
     monster_power_percentage: MonsterPowerPercentage
+    starting_party_members: StartingPartyMembers
     starting_job_1: StartingJob1
     starting_job_2: StartingJob2
     starting_job_3: StartingJob3
@@ -1370,6 +1444,8 @@ class FF1PSPOptions(PerGameCommonOptions):
     chaos_floor_encounters: ChaosFloorEncounters
     regional_ocean_encounters: RegionalOceanEncounters
     northern_river_encounters: NorthernRiverEncounters
+    bestiarysanity_percent: BestiarysanityPercent
+    bestiary_progression: BestiaryProgression
     blood_magic: BloodMagic
     monk_thief_dabble_in_magic: MonkThiefDabbleInMagic
     thief_steal: ThiefSteal
@@ -1406,5 +1482,6 @@ class FF1PSPOptions(PerGameCommonOptions):
     message_speed: MessageSpeed
     cursor_mode: CursorMode
     spell_chance_colors: SpellChanceColors
+    trap_percentage: TrapPercentage
     death_link: FF1DeathLink
     death_link_severity: DeathLinkSeverity

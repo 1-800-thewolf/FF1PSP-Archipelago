@@ -1,4 +1,4 @@
-"""One-click troubleshooting bundle -- the `/ff1psp_logs` command.
+"""One-click troubleshooting bundle -- the `/logs` command.
 
 A player who sees something strange runs one command and gets ONE zip on their
 desktop, with a README telling them to hand it to whoever maintains this
@@ -18,6 +18,11 @@ it had to be extracted by hand over several rounds of back-and-forth:
   * slot_data             -- the options AS GENERATED (a yaml can be edited after)
   * AP state              -- checks sent, items received, goal
   * RAM snapshot          -- story flags, key-item bits, map, inventory, counter
+  * CPU / freeze check    -- is the emulated CPU still ADVANCING, and if not,
+                             where it is pinned (memory I/O rides direct process
+                             memory, so a wedged game still answers every poll:
+                             a clean client log is not evidence the game ran)
+  * PPSSPP's own log      -- when the player has "Log to file" on
   * breadcrumbs           -- last few hundred log records even if the log file
                              rotated or the player scrolled past the banner
 
@@ -30,6 +35,7 @@ touches breakpoints; the RAM snapshot rides the client's existing bridge and is
 read-only (see CLAUDE.md: never leave the CPU halted).
 """
 
+import asyncio
 import collections
 import datetime
 import glob
@@ -50,6 +56,51 @@ LOG_FILES_KEPT = 3               # current + 2 previous runs
 BREADCRUMB_MAX = 500
 ERROR_MAX = 12                   # WARNING+ records quoted at the top of report.txt
 ERROR_LINES_EACH = 25            # per record, so one traceback can't eat the page
+PPSSPP_LOG_TAIL_BYTES = 512 << 10  # PPSSPP's own log, when it is writing one
+
+# --- CPU / freeze check -------------------------------------------------------
+# A "hard freeze" report used to be undiagnosable from a bundle: memory I/O
+# rides DIRECT PROCESS MEMORY, so every client poll keeps succeeding against a
+# game whose CPU is wedged, and the log looks perfectly healthy (KingDragonite
+# 2026-08-20, frozen on a random encounter in Giant's Cave -- the bundle could
+# not say whether the emulated CPU was executing at all). Sampling the PC a few
+# times answers exactly that, and a pinned PC also says WHERE it is stuck.
+#
+# READ-ONLY BY CONTRACT: cpu.status + cpu.getAllRegs and nothing else. Never
+# cpu.resume, never cpu.stepping, never a breakpoint -- a player-facing debug
+# command must not be able to halt (or un-halt) their game.
+#
+# TWO signals, because neither alone answers it (both measured live 2026-08-20
+# against a running game):
+#   ticks -- cpu.status's emulated cycle counter. Moves ~1.1e8 per 0.5 s (the
+#            PSP's 222 MHz clock) while the emulator executes; flat means the
+#            CPU is not running at all. THE pc IS NOT A LIVENESS SIGNAL: with
+#            the JIT running, PPSSPP answers getAllRegs from the last SYNCED
+#            state -- live probe read the same pc five times in a row and
+#            0xDEADBEEF in v0/v1/s0/s1 while the game played perfectly.
+#   churn -- how much of the game's own RAM changes over a moment. Ticks still
+#            advance when the game spins in an infinite loop (the freeze class
+#            we are hunting), and only this tells that apart: a healthy title
+#            screen moved 5 of 96 sampled chunks, a spinning one moves none.
+WEDGE_SAMPLES = 5
+WEDGE_GAP_S = 0.3
+WEDGE_RPC_TIMEOUT = 5.0
+_WEDGE_REGS = ("pc", "ra", "sp", "v0", "v1", "a0", "a1", "s0", "s1")
+_STALE_REG = 0xDEADBEEF           # PPSSPP's marker for an unsynced register file
+CHURN_LO, CHURN_HI = 0x08800000, 0x0A000000     # PSP user RAM
+CHURN_STEP, CHURN_CHUNK = 0x40000, 0x1000       # 96 samples of 4 KB
+CHURN_GAP_S = 0.4
+CHURN_BUDGET_S = 8.0              # WS fallback is ~2.5 s a pass; direct mem is free
+
+# --- host process check -------------------------------------------------------
+# The 2026-08-20 freeze took the WHOLE PPSSPP window down ("Not Responding"),
+# which also means the player cannot take a savestate as evidence. None of the
+# emulator-side signals need PPSSPP's cooperation though: IsHungAppWindow asks
+# Windows whether the UI thread has stopped pumping messages, and GetThreadTimes
+# sampling shows WHICH thread is burning CPU (a spin) vs none (a deadlock).
+# Read-only against the process; works when the debugger and the UI are dead.
+HOST_GAP_S = 0.4                  # between the two thread-time samples
+HOST_TOP_THREADS = 6              # busiest threads reported
 
 # The player-facing note that ships inside the zip. Deliberately generic: it
 # must still read correctly for whoever maintains this apworld in future.
@@ -57,7 +108,7 @@ README_TEXT = """\
 FF1 PSP Archipelago -- debug bundle
 ===================================
 
-This zip was made by the /ff1psp_logs command in the FF1 PSP client.
+This zip was made by the /logs command in the FF1 PSP client.
 
 WHAT TO DO WITH IT
   Send this single file to the developer who maintains the FF1 PSP apworld
@@ -72,6 +123,7 @@ WHAT IS IN IT
   ap_state.json     which checks you have sent and items you have received
   slot_data.json    the options your seed was generated with
   ram_snapshot.json a read-only peek at story flags / key items / inventory
+  ppsspp_log.txt    PPSSPP's own log, if it was writing one
   launcher.json     your saved PPSSPP + ISO paths
   manifest.json     the same facts as report.txt, machine-readable
 
@@ -491,6 +543,28 @@ async def snapshot_ram(ctx):
             out[label] = (await psp.read(ctx.sa(addr), size)).hex(" ")
         except Exception as e:
             out[label] = f"unreadable: {e!r}"
+    # Battle sprite holders: an object of the fatal class whose holder is the
+    # static fallback is the "CPU Jump to 00000000" / RA 0x088fba28 freeze --
+    # its construction jumps through the fallback's permanently-null first
+    # word. In the 2026-08-31 crash the single starved object WAS s1 in the
+    # crash registers, so a non-empty "starved" list here IS the cause, not a
+    # side effect. ABSOLUTE addresses: no sa().
+    try:
+        nodes = await ctx._sprite_nodes()
+        rows, starved = await ctx._sprite_objects()
+        fired = await ctx._sprite_guard_fired()
+        out["sprite_holders"] = {
+            "nodes_in_use": nodes[0] if nodes else None,
+            "nodes_free": nodes[1] if nodes else None,
+            "sprite_objects": len(rows),
+            "rows": rows,
+            "starved": [f"0x{o:08x}" for o in starved],
+            "guard_skips": fired,
+            "note": ("STARVED object(s) present -- this is the battle-intro "
+                     "freeze" if starved else "every sprite object has a holder"),
+        }
+    except Exception as e:
+        out["sprite_holders"] = f"unreadable: {e!r}"
     # Decoded key items: the hex above is the evidence, this is the readable
     # form -- "does the player actually hold X" is asked in nearly every report.
     try:
@@ -544,6 +618,350 @@ async def _snapshot_battle_popups(ctx, psp):
     return out
 
 
+# ------------------------------------------------------- CPU / freeze check ---
+def _addr_where(a):
+    """Readable home of a PC/RA: vanilla module, our cave segment, or wild.
+
+    The cave segment starts exactly at the module's memsz end (eboot_patch
+    SAFE_CAVE_VADDR) and grows upward, so "cave + 0x…" is directly comparable
+    against a bake's cave layout. Its END is not knowable from RAM alone (the
+    game heap continues above it), hence the hedge in the label."""
+    from .eboot_patch import VADDR, SAFE_CAVE_VADDR
+    if not isinstance(a, int):
+        return "?"
+    if VADDR <= a < SAFE_CAVE_VADDR:
+        return f"vanilla module (+{a - VADDR:#x})"
+    if SAFE_CAVE_VADDR <= a < 0x08D00000:
+        return (f"CAVE SEGMENT +{a - SAFE_CAVE_VADDR:#x} -- patched code, or "
+                f"the heap just above it (check against this seed's bake)")
+    if 0x08000000 <= a < 0x0A000000:
+        return "PSP RAM outside the module (kernel / heap)"
+    if 0x04000000 <= a < 0x04800000:
+        return "VRAM"
+    return "OUTSIDE PSP RAM -- wild jump"
+
+
+async def _peek(psp, addr, size, align=True):
+    """Hex dump of `size` bytes at `addr`, or the reason it could not be read.
+    Used for the words around a pinned PC/RA -- enough to disassemble by hand."""
+    if not isinstance(addr, int) or not (0x08000000 <= addr < 0x0A000000 - size):
+        return f"not readable ({addr!r})"
+    if align:
+        addr &= ~3
+    try:
+        # Individually time-boxed: over a WS-only bridge to a hung PPSSPP one
+        # read can ride the full rpc timeout, and three of those must not eat
+        # the caller's whole budget (the verdict is already computed by now).
+        data = await asyncio.wait_for(psp.read(addr, size), 3.0)
+        return f"{addr:#010x}: " + data.hex(" ")
+    except Exception as e:
+        return f"unreadable: {e!r}"
+
+
+async def _ram_churn(psp):
+    """How much of the game's own RAM is still moving? A sparse two-pass sweep
+    of user RAM: a game whose frame loop runs keeps buffers turning over even
+    on a static screen, a game spinning in a loop changes nothing at all."""
+    addrs = list(range(CHURN_LO, CHURN_HI, CHURN_STEP))
+    try:
+        first = [await psp.read(a, CHURN_CHUNK) for a in addrs]
+        await asyncio.sleep(CHURN_GAP_S)
+        second = [await psp.read(a, CHURN_CHUNK) for a in addrs]
+    except Exception as e:
+        return {"error": repr(e)}
+    moved = [a for a, x, y in zip(addrs, first, second) if x != y]
+    return {"chunks": len(addrs), "changed": len(moved), "gap_s": CHURN_GAP_S,
+            "changed_at": [f"{a:#x}" for a in moved[:12]]}
+
+
+async def snapshot_wedge(ctx):
+    """Is the game actually running? Read-only (see the WEDGE_* block) and
+    individually timed out, so a debugger that has stopped answering costs a
+    second, not the bundle."""
+    psp = getattr(ctx, "psp", None)
+    if psp is None:
+        return {"note": "PPSSPP bridge is not connected -- no CPU sample"}
+    if not hasattr(psp, "rpc"):
+        return {"note": "this bridge has no debugger channel -- no CPU sample"}
+    out = {"how": ("read-only: cpu.status + cpu.getAllRegs sampled "
+                   f"{WEDGE_SAMPLES}x {WEDGE_GAP_S}s apart, plus a two-pass "
+                   "RAM churn sweep; the bundle never resumes, steps or sets "
+                   "a breakpoint"),
+           "samples": []}
+    # Churn first: it is nearly free over direct process memory, and it is the
+    # only signal that separates "spinning in a loop" from "playing fine".
+    try:
+        out["churn"] = await asyncio.wait_for(_ram_churn(psp), CHURN_BUDGET_S)
+    except Exception as e:
+        out["churn"] = {"error": repr(e)}
+    for n in range(WEDGE_SAMPLES):
+        if n:
+            await asyncio.sleep(WEDGE_GAP_S)
+        s = {}
+        try:
+            st = await asyncio.wait_for(psp.rpc("cpu.status"),
+                                        WEDGE_RPC_TIMEOUT)
+            for k in ("stepping", "paused", "pc", "ticks"):
+                if k in st:
+                    s[k] = st[k]
+        except Exception as e:
+            s["status_error"] = repr(e)
+        try:
+            r = await asyncio.wait_for(psp.rpc("cpu.getAllRegs"),
+                                       WEDGE_RPC_TIMEOUT)
+            cat = (r.get("categories") or [{}])[0]
+            reg = dict(zip(cat.get("registerNames") or [],
+                           cat.get("uintValues") or []))
+            s["regs"] = {k: reg[k] for k in _WEDGE_REGS if k in reg}
+        except Exception as e:
+            s["regs_error"] = repr(e)
+        out["samples"].append(s)
+        # A fully hung PPSSPP takes its debugger down with it: both rpcs then
+        # ride the whole WEDGE_RPC_TIMEOUT, and 5 samples of that would blow
+        # the caller's overall budget and throw away the churn result -- the
+        # ONE signal that still works against a hung process. One dead sample
+        # is proof enough; stop probing.
+        if "status_error" in s and "regs_error" in s:
+            out["samples_stopped"] = ("debugger not answering -- remaining "
+                                      "samples skipped")
+            break
+
+    def pc_of(s):
+        v = (s.get("regs") or {}).get("pc", s.get("pc"))
+        return v if isinstance(v, int) else None
+
+    pcs = [p for p in (pc_of(s) for s in out["samples"]) if p is not None]
+    ticks = [s["ticks"] for s in out["samples"] if isinstance(s.get("ticks"), int)]
+    churn = out.get("churn") or {}
+    moved = churn.get("changed") if isinstance(churn.get("changed"), int) else None
+    span = WEDGE_GAP_S * (max(len(pcs), len(ticks)) - 1)
+    out["pc_samples"] = [f"{p:#010x}" for p in pcs]
+    if ticks:
+        out["ticks"] = f"{ticks[0]} -> {ticks[-1]} (+{ticks[-1] - ticks[0]})"
+    if any(s.get("stepping") for s in out["samples"]):
+        out["verdict"] = ("CPU HALTED (debugger reports stepping) -- stopped "
+                          "at a breakpoint, not executing")
+    elif not ticks and moved is None:
+        out["verdict"] = ("UNAVAILABLE -- the PPSSPP debugger did not answer "
+                          "(RemoteDebuggerOnStartup off, or PPSSPP closed). "
+                          "Nothing here says whether the game was running.")
+        return out
+    elif ticks and ticks[-1] == ticks[0]:
+        out["verdict"] = (f"CPU NOT EXECUTING -- 0 emulated cycles over "
+                          f"{span:.1f}s: the game is stopped dead (hard "
+                          f"freeze, or the emulator is paused)")
+    elif moved == 0 and not ticks:
+        out["verdict"] = (f"GAME FROZEN -- the debugger did not answer AND "
+                          f"nothing changed in {churn.get('chunks')} sampled "
+                          f"RAM chunks over {churn.get('gap_s')}s: the "
+                          f"emulator itself is likely hung (see the host "
+                          f"process check)")
+    elif moved == 0:
+        out["verdict"] = (f"GAME NOT ADVANCING -- the cpu ran "
+                          f"{ticks[-1] - ticks[0]} cycles but NOTHING changed "
+                          f"in {churn.get('chunks')} sampled RAM chunks over "
+                          f"{churn.get('gap_s')}s: consistent with code "
+                          f"spinning in a loop while the picture is frozen")
+    else:
+        out["verdict"] = (
+            f"running normally"
+            + (f" (+{ticks[-1] - ticks[0]} cycles over {span:.1f}s" if ticks
+               else " (")
+            + (f", {moved}/{churn.get('chunks')} RAM chunks moving)"
+               if moved is not None else ")"))
+    # The register file is only trustworthy when the CPU is SYNCED: with the JIT
+    # running PPSSPP answers from the last sync, which reads as a pinned pc and
+    # 0xDEADBEEF GPRs (live-measured 2026-08-20). Say so rather than shipping a
+    # believable-looking pc that means nothing.
+    last = out["samples"][-1].get("regs") or {}
+    # WHICH register carries the marker varies run to run (live: a0/a1 one
+    # sample, v0/v1 the next), so test every one we captured.
+    if any(v == _STALE_REG for v in last.values()):
+        out["regs_are_stale"] = ("registers were NOT synced (0xDEADBEEF in the "
+                                 "GPRs) -- pc/ra below are from the last sync, "
+                                 "not the live JIT state")
+    pc = last.get("pc", pcs[-1] if pcs else None)
+    ra, sp = last.get("ra"), last.get("sp")
+    out["pc"] = f"{pc:#010x}" if isinstance(pc, int) else None
+    out["ra"] = f"{ra:#010x}" if isinstance(ra, int) else None
+    out["sp"] = f"{sp:#010x}" if isinstance(sp, int) else None
+    out["pc_where"], out["ra_where"] = _addr_where(pc), _addr_where(ra)
+    # The words either side of pc/ra, and the top of the stack: enough to
+    # disassemble the loop by hand without asking the player for anything else.
+    if isinstance(pc, int):
+        out["code_at_pc"] = await _peek(psp, pc - 0x20, 0x40)
+    if isinstance(ra, int):
+        out["code_at_ra"] = await _peek(psp, ra - 0x20, 0x40)
+    if isinstance(sp, int):
+        out["stack_at_sp"] = await _peek(psp, sp, 0x40)
+    return out
+
+
+# --------------------------------------------------------- host process check ---
+def _windows_of_pid(pid):
+    """[(title, is_hung), ...] for a pid's visible top-level windows."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    out = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def cb(hwnd, _l):
+        wpid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+        if wpid.value == pid and user32.IsWindowVisible(hwnd):
+            buf = ctypes.create_unicode_buffer(128)
+            user32.GetWindowTextW(hwnd, buf, 128)
+            out.append((buf.value, bool(user32.IsHungAppWindow(hwnd))))
+        return True
+
+    user32.EnumWindows(cb, 0)
+    return out
+
+
+def _thread_cpu_times(pid):
+    """{tid: kernel+user time in 100ns units} for every thread of `pid`."""
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.windll.kernel32
+
+    class THREADENTRY32(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD),
+                    ("cntUsage", wintypes.DWORD),
+                    ("th32ThreadID", wintypes.DWORD),
+                    ("th32OwnerProcessID", wintypes.DWORD),
+                    ("tpBasePri", wintypes.LONG),
+                    ("tpDeltaPri", wintypes.LONG),
+                    ("dwFlags", wintypes.DWORD)]
+
+    snap = k32.CreateToolhelp32Snapshot(0x4, 0)          # TH32CS_SNAPTHREAD
+    if snap == -1:
+        return {}
+    out = {}
+    try:
+        te = THREADENTRY32()
+        te.dwSize = ctypes.sizeof(te)
+        ok = k32.Thread32First(snap, ctypes.byref(te))
+        while ok:
+            if te.th32OwnerProcessID == pid:
+                h = k32.OpenThread(0x0040 | 0x0800, False,   # QUERY(+LIMITED)
+                                   te.th32ThreadID)
+                if h:
+                    ft = (wintypes.FILETIME * 4)()
+                    if k32.GetThreadTimes(h, ctypes.byref(ft[0]),
+                                          ctypes.byref(ft[1]),
+                                          ctypes.byref(ft[2]),
+                                          ctypes.byref(ft[3])):
+                        t = 0
+                        for i in (2, 3):                  # kernel + user
+                            t += (ft[i].dwHighDateTime << 32) \
+                                 | ft[i].dwLowDateTime
+                        out[te.th32ThreadID] = t
+                    k32.CloseHandle(h)
+            ok = k32.Thread32Next(snap, ctypes.byref(te))
+    finally:
+        k32.CloseHandle(snap)
+    return out
+
+
+def _host_verdict(hung_any, busy, gap_s):
+    """Pure verdict from the window state + the busiest threads' cpu shares."""
+    top = busy[0][1] if busy else 0.0
+    if hung_any and top >= 50.0:
+        return (f"PPSSPP WINDOW HUNG and thread {busy[0][0]} is at "
+                f"{top:.0f}% cpu: the emulator is SPINNING (a runaway loop), "
+                f"not deadlocked")
+    if hung_any:
+        return ("PPSSPP WINDOW HUNG with no thread burning cpu: the emulator "
+                "is DEADLOCKED (threads waiting on each other)")
+    if top >= 50.0:
+        return (f"window responding; thread {busy[0][0]} busy at {top:.0f}% "
+                f"cpu (normal for an emulator)")
+    return "PPSSPP window is responding and the process is mostly idle"
+
+
+def _host_section(ctx=None):
+    """Is the PPSSPP PROCESS healthy? Answered from the outside -- window
+    responsiveness + which threads burn CPU -- so it works when the emulator
+    is fully hung and every in-emu channel is dead. Read-only. The sleep is
+    fine: build_bundle runs collectors in an executor, not the asyncio loop."""
+    if os.name != "nt":
+        return {"note": "host process check is Windows-only"}
+    from .ppsspp_mem import _ppsspp_pids
+    pids = _ppsspp_pids()
+    if not pids:
+        return {"note": "no PPSSPP process running"}
+    import time
+    out = {"pids": pids}
+    pid = pids[0]                     # snapshot_ram already flags >1 instance
+    try:
+        wins = _windows_of_pid(pid)
+        out["windows"] = [{"title": t or "(untitled)", "hung": h}
+                          for t, h in wins]
+        hung_any = any(h for _t, h in wins)
+    except Exception as e:
+        out["windows"] = {"error": repr(e)}
+        hung_any = False
+    try:
+        a = _thread_cpu_times(pid)
+        time.sleep(HOST_GAP_S)
+        b = _thread_cpu_times(pid)
+        deltas = {tid: b[tid] - a.get(tid, b[tid]) for tid in b}
+        # 100 ns units -> percent of one core over the gap
+        busy = sorted(((tid, d / (HOST_GAP_S * 1e7) * 100.0)
+                       for tid, d in deltas.items() if d > 0),
+                      key=lambda kv: -kv[1])[:HOST_TOP_THREADS]
+        out["busy_threads"] = [f"tid {tid}: {pct:.0f}% cpu" for tid, pct in busy]
+        out["thread_count"] = len(b)
+    except Exception as e:
+        out["busy_threads"] = {"error": repr(e)}
+        busy = []
+    out["verdict"] = _host_verdict(hung_any, busy, HOST_GAP_S)
+    return out
+
+
+def _ppsspp_log(ctx=None):
+    """PPSSPP's OWN log file (not the client's). Absent unless the player has
+    'Log to file' switched on in Developer Tools -- when a bundle comes back
+    with a frozen CPU and no PPSSPP log, asking them to turn it on is the next
+    step, so say so in the note rather than leaving the section blank."""
+    from .launcher import find_ppsspp, load_cfg, find_inis
+    try:
+        exe = find_ppsspp(load_cfg().get("ppsspp", ""))
+    except Exception:
+        exe = None
+    roots = []
+    if exe:
+        d = os.path.dirname(exe)
+        roots += [d, os.path.join(d, "memstick"),
+                  os.path.join(d, "memstick", "PSP", "SYSTEM"),
+                  os.path.join(d, "PSP", "SYSTEM")]
+    home = os.path.expanduser("~")
+    roots += [os.path.join(home, "Documents", "PPSSPP", "PSP", "SYSTEM"),
+              os.path.join(home, ".config", "ppsspp", "PSP", "SYSTEM")]
+    try:
+        roots += [os.path.dirname(p) for p in (find_inis(exe) if exe else [])]
+    except Exception:
+        pass
+    hits = set()
+    for r in roots:
+        # ppsspp*.log only: a bare *.log would sweep whatever else lives beside
+        # the exe and then pick the newest of THOSE.
+        hits.update(glob.glob(os.path.join(r, "ppsspp*.log")))
+    hits = [p for p in hits if os.path.isfile(p)]
+    if not hits:
+        return {"note": ("no PPSSPP log file found -- PPSSPP only writes one "
+                         "when 'Log to file' is enabled in Developer Tools"),
+                "searched": roots}
+    newest = max(hits, key=lambda p: os.path.getmtime(p))
+    row = _stat(newest)
+    try:
+        row["tail"] = _tail(newest, PPSSPP_LOG_TAIL_BYTES)
+    except Exception as e:
+        row["error"] = repr(e)
+    return row
+
+
 # ------------------------------------------------------------------- report ---
 def _render_report(m):
     """report.txt -- the part a human reads first. Same facts as manifest.json,
@@ -575,6 +993,42 @@ def _render_report(m):
             p("")
             for row in line.splitlines():
                 p("  " + row)
+    p()
+    # Second, because "was the game even executing?" reframes everything under
+    # it: with direct process memory the client polls a frozen game happily.
+    p("-- cpu / freeze check " + "-" * 38)
+    cpu = m.get("cpu")
+    if not isinstance(cpu, dict):
+        p("(not collected)")
+    elif not cpu.get("verdict"):
+        p(cpu.get("note") or cpu.get("error") or "(not collected)")
+    else:
+        p(f"verdict          : {cpu.get('verdict')}")
+        if cpu.get("ticks"):
+            p(f"emulated cycles  : {cpu['ticks']}")
+        _ch = cpu.get("churn") or {}
+        if isinstance(_ch.get("changed"), int):
+            p(f"ram churn        : {_ch['changed']}/{_ch.get('chunks')} "
+              f"sampled chunks changed in {_ch.get('gap_s')}s")
+        elif _ch.get("error"):
+            p(f"ram churn        : {_ch['error']}")
+        p(f"pc               : {cpu.get('pc')}  {cpu.get('pc_where')}")
+        p(f"ra               : {cpu.get('ra')}  {cpu.get('ra_where')}")
+        if cpu.get("regs_are_stale"):
+            p(f"  note           : {cpu['regs_are_stale']}")
+        p("  (code around pc/ra and the stack top are in manifest.json)")
+    host = m.get("host")
+    if isinstance(host, dict) and host.get("verdict"):
+        p(f"host process     : {host['verdict']}")
+        for row in (host.get("busy_threads") or [])[:3] \
+                if isinstance(host.get("busy_threads"), list) else []:
+            p(f"  {row}")
+    elif isinstance(host, dict) and (host.get("note") or host.get("error")):
+        p(f"host process     : {host.get('note') or host.get('error')}")
+    plog = m.get("ppsspp_log")
+    if isinstance(plog, dict):
+        p(f"PPSSPP log       : "
+          f"{plog.get('path') or plog.get('note') or plog.get('error')}")
     p()
     p("-- game patch state " + "-" * 40)
     p(f"bake verified    : {bake.get('bake_ok')}"
@@ -687,9 +1141,12 @@ def _yaml_files():
     return out[:5]
 
 
-def build_bundle(ctx=None, ram=None, out_dir=None):
+def build_bundle(ctx=None, ram=None, wedge=None, out_dir=None):
     """Write the zip and return its path. Never raises: a collector that blows
-    up lands in the bundle as an error section instead."""
+    up lands in the bundle as an error section instead.
+
+    `ram` and `wedge` are collected by the CALLER (they need the asyncio thread
+    that owns the bridge); everything else is gathered here."""
     secrets = _redactions(ctx)
     manifest = {
         "bundle_format": 1,
@@ -702,7 +1159,14 @@ def build_bundle(ctx=None, ram=None, out_dir=None):
         "savestates": _safe(_savestate_section, ctx),
         "archipelago": _safe(_ap_section, ctx),
         "ram": ram if ram is not None else {"note": "not collected"},
+        "cpu": wedge if wedge is not None else {"note": "not collected"},
+        "host": _safe(_host_section, ctx),
+        "ppsspp_log": _safe(_ppsspp_log, ctx),
     }
+    # The log body ships as its own member; the manifest keeps only the metadata
+    # (path/size/mtime) so manifest.json does not carry a second copy.
+    _plog = manifest["ppsspp_log"]
+    ppsspp_log_tail = _plog.pop("tail", None) if isinstance(_plog, dict) else None
     ap = manifest["archipelago"]
     slot = str(ap.get("slot") or "noslot")
     seed = str(ap.get("seed_name") or "noseed")[:20]
@@ -723,6 +1187,8 @@ def build_bundle(ctx=None, ram=None, out_dir=None):
             getattr(ctx, "slot_data", None) or {}, indent=2, default=str))
         text(zf, "ram_snapshot.json", json.dumps(manifest["ram"], indent=2,
                                                  default=str))
+        if ppsspp_log_tail:
+            text(zf, "ppsspp_log.txt", ppsspp_log_tail)
         if _RING is not None:
             text(zf, "breadcrumbs.log", "\n".join(_RING.buf))
         try:
@@ -782,5 +1248,9 @@ def handoff_lines(path):
         "a sentence about what you were doing when the problem happened.",
         "It contains your logs, seed options, patch state and a read-only "
         "snapshot of the game. Your server password is not included.",
+        "",
+        "Tip: if the game ever freezes, run this command BEFORE closing "
+        "PPSSPP. It can examine a frozen emulator and capture exactly where "
+        "it got stuck.",
         "",
     ]

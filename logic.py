@@ -115,17 +115,17 @@ FIEND_TOKEN = {EARTH_CRYSTAL: EARTH_FIEND, FIRE_CRYSTAL: FIRE_FIEND,
 #   NITRO     -> Mystic-Key-locked chest (PSP treasure idx 8, LOC_INFO token MysticKey ->
 #                requires MYSTIC_KEY); feeds Nerrick (Canal).
 #   RATS_TAIL -> chest (PSP treasure idx 28); classically turned in to Bahamut.
-#                UPDATE (2026-07-08): Bahamut is a REAL AP location ("Dragon Caves -
-#                Bahamut", NPC ordinal 15) gated on AIRSHIP (region) + RATS_TAIL.
-#                DESIGN (2026-07-13): Bahamut is BOTH an AP location AND the promotion
-#                turn-in. The tail is granted with its function bit (ff1_data
-#                KEY_ITEM_FUNCTION_BITS[13]), so Bahamut accepts it and runs the game's
-#                NATIVE promotion (whole party); the location is detected by Bahamut-room
-#                map id + tail owned (the detector reads possession, not the class-change
-#                flag, so native promotion doesn't false-fire it). Client-side scroll
-#                promotion was removed (impossible; see job-advancement-items memory).
-#                Neither gates the goal. RATS_TAIL has one downstream edge: the Bahamut
-#                location requires it.
+#                DESIGN (2026-08-27): Bahamut is NOT an AP location any more (the
+#                former NPC ordinal 15 was removed -- his only reward is the game's
+#                NATIVE whole-party promotion, which was double-dipping as a random
+#                AP item). The tail is granted with its function bit (ff1_data
+#                KEY_ITEM_FUNCTION_BITS[13]) so Bahamut accepts it and promotes;
+#                the client detects the class change via the party-job fingerprint
+#                (KEY_ITEM_CONSUMED_ON_PROMOTION) for tail-spent tracking.
+#                Client-side scroll promotion was removed (impossible; see
+#                job-advancement-items memory). RATS_TAIL now gates no location;
+#                it stays progression-classified so minimal-accessibility seeds
+#                still guarantee promotion (the spell-tome pool assumes it).
 # ADAMANTITE (classic-7 #6) has NO chest source: the PSP static treasure table holds no
 # Adamantite chest (verified via re_only/treasure_table.csv -- only 6 key chests exist:
 # Crown/Nitro/Rat's Tail/Star Ruby/Rosetta/Levistone). It IS modeled anyway: live RE
@@ -343,12 +343,10 @@ NPC_LOCATIONS = [
     # Dwarf Smith turn-in in the Dwarf cave (Mount Duergar, same region as Nerrick).
     # Requires the ADAMANTITE pool item (you hand it over to forge Excalibur).
     ("Mount Duergar NPC: Smith",    14, "mount_duergar",         [ADAMANTITE]),      # Excalibur (forge)
-    # Bahamut class-change turn-in: hand him the Rat's Tail and he promotes the party
-    # (native real promotion, crash-free) and sets detector 0x1151F b0. Bahamut is in
-    # the Cardia islands (airship-gated dragon_caves region); requires the RATS_TAIL
-    # pool item to turn in. Native reward is the promotion (no item), so the location
-    # just grants whatever AP item is placed there.
-    ("Dragon Caves NPC: Bahamut",   15, "dragon_caves_plains",   [RATS_TAIL]),       # class change (turn in Rat's Tail)
+    # NOTE (2026-08-27): "Dragon Caves NPC: Bahamut" (ordinal 15) was REMOVED.
+    # His only reward is the native whole-party promotion (no vanilla item), so an
+    # AP item there was double-dipping. Ordinal 15 stays retired -- do not reuse it
+    # for a future NPC (old seeds' datapackages bound it to Bahamut).
 ]
 
 # NPC ordinal -> an extra OR-alternative that bypasses BOTH the region rule and the
@@ -528,8 +526,10 @@ UNMAPPED_RULE = [AIRSHIP]
 # map-gated chest bp, and for the first cap opens strips the native loot + delivers
 # the AP item; open cap+1.. behaves vanilla. See the bonus-dungeon-chests memory.
 #   (dungeon index, display name, floors, default cap, gate token, yaml option attr)
-# floors = canonical Soul-of-Chaos size = how many ordinals __init__ registers in
-# the datapackage (the yaml Range option's own range_end is a separate ceiling).
+# floors = canonical Soul-of-Chaos size, i.e. how big the dungeon is in the vanilla
+# game. It is metadata only: __init__ registers ids.DYNCHEST_STRIDE ordinals per
+# dungeon in the datapackage (so every legal cap is nameable by every client), and
+# the yaml Range option's own range_end is the ceiling on what is actually created.
 # Each dungeon is sealed by its element's Fiend statue, so access is gated on that
 # element's CRYSTAL token (granted by the Fiend event) -- NOT the airship, so a
 # northern-docks / no-airship route that still earns the crystal reaches the dungeon.
@@ -909,3 +909,368 @@ EVENTS = [
     ("Chaos Shrine - Black Orb",    "chaos_shrine",        BLACK_ORB_DESTROYED,
         [EARTH_CRYSTAL, FIRE_CRYSTAL, WATER_CRYSTAL, AIR_CRYSTAL, LUTE]),
 ]
+
+
+# ===================== Bestiarysanity (monster-kill checks) ===================
+# One AP location per sampled bestiary monster (ids.bestiary_loc_id, keyed by
+# MONSTER id -- the kill-count index at save+0x1198). Which monsters are
+# huntable in a seed, and behind what access, comes from the generated
+# ff1psp/bestiary_data.py (re_only/gen_bestiary_areas.py) filtered by the
+# seed's encounter options + the boss_minions plan.
+#
+# GUARANTEED vs DRAWN sources: most encounter surfaces are exact tables
+# (vanilla rows, authored option pools, scripted fights, minion plans), but two
+# are per-seed RNG draws whose pools do not guarantee any single member appears:
+# harder_overworld's land-zone reroll (_OW_HARDER_POOL) and harder_dungeons'
+# cave rerolls (rando.shuffle_zones_caves). Those two NEVER grant a location or
+# satisfy logic here -- a monster only findable through a drawn pool that seed
+# is simply not a check. The Bestiary tab may still show drawn pools as hints.
+from .bestiary_data import (ACCESS_CLASSES,
+                            BESTIARY_ELIGIBLE, BESTIARY_SOURCES, SOURCE_LABELS,
+                            CAVE_MAP_DUNGEON, DUNGEON_MONSTERS, HARDER_TARGET,
+                            DUNGEON_DISPLAY, FORMATION_MONSTERS, ZONE_ACCESS,
+                            SOURCE_SECTION as BESTIARY_SOURCE_SECTION)
+from .client.monster_names import MONSTER_NAME as BESTIARY_MONSTER_NAME
+
+
+def _bestiary_names():
+    """Location names, 'Bestiary - <Monster>'; the second monster id sharing a
+    display name (fiend 2nd forms, Scarmiglione) gets ' 2'."""
+    seen, out = {}, {}
+    for mon in BESTIARY_ELIGIBLE:
+        nm = BESTIARY_MONSTER_NAME[mon]
+        seen[nm] = seen.get(nm, 0) + 1
+        out[mon] = (f"Bestiary - {nm}" if seen[nm] == 1
+                    else f"Bestiary - {nm} {seen[nm]}")
+    return out
+
+
+BESTIARY_LOCATION_NAMES = _bestiary_names()      # mon -> AP location name
+
+# Overworld access. An ow/desert/t4/forest source is keyed
+# (ZONE_TIER value, ACCESS CLASS), because ZONE_TIER alone is a DIFFICULTY band,
+# not a reachability class: zone 35 carries tier 1 ("Pravoka-grade monsters")
+# but its land is entirely the Mount Duergar landmass, which REGION_RULES gates
+# behind the SHIP -- so a tier-keyed rule put ship-only monsters in logic on
+# turn one. gen_bestiary_areas._zone_access() flood-fills the real overworld
+# into land components and files each one under the ACCESS NODE of the region
+# it hosts (ACCESS_CLASSES = the node set a zone's standing room spans).
+#
+# The nodes are the SAME ones the chest/NPC region rules are built from
+# (access_nodes), so the open-world yaml toggles reach the bestiary too: with
+# northern_docks the Mirage-desert continent is Ship+Canal, not airship-only,
+# and every monster that only spawns out there moves earlier in logic to match.
+_BESTIARY_NODE_ALIAS = {"mirage": "mirage_desert"}
+_BESTIARY_STATIC_NODES = {"start": [[]], "elfheim": [[SHIP]],
+                          "airship": [[AIRSHIP]]}
+# What the ZONE_TIER band alone used to require. This is a GENERATION-TIME
+# FILTER, not a runtime term: a land component only contributes to a zone if its
+# own access already implies the band's (with no open-world toggle set). The
+# band is the difficulty author's own "you are not meant to be here yet", so a
+# few tiles of a harsh zone spilling onto the starting continent (zone 31 holds
+# 4 of them) must not drag the Lufenia roster into turn-one logic -- but a
+# component that IS the band's own landmass keeps its exact rule, toggles and
+# all, instead of being ANDed with a stale approximation. See
+# gen_bestiary_areas._zone_access(), which imports this table.
+_BESTIARY_TIER_BASELINE = (
+    [[]],                                     # 0 Cornelia
+    [[]],                                     # 1 Pravoka
+    [[SHIP]],                                 # 2 Elfheim
+    [[SHIP]],                                 # 3 Western Keep
+    [[AIRSHIP], [SHIP, CANAL]],               # 4 Melmond
+    [[AIRSHIP], [SHIP, CANAL]],               # 5 Crescent Lake
+    [[AIRSHIP]],                              # 6 Onrac
+    [[AIRSHIP], [SHIP, CANAL, CANOE]],        # 7 Citadel of Trials continent
+    [[AIRSHIP]],                              # 8 Lufenia
+)
+# "tierN" is the fallback node: a zone whose every landmass is EASIER than its
+# own band contributes nothing, and falls back to the band's plain rule rather
+# than vanishing.
+for _i, _band in enumerate(_BESTIARY_TIER_BASELINE):
+    _BESTIARY_STATIC_NODES[f"tier{_i}"] = _band
+
+_BESTIARY_ACCESS_CACHE = {}
+
+
+def _both(left, right):
+    """OR-of-ANDs meaning "satisfy LEFT and RIGHT"."""
+    return _simplify([list(a) + [t for t in b if t not in a]
+                      for a in left for b in right])
+
+
+def bestiary_access(tier, cls, early=False, extended=False,
+                    northern_docks=False):
+    """Access for one (ZONE_TIER band, access class) under the open-world
+    toggles: the OR over the class's geography nodes. `tier` is accepted (and
+    ignored) because it is the first half of the source key -- the band has
+    already done its work at generation time, filtering which components may
+    contribute at all."""
+    ck = (cls, early, extended, northern_docks)
+    hit = _BESTIARY_ACCESS_CACHE.get(ck)
+    if hit is not None:
+        return hit
+    nodes = access_nodes(early, extended, northern_docks)
+    alts = []
+    for name in ACCESS_CLASSES[cls]:
+        rule = _BESTIARY_STATIC_NODES.get(name)
+        if rule is None:
+            rule = nodes[_BESTIARY_NODE_ALIAS.get(name, name)]
+        for a in rule:
+            alts.append(list(a))
+    out = _simplify(alts)
+    _BESTIARY_ACCESS_CACHE[ck] = out
+    return out
+
+
+def _bestiary_access_for(key, opts):
+    return bestiary_access(key[0], key[1],
+                           bool(opts.get("early")),
+                           bool(opts.get("extended")),
+                           bool(opts.get("northern_docks")))
+
+# Dungeon access (keys = bestiary_data dungeon names == rando._CAVE_DUNGEONS).
+_BESTIARY_DUNGEON_RULES = {
+    "chaos_f1":       [[]],
+    "marsh":          [[SHIP]],
+    "earth":          [[SHIP, CANAL]],
+    "gurgu":          [[AIRSHIP], [SHIP, CANAL, CANOE]],
+    "ice":            [[AIRSHIP], [CANOE]],
+    "trials":         [[CROWN, CANOE, SHIP, CANAL], [CROWN, CANOE, AIRSHIP]],
+    "waterfall":      [[AIRSHIP, CANOE]],
+    "mirage":         [[AIRSHIP, CHIME]],
+    "fortress":       [[AIRSHIP, CHIME, WARP_CUBE]],
+    "chaos_basement": [[CRYSTALS_PLACED, LUTE]],
+    "onrac":          [[AIRSHIP]],
+    "sunken":         [[AIRSHIP, OXYALE]],
+}
+
+# Scripted-fight access by formation id (bestiary_data "scripted" keys + every
+# boss fid a minion plan can name: base bosses, Chaos, DLC superbosses).
+_BESTIARY_SCRIPTED_RULES = {
+    0x7F: [[]],                                # Garland
+    0x7E: [[]],                                # Bikke's Pirates
+    0x1C: [[SHIP]], 0x9C: [[SHIP]],            # Piscodemon (Marsh B3)
+    0x7C: [[SHIP, CANAL]],                     # Vampire
+    0x7D: [[SHIP]],                            # Astos
+    0x7A: _BESTIARY_DUNGEON_RULES["earth"],    # Lich
+    0x79: _BESTIARY_DUNGEON_RULES["gurgu"],    # Marilith
+    0x78: _BESTIARY_DUNGEON_RULES["sunken"],   # Kraken
+    0x77: _BESTIARY_DUNGEON_RULES["fortress"],  # Tiamat
+    0x73: _BESTIARY_DUNGEON_RULES["chaos_basement"],   # fiend refights
+    0x74: _BESTIARY_DUNGEON_RULES["chaos_basement"],
+    0x75: _BESTIARY_DUNGEON_RULES["chaos_basement"],
+    0x76: _BESTIARY_DUNGEON_RULES["chaos_basement"],
+    0x7B: _BESTIARY_DUNGEON_RULES["chaos_basement"],   # Chaos
+    0x56: _BESTIARY_DUNGEON_RULES["fortress"],  # Warmech (bridge)
+    0x4C: _BESTIARY_DUNGEON_RULES["fortress"],  # Guardians
+}
+
+# Bonus-dungeon gates by dungeon index (BONUS_DUNGEONS order): crystal seal +
+# entrance vehicles (DLC_DUNGEON_EXTRA_TOKENS; Whisperwind's Ice-Cave OR is
+# folded to its Ship+Canal alternative -- conservative, early toggles only relax).
+_BESTIARY_BONUS_RULES = {
+    0: [[EARTH_CRYSTAL]],
+    1: [[FIRE_CRYSTAL, AIRSHIP]],
+    2: [[WATER_CRYSTAL, SHIP, CANAL]],
+    3: [[AIR_CRYSTAL, CANOE, SHIP, CANAL], [AIR_CRYSTAL, CANOE, AIRSHIP]],
+}
+# DLC superboss monster id -> its home dungeon index (mirrors rando's band map;
+# bands and BONUS_DUNGEONS share indices).
+BESTIARY_DLC_BOSS_BAND = {
+    0x80: 0, 0x81: 0, 0x82: 0, 0x83: 0,
+    0x84: 1, 0x85: 1, 0x86: 1, 0x87: 1, 0x88: 1,
+    0x89: 2, 0x8A: 2, 0x8B: 2, 0x8C: 2,
+    0x8D: 3, 0x8E: 3, 0x8F: 3, 0x90: 3,
+}
+
+
+# ============ reduced-party access logic (starting_party_members) ============
+# A 1- or 2-member party cannot honestly be expected to clear the late bosses or
+# the deepest bonus-dungeon chambers, so those checks gate on a MINIMUM LOGICAL
+# PARTY SIZE: starting_party_members plus however many job-named party-member
+# items the player holds. The numbers below are the TOTAL party size required
+# (2..4); every gate here is inert on a vanilla 4-member start.
+#
+# ESCAPE HATCH: a player who deliberately wants a long reduced-party run can
+# plando the member items into late locations -- which would deadlock these
+# gates. __init__ therefore caps the enforced threshold at
+# 4 - (member copies plando_items forces into a location): force 1 member and
+# the 4-gate lifts, force 2 and the 3-gates lift too, force all 3 and no party
+# gate is enforced at all.
+PARTY_GATE_EVENT = {                 # EVENTS, by location name
+    "Sunken Shrine - Kraken":   2,
+    "Flying Fortress - Tiamat": 3,
+}
+PARTY_GATE_GOAL = 3                  # the Chaos goal location
+# Static boss-chamber chests, by BONUS_DUNGEONS index (the value space of
+# DLC_STATIC_IDX_DUNGEON): Earthgift 2, Hellfire 2, Lifespring 3, Whisperwind 4.
+PARTY_GATE_STATIC_DG = {0: 2, 1: 2, 2: 3, 3: 4}
+# bonus_dungeon_crystals: a "<Dungeon> - Cleared" event stands in for the Fiend
+# whose crystal it now grants, so it inherits that Fiend's gate (Lifespring <-
+# Kraken, Whisperwind <- Tiamat). Earthgift/Hellfire stand in for Lich/Marilith,
+# which carry no gate.
+PARTY_GATE_CLEAR_DG = {2: 2, 3: 3}
+# Bestiarysanity kill checks for the same fights. The Chaos-basement fiend
+# refights (0x73-0x76) are NOT gated: they are optional rematches, not the
+# progression kills.
+PARTY_GATE_MONSTER = {
+    0x78: 2,   # Kraken
+    0x77: 3,   # Tiamat
+    0x7B: 3,   # Chaos
+    0x82: 2,   # Ahriman    (guards the Earthgift static chest)
+    0x88: 2,   # Rubicante  (Hellfire)
+    0x8B: 3,   # Shinryu    (Lifespring)
+    0x90: 4,   # Death Gaze (Whisperwind)
+}
+# TRACKER-ONLY pseudo-tokens (never AP items, never on-disc): tracker.evaluate
+# grants "Party of N" once the live party reaches N, and classify /
+# resolve_tokens hang the gates above off them -- mirroring set_rules' item-count
+# predicate without inventing a real item.
+PARTY_TOKENS = {2: "Party of 2", 3: "Party of 3", 4: "Party of 4"}
+
+
+def bestiary_source_rule(source, opts):
+    """OR-of-AND access alternatives for one bestiary_data source under the
+    seed's options, or None if the source is inactive OR drawn (never counts).
+    opts: dict with harder_ow, harder_dungeons, forests, ocean, river
+    (bools) and bonus_excluded (bool)."""
+    kind, key = source
+    if kind in ("minion", "cameo", "ow_harder"):
+        return None                       # plan-driven / drawn -- handled apart
+    if kind == "cave":
+        if opts.get("harder_dungeons"):
+            return None                   # rerolled per seed -> drawn
+        return _BESTIARY_DUNGEON_RULES[CAVE_MAP_DUNGEON[key]]
+    if kind == "ow":
+        # Always exact: the caller derived this key from the seed's own rolled
+        # table (overworld_sources), so there is nothing left to be unsure of.
+        return _bestiary_access_for(key, opts)
+    if kind in ("desert", "t4"):
+        if opts.get("harder_ow"):
+            return None                   # vanilla tables replaced
+        return _bestiary_access_for(key, opts)
+    if kind in ("desert_harder", "t4_harder"):
+        return _bestiary_access_for(key, opts) if opts.get("harder_ow") else None
+    if kind == "forest":
+        return _bestiary_access_for(key, opts) if opts.get("forests") else None
+    if kind == "ocean":
+        return [[SHIP]]
+    if kind == "oc":
+        return [[SHIP, CANAL]] if opts.get("ocean") else None
+    if kind == "river":
+        return [[SHIP, CANOE], [AIRSHIP, CANOE]]
+    if kind == "rr":
+        return ([[SHIP, CANAL, CANOE], [AIRSHIP, CANOE]]
+                if opts.get("river") else None)
+    if kind == "scripted":
+        return _BESTIARY_SCRIPTED_RULES[key]
+    if kind in ("hd", "cf", "ff"):
+        # authored override rows (key = dungeon name); chaos_floor_pools
+        # bakes with harder_dungeons (see __init__ on_disc), so all three
+        # kinds ride that flag.
+        if not opts.get("harder_dungeons"):
+            return None
+        return _BESTIARY_DUNGEON_RULES[key]
+    if kind == "dlc":
+        # key = dungeon index * 10 + floor band (bestiary_data groups the
+        # shared DLC rows per dungeon), so the gate is that ONE dungeon.
+        if opts.get("bonus_excluded"):
+            return None
+        return _BESTIARY_BONUS_RULES[key // 10]
+    if kind == "dlc_boss":
+        if opts.get("bonus_excluded"):
+            return None
+        mon = 0x80 + (key - 0x100)
+        return _BESTIARY_BONUS_RULES[BESTIARY_DLC_BOSS_BAND[mon]]
+    raise KeyError(f"unknown bestiary source kind {kind!r}")
+
+
+def bestiary_minion_monsters(minion_plan, bonus_excluded=False):
+    """mon -> OR-of-AND rule, for every add monster the rolled plan actually
+    spawns (max > 0). minion_plan = slot_data boss_minions_plan
+    ([[fid, [[mon, lo, hi], ...], layout], ...])."""
+    out = {}
+    for fid, groups, _layout in (minion_plan or []):
+        if fid in _BESTIARY_SCRIPTED_RULES:
+            rule = _BESTIARY_SCRIPTED_RULES[fid]
+        elif 0x100 <= fid <= 0x110 and not bonus_excluded:
+            rule = _BESTIARY_BONUS_RULES[
+                BESTIARY_DLC_BOSS_BAND[0x80 + fid - 0x100]]
+        else:
+            continue
+        for mon, _lo, hi in groups:
+            if hi > 0:
+                cur = out.setdefault(mon, [])
+                for alt in rule:
+                    if alt not in cur:
+                        cur.append(alt)
+    return out
+
+
+# Overworld foot encounters are RE-ROLLED EVERY SEED -- rando.roll_tables calls
+# shuffle_zones_overworld in BOTH modes, not only under harder_overworld (see the
+# comment at its call site). The baked ('ow', ...) / ('ow_harder', ...) entries in
+# BESTIARY_SOURCES therefore describe the VANILLA game, which no seed runs: live
+# 2026-08-31, 74 of 83 overworld monsters had a different easiest tier than the
+# vanilla table said, and Cobra -- baked as Cornelia/Pravoka -- was only in tier
+# 5-8 zones, so the Bestiary tab sent the player hunting where it could not spawn.
+#
+# The seed's own table is always available (slot_data["shuffle_tables"]
+# ["zones_overworld"], shipped by every seed), so the ow family is derived from it
+# instead of read from the bake. overworld_sources() does that translation; the
+# static entries are IGNORED whenever a derived map is supplied, and contribute
+# nothing when one is not -- guessing from vanilla is what caused the bug.
+def overworld_sources(zones_overworld, ow_hi=None):
+    """{mon: {('ow', (tier, class)), ...}} from a rolled zones_overworld table.
+
+    zones_overworld -- 512 bytes, 64 zones x 8 slots (rando's table, as shipped)
+    ow_hi           -- the companion HIGH-BYTE table (harder_overworld ships u16
+                       DLC formation ids); None when the seed has no companion.
+
+    Zones with no standing room (all sea / unused) carry no ZONE_ACCESS entry and
+    are skipped -- a formation parked there can never be walked into."""
+    out = {}
+    if not zones_overworld or len(zones_overworld) < 64 * 8:
+        return out
+    for zi, key in ZONE_ACCESS.items():
+        for slot in range(8):
+            i = zi * 8 + slot
+            fid = zones_overworld[i]
+            if ow_hi and i < len(ow_hi) and ow_hi[i]:
+                fid |= ow_hi[i] << 8
+            for mon in FORMATION_MONSTERS.get(fid, ()):
+                out.setdefault(mon, set()).add(("ow", key))
+    return out
+
+
+def bestiary_rule_alts(mon, opts, minion_rules=None, ow_sources=None):
+    """All access alternatives for a monster under the seed's options; [] means
+    not guaranteed-huntable this seed (no location, no logic)."""
+    # Dedupe by CONTENT, not by list identity: the same requirement reaches
+    # here in different token orders ([SHIP, CANAL] from a dungeon rule,
+    # [CANAL, SHIP] from a generated access class) and an order-sensitive
+    # check would leave both in the OR.
+    alts, seen = [], set()
+
+    def _add(alt):
+        key = frozenset(alt)
+        if key not in seen:
+            seen.add(key)
+            alts.append(alt)
+
+    sources = [s for s in BESTIARY_SOURCES.get(mon, ())
+               if s[0] not in ("ow", "ow_harder")]
+    sources += sorted((ow_sources or {}).get(mon, ()))
+    for source in sources:
+        rule = bestiary_source_rule(source, opts)
+        if rule is None:
+            continue
+        for alt in rule:
+            _add(alt)
+    if minion_rules:
+        for alt in minion_rules.get(mon, ()):
+            _add(alt)
+    # An empty AND alternative ([]) means "free": collapse to just that.
+    if [] in alts:
+        return [[]]
+    return alts

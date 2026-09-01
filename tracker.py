@@ -27,6 +27,9 @@ Three things the client cannot get from the server and must compute here:
      server actually placed for this slot. Anything not in it simply doesn't count.
 """
 
+import math as _math
+import re as _re
+
 from . import data as DATA
 from . import ids as ID
 from . import logic as LOGIC
@@ -306,8 +309,8 @@ _REGION_SECTION = {k: s for k, _d, s in REGION_AREAS}
 
 def npc_area_key(ordinal):
     """Every NPC/story check gets its OWN tile, split out of its region's chest
-    tile -- so e.g. "Dragon Caves Chests" can read in-logic on the airship while
-    "Dragon Caves - Bahamut" stays dim until you hold the Rat's Tail."""
+    tile -- so e.g. "Mount Duergar Chests" can read in-logic on the ship while
+    "Mount Duergar NPC: Smith" stays dim until you hold the Adamantite."""
     return f"npc_{ordinal}"
 
 
@@ -567,7 +570,7 @@ def _reachable(alts, extra, owned):
 
 
 def resolve_tokens(owned_names, region_rules, forbid=(), crystals_needed=4,
-                   bonus_crystals=False, early=False):
+                   bonus_crystals=False, early=False, party_cap=0):
     """Run the EVENTS fixpoint: grant each event's token once its region rule and
     extra reqs are satisfied, repeating until stable. Returns a NEW set of every
     item name plus every derived gate token.
@@ -580,6 +583,12 @@ def resolve_tokens(owned_names, region_rules, forbid=(), crystals_needed=4,
     event. That is what makes the counterfactual in `_unused_gates` honest: to ask
     "what does the Nitro Powder actually unlock", you have to deny the Canal it
     would otherwise derive, not merely drop the Nitro from the item list.
+
+    `party_cap` is the seed's highest enforced party-size gate (slot_data
+    "party_logic_cap", 0 = none): the Kraken / Tiamat events additionally need
+    the LOGIC.PARTY_TOKENS pseudo-token their threshold maps to, which
+    evaluate() puts in `owned_names` once the live party is that big. Mirrors
+    __init__.set_rules' party_gate.
     """
     banned = set(forbid)
     tokens = set(owned_names) - banned
@@ -602,6 +611,9 @@ def resolve_tokens(owned_names, region_rules, forbid=(), crystals_needed=4,
                 if sum(1 for c in LOGIC.CRYSTALS if c in tokens) < crystals_needed:
                     continue
                 extra = [t for t in extra if t not in LOGIC.CRYSTALS]
+            _pn = LOGIC.PARTY_GATE_EVENT.get(_name)
+            if _pn is not None and _pn <= party_cap:
+                extra = list(extra) + [LOGIC.PARTY_TOKENS[_pn]]
             if _reachable(as_alts(region_rules.get(region, [])), extra, tokens):
                 tokens.add(granted)
                 changed = True
@@ -615,6 +627,11 @@ def resolve_tokens(owned_names, region_rules, forbid=(), crystals_needed=4,
                     continue
                 extra = ([LOGIC.FIEND_TOKEN[crystal]]
                          + list(LOGIC.DLC_DUNGEON_EXTRA_TOKENS.get(dg, [])))
+                # The "Cleared" event stands in for the Fiend it replaces, so it
+                # inherits that Fiend's party gate (set_rules' _clear_locs loop).
+                _pn = LOGIC.PARTY_GATE_CLEAR_DG.get(dg)
+                if _pn is not None and _pn <= party_cap:
+                    extra.append(LOGIC.PARTY_TOKENS[_pn])
                 if dg == 3:
                     alts = [[]] if early else [list(LOGIC.WHISPERWIND_SHIP_CANAL_ALT)]
                 else:
@@ -646,7 +663,8 @@ _BONUS_BY_DG = {dg: (nm, tok) for dg, nm, _fl, _cap, tok, _a
                 in LOGIC.BONUS_DUNGEONS}
 
 
-def classify(lid, region_rules, shop_overrides, early, bonus_crystals=False):
+def classify(lid, region_rules, shop_overrides, early, bonus_crystals=False,
+             party_cap=0):
     """location id -> (area_key, alts, extra) or None if the id isn't ours.
 
     Mirrors the four rule-application loops in __init__.set_rules exactly: chests
@@ -710,6 +728,11 @@ def classify(lid, region_rules, shop_overrides, early, bonus_crystals=False):
                 alts = [[]] if early else [list(LOGIC.WHISPERWIND_SHIP_CANAL_ALT)]
             else:
                 alts = [[]]
+            # starting_party_members: the boss-chamber chest also needs a party
+            # big enough to beat its superboss (logic.PARTY_GATE_STATIC_DG).
+            _pn = LOGIC.PARTY_GATE_STATIC_DG.get(_dg)
+            if _pn is not None and _pn <= party_cap:
+                extra.append(LOGIC.PARTY_TOKENS[_pn])
             return bonus_static_key(_dg), alts, extra
         region, chest_token = LOC_INFO.get(idx, (None, None))
         if region is None:
@@ -781,7 +804,8 @@ class TrackerState:
                  "unused", "crystals_have", "crystals_need",
                  "tablets_have", "tablets_need",
                  "runes_have", "runes_need",
-                 "shards_have", "shards_need")
+                 "shards_have", "shards_need",
+                 "members_have", "members_need")
 
     def __init__(self):
         self.areas = {}        # area key -> AreaState
@@ -799,6 +823,8 @@ class TrackerState:
         self.runes_need = 0      # equipment_runes_required (0 = the option is off)
         self.shards_have = 0     # Levistone Shards held
         self.shards_need = 0     # levistone_shards_required (0 = option off)
+        self.members_have = 0    # party members present (4 - still missing)
+        self.members_need = 0    # 4 on starting_party_members seeds (0 = full party)
 
     def summary_areas(self):
         """Areas the player can make progress in RIGHT NOW: in logic with checks
@@ -843,7 +869,7 @@ STRIP_GATES = [n for n, _s in STRIP_ITEMS]
 
 
 def _unused_gates(st, locs, region_rules, crystals_needed=4,
-                  bonus_crystals=False, early=False):
+                  bonus_crystals=False, early=False, party_cap=0):
     """Which held gates the player has not cashed in yet.
 
     "Used" is defined by counterfactual rather than by a hand-written table of
@@ -864,7 +890,8 @@ def _unused_gates(st, locs, region_rules, crystals_needed=4,
             continue
         without = resolve_tokens(st.owned - {name}, region_rules, forbid=(name,),
                                  crystals_needed=crystals_needed,
-                                 bonus_crystals=bonus_crystals, early=early)
+                                 bonus_crystals=bonus_crystals, early=early,
+                                 party_cap=party_cap)
         deps = found = 0
         for _lid, alts, extra, checked in locs:
             if unmet(alts, extra, st.tokens):
@@ -881,7 +908,8 @@ def _unused_gates(st, locs, region_rules, crystals_needed=4,
 
 
 def evaluate(item_names, pool_loc_ids, checked_loc_ids, slot_data=None,
-             tablet_count=0, rune_count=0, shard_count=0):
+             tablet_count=0, rune_count=0, shard_count=0,
+             crystals_beaten=None, member_counts=None):
     """Compute the whole tracker.
 
     item_names      -- iterable of AP item NAMES the player has received. Feed this
@@ -905,6 +933,24 @@ def evaluate(item_names, pool_loc_ids, checked_loc_ids, slot_data=None,
                        sticky-counter reason as tablet_count; at the threshold
                        the LEVISTONE derives (mirrors set_rules' count rule on
                        the locked "Levistone Assembled" event).
+    member_counts   -- {base job: copies received} of party-member items
+                       (starting_party_members seeds), fed from the client's
+                       sticky per-job counters (_member_counts). Rides
+                       separately from item_names because duplicate jobs share
+                       one item name (a set collapses the copies). Drives
+                       the strip's "Members x/4" line AND, on seeds carrying a
+                       "party_logic_cap", the LOGIC.PARTY_TOKENS pseudo-tokens
+                       that mirror set_rules' minimum-party-size gates.
+    crystals_beaten -- crystals ACTUALLY earned in-game (Fiend story flags, or
+                       shadow bits on bonus_dungeon_crystals seeds), fed from
+                       the client's RAM read. DISPLAY ONLY: drives the strip's
+                       "Crystals x/n" line so it matches the in-game crystal
+                       display instead of the reachability fixpoint (user
+                       report 2026-08-21: fixpoint said 3/4 with 2 fiends
+                       beaten -- Tiamat merely unreachable). None (no game
+                       attached yet) falls back to the fixpoint count. Never
+                       feeds reachability: the fixpoint still derives crystal
+                       tokens for region logic, which must mirror generation.
     """
     sd = slot_data or {}
     early = bool(sd.get("early_open_progression"))
@@ -928,6 +974,32 @@ def evaluate(item_names, pool_loc_ids, checked_loc_ids, slot_data=None,
     levi_need = int(sd.get("levistone_shards_required") or 0)
     if levi_need and shard_count >= levi_need:
         st.owned.add(LOGIC.LEVISTONE)
+    # starting_party_members: "Members x/4". have = members present now
+    # (4 minus still-missing plan rows); need = 4 only when the seed carries a
+    # plan, so the label hides on full-party seeds. Copies of one job cover
+    # the TOP-MOST missing plan row first -- the same assignment the client's
+    # _member_plan_split enforces in-game, so the two can never disagree.
+    # Resolved BEFORE the fixpoint: the party-size gates below feed into it.
+    plan = sd.get("missing_party") or []
+    st.members_need = 4 if plan else 0
+    st.members_have = 4
+    if plan:
+        cnt = {int(j): int(c) for j, c in (member_counts or {}).items()}
+        gone = 0
+        for _row, job, _lvl in plan:
+            if cnt.get(int(job), 0) > 0:
+                cnt[int(job)] -= 1
+            else:
+                gone += 1
+        st.members_have = 4 - gone
+    # Minimum-party-size gates (logic.PARTY_GATE_*, mirroring set_rules).
+    # party_logic_cap is the highest threshold the seed enforces -- 0 on
+    # full-party seeds and on seeds whose plando lifted the gates -- so a
+    # threshold above it is never gated and its token is granted outright.
+    party_cap = int(sd.get("party_logic_cap") or 0)
+    for _n, _tok in LOGIC.PARTY_TOKENS.items():
+        if _n > party_cap or st.members_have >= _n:
+            st.owned.add(_tok)
     # crystals_needed: 4 (or absent, old seeds) = vanilla all-four gate.
     _cn = sd.get("crystals_needed")
     crystals_needed = 4 if _cn is None else int(_cn)
@@ -936,10 +1008,16 @@ def evaluate(item_names, pool_loc_ids, checked_loc_ids, slot_data=None,
     bonus_crystals = bool(sd.get("bonus_dungeon_crystals"))
     st.tokens = resolve_tokens(st.owned, region_rules,
                                crystals_needed=crystals_needed,
-                               bonus_crystals=bonus_crystals, early=early)
-    # Endgame gate progress for the strip's totals line.
+                               bonus_crystals=bonus_crystals, early=early,
+                               party_cap=party_cap)
+    # Endgame gate progress for the strip's totals line. Beaten count (game
+    # truth) when the client has one; fixpoint (reachable) only as the
+    # no-game-attached fallback.
     st.crystals_need = crystals_needed
-    st.crystals_have = sum(1 for c in LOGIC.CRYSTALS if c in st.tokens)
+    if crystals_beaten is not None:
+        st.crystals_have = max(0, min(int(crystals_beaten), 4))
+    else:
+        st.crystals_have = sum(1 for c in LOGIC.CRYSTALS if c in st.tokens)
     st.tablets_need = lute_need
     st.tablets_have = int(tablet_count)
     # CLAMP: the client's counter is an uncapped high-water, so an
@@ -957,7 +1035,6 @@ def evaluate(item_names, pool_loc_ids, checked_loc_ids, slot_data=None,
     st.shards_need = levi_need
     st.shards_have = (min(int(shard_count), levi_need) if levi_need
                       else int(shard_count))
-
     for key, display, section in AREAS:
         st.areas[key] = AreaState(key, display, section)
 
@@ -968,7 +1045,8 @@ def evaluate(item_names, pool_loc_ids, checked_loc_ids, slot_data=None,
     locs = []      # (lid, alts, extra, checked) -- reused by _unused_gates
 
     for lid in pool_loc_ids:
-        info = classify(lid, region_rules, shop_overrides, early, bonus_crystals)
+        info = classify(lid, region_rules, shop_overrides, early, bonus_crystals,
+                        party_cap=party_cap)
         if info is None:
             continue
         area_key, alts, extra = info
@@ -1009,5 +1087,404 @@ def evaluate(item_names, pool_loc_ids, checked_loc_ids, slot_data=None,
 
     st.unused = _unused_gates(st, locs, region_rules,
                               crystals_needed=crystals_needed,
-                              bonus_crystals=bonus_crystals, early=early)
+                              bonus_crystals=bonus_crystals, early=early,
+                              party_cap=party_cap)
     return st
+
+
+# ------------------------------------------------------------ bestiary tab ---
+# Pure payload builder for the GUI's Bestiary tab (bestiarysanity). Same
+# testable-headless contract as the rest of this module: no kivy, no ctx --
+# ApClient assembles the inputs (slot block, minion plan, kill/check sets,
+# scouted item flags) and hands them here.
+#
+# The tab's sub-tab strip mirrors the Tracker's sections (bestiary_data's
+# SOURCE_SECTION files every spawn source under a tracker section key) plus a
+# Bosses section for scripted fights and their rolled minions. A monster is
+# listed in EVERY section it can be hunted in -- the tab answers "what is left
+# to hunt HERE", so a Cobra that roams three continents appears three times and
+# leaves all of them at once when its check lands.
+BESTIARY_BOSSES = "bosses"
+BESTIARY_SECTION_COLOR = dict(SECTION_COLOR)
+BESTIARY_SECTION_COLOR[BESTIARY_BOSSES] = (0.20, 0.62, 0.68)
+BESTIARY_SECTION_DISPLAY = dict(SECTION_DISPLAY)
+BESTIARY_SECTION_DISPLAY[BESTIARY_BOSSES] = "Bosses"
+# Bosses sits directly after Summary; Shops has no bestiary meaning and is
+# dropped. Everything else keeps the Tracker's order so the two strips read the
+# same way.
+# Geography first, in the Tracker's own order; Bosses last, after Bonus -- it is
+# a fixed target list you consult, not a place you walk through.
+BESTIARY_SECTION_ORDER = (
+    [k for k in SECTION_KEYS if k not in (SUMMARY, "shops")]
+    + [BESTIARY_BOSSES])
+BESTIARY_BRIGHT_SECTIONS = frozenset(BRIGHT_SECTIONS) - {"shops"}
+
+# Fraction of a section's own bestiary checks that must be found before that
+# section reveals item-quality colors; until then every row renders plain.
+# DELIBERATELY NOT a yaml option -- internal tuning knob (user call 2026-08-28).
+BESTIARY_COLOR_UNLOCK = 0.5
+
+# Order of place groups WITHIN a section: fixed fights first, then dungeon
+# floors, then open-world surfaces, then water, then bonus content.
+_BESTIARY_KIND_ORDER = {
+    "scripted": 0, "dlc_boss": 0,
+    "cave": 2, "hd": 2, "cf": 2, "ff": 2,
+    "ow": 3, "ow_harder": 3, "forest": 4,
+    "desert": 5, "desert_harder": 5, "t4": 6, "t4_harder": 6,
+    "ocean": 7, "oc": 7, "river": 8, "rr": 8,
+    "dlc": 9,
+}
+_BESTIARY_MINION_ORDER = 1        # right under the boss fights
+# "<place> (<where>)" split, for merging same-roster groups under one header.
+_BESTIARY_SUFFIX_RE = _re.compile(r"^(.*) \(([^()]*)\)$")
+
+# AP NetworkItem.flags bits
+_AP_FLAG_PROGRESSION = 1
+_AP_FLAG_USEFUL = 2
+_AP_FLAG_TRAP = 4
+
+
+def _bestiary_cls(flags):
+    """Item class for the row's color. Traps deliberately read as filler:
+    flagging them would let a player skip exactly the checks that bite."""
+    if flags is None:
+        return "unknown"
+    if flags & _AP_FLAG_PROGRESSION:
+        return "progression"
+    if flags & _AP_FLAG_USEFUL:
+        return "useful"
+    return "filler"
+
+
+def _bestiary_display_sources(mon, opts, ow_sources=None):
+    """Sources worth SHOWING for a monster under the seed's options: every
+    guaranteed-active source (logic.bestiary_source_rule), plus this seed's own
+    overworld places. The harder-dungeon cave reroll is unknowable per seed and
+    never shown.
+
+    The baked ('ow', ...) / ('ow_harder', ...) entries are DROPPED: the overworld
+    table is re-rolled every seed, so those describe the vanilla game and sent
+    players hunting where the monster cannot spawn (Cobra, live 2026-08-31).
+    ow_sources -- logic.overworld_sources() over the seed's rolled table -- is
+    the real answer; with none supplied the tab simply lists no overworld place
+    rather than an invented one."""
+    out = []
+    for src in LOGIC.BESTIARY_SOURCES.get(mon, ()):
+        kind, _key = src
+        if kind in ("minion", "cameo", "ow", "ow_harder"):
+            continue
+        if LOGIC.bestiary_source_rule(src, opts) is not None:
+            out.append(src)
+    out += sorted((ow_sources or {}).get(mon, ()))
+    return out
+
+
+def _bestiary_minion_places(minion_plan, opts):
+    """mon -> {(label, section)} for every add the rolled plan actually spawns
+    (max > 0). Boss minions are filed under the Bosses section; a minion that
+    also roams somewhere keeps that place through its own sources."""
+    out = {}
+    for ent in (minion_plan or []):
+        try:
+            fid, groups = int(ent[0]), ent[1]
+        except (TypeError, ValueError, IndexError):
+            continue
+        boss_src = None
+        for kind in ("scripted", "dlc_boss"):
+            if (kind, fid) in LOGIC.SOURCE_LABELS:
+                boss_src = (kind, fid)
+                break
+        if boss_src is None:
+            continue
+        if boss_src[0] == "dlc_boss" and opts.get("bonus_excluded"):
+            continue
+        label = f"Boss minions -- {LOGIC.SOURCE_LABELS[boss_src]}"
+        for g in groups:
+            try:
+                mon, hi = int(g[0]), int(g[2])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if hi > 0:
+                out.setdefault(mon, set()).add((label, BESTIARY_BOSSES))
+    return out
+
+
+def _bestiary_source_label(src, opts):
+    """Baked label, except where it depends on the seed's options: with
+    regional_ocean off there is only ONE sea, so the vanilla pool is plain
+    "Ocean" rather than "Starting Ocean"."""
+    label = LOGIC.SOURCE_LABELS.get(src, f"{src[0]}:{src[1]}")
+    if src[0] == "ocean" and not opts.get("ocean"):
+        return "Ocean"
+    return label
+
+
+def _bestiary_unlock_at(total):
+    """Checks needed in a section before it reveals item-quality colors.
+    Rounds UP, so a 20-check section unlocks at 10 and a 15-check one at 8."""
+    if total <= 0:
+        return 0
+    return max(1, _math.ceil(total * BESTIARY_COLOR_UNLOCK))
+
+
+def _bestiary_progress_text(found, unlock_at):
+    """A few words + an ASCII bar (no block glyphs -- the client font has no
+    coverage for them, same reason the rows carry no icons)."""
+    if found >= unlock_at:
+        return "Monster Item Qualities Unlocked"
+    filled = 0 if unlock_at <= 0 else int(10 * found / unlock_at)
+    bar = "#" * filled + "-" * (10 - filled)
+    return (f"Monster Item Qualities Unlocked in: {found} of {unlock_at}"
+            f"  [{bar}]")
+
+
+def _bestiary_merge_labels(labels):
+    """One header for several places holding the same monsters. Labels sharing a
+    trailing "(...)" keep it once -- "Desert (Cornelia)" + "Grass
+    (Cornelia)" reads "Desert / Grass (Cornelia)", not the suffix twice."""
+    if len(labels) == 1:
+        return labels[0]
+    parts = [_BESTIARY_SUFFIX_RE.match(lb) for lb in labels]
+    if all(parts) and len({m.group(2) for m in parts}) == 1:
+        return (" / ".join(dict.fromkeys(m.group(1) for m in parts))
+                + f" ({parts[0].group(2)})")
+    return " / ".join(dict.fromkeys(labels))
+
+
+def _bestiary_rule_open(alts, mon, tokens, party_cap):
+    """Is this OR-of-ANDs satisfied by what the player HOLDS? Mirrors
+    __init__.set_rules' bestiary leg: the access rule AND the minimum-party-size
+    token where logic.PARTY_GATE_MONSTER names one."""
+    if not any(all(t in tokens for t in alt) for alt in alts):
+        return False
+    need = LOGIC.PARTY_GATE_MONSTER.get(mon)
+    if need is not None and need <= party_cap:
+        return LOGIC.PARTY_TOKENS[need] in tokens
+    return True
+
+
+def _bestiary_source_open(src, mon, opts, tokens, party_cap):
+    """Can this monster be hunted AT THIS SOURCE right now?
+
+    Per SOURCE, not per monster: the tab answers "what is left to hunt HERE",
+    so a Cobra that roams three continents must not light up the Lufenia tab
+    just because the Cornelia one is walkable. Drawn pools (harder-overworld
+    rerolls, rule None) are displayed as hints but never count as reachable --
+    the same line logic draws for eligibility."""
+    rule = LOGIC.bestiary_source_rule(src, opts)
+    if rule is None:
+        return False
+    return _bestiary_rule_open(rule, mon, tokens, party_cap)
+
+
+def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
+                  tokens=None, party_cap=0, section_logic=None,
+                  ow_sources=None):
+    """Payload for the Bestiary tab.
+
+    bst           -- slot_data "bestiary" dict (None/falsy = off)
+    minion_plan   -- slot_data boss_minions_plan (list or None)
+    killed_mons   -- monster ids whose kill count rose past the baseline
+    checked_mons  -- monster ids whose AP location is already checked/sent
+    flags_by_mon  -- monster id -> scouted NetworkItem.flags (may be sparse)
+    tokens        -- TrackerState.tokens, or None for "no reachability info"
+    party_cap     -- slot_data "party_logic_cap" (0 = no party gate enforced)
+    ow_sources    -- logic.overworld_sources() over this seed's rolled
+                     zones_overworld (slot_data["shuffle_tables"]), or None.
+                     The overworld table is re-rolled EVERY seed, so without
+                     this the tab has no honest overworld place to name.
+    section_logic -- {section key: TrackerState.section_in_logic(section)}, or
+                     None. When given it DRIVES the strip's in_logic for every
+                     geographic section: the tab lights when the REGION is open,
+                     not when some roaming monster listed there happens to be
+                     fightable somewhere else (a Cornelia-and-Gulg Ogre used to
+                     light Fire on turn 1). Bosses has no Tracker counterpart
+                     and keeps its own per-fight rule either way.
+
+    Returns {"enabled", "done", "total", "progression_on", "sections": [...]},
+    each section {"key", "display", "rgb", "dark_text", "remaining", "groups":
+    [{"label", "monsters": [{"mon", "name", "cls", "killed"}]}]}. Only
+    UNCHECKED monsters are listed and only non-empty sections are returned."""
+    if not bst:
+        return {"enabled": False, "done": 0, "total": 0,
+                "progression_on": False, "sections": [], "strip": {}}
+    opts = dict(bst.get("opts") or {})
+    monsters = [int(m) for m in (bst.get("monsters") or [])]
+    checked = {int(m) for m in checked_mons}
+    killed = {int(m) for m in killed_mons}
+    minion_where = _bestiary_minion_places(minion_plan, opts)
+
+    minion_rules = {}
+    if tokens is not None and minion_plan:
+        minion_rules = LOGIC.bestiary_minion_monsters(
+            minion_plan, bool(opts.get("bonus_excluded")))
+    # section -> True once any UNCHECKED monster can be hunted there right now
+    sec_open = {}
+
+    # (section, sort key, label) -> [entry]
+    # Where each sampled monster can be hunted -- computed for CHECKED ones too,
+    # because a section's colour-unlock progress is measured against its own
+    # full roster, not just what is left.
+    where = {}
+    # place key -> True once ANY still-unchecked monster there is fightable now.
+    # Drives the greying of a place group inside a tab; with no token set every
+    # group reads open, same as the strip showing no logic look at all.
+    place_open = {}
+    for mon in monsters:
+        places = []
+        for kind, key in _bestiary_display_sources(mon, opts, ow_sources):
+            section = LOGIC.BESTIARY_SOURCE_SECTION.get((kind, key))
+            if section is None:
+                continue
+            order = (_BESTIARY_KIND_ORDER.get(kind, 50),
+                     key if isinstance(key, (int, float)) else str(key))
+            place = (section, order, _bestiary_source_label((kind, key), opts))
+            places.append(place)
+            if (tokens is not None and mon not in checked
+                    and _bestiary_source_open((kind, key), mon, opts,
+                                              tokens, party_cap)):
+                sec_open[section] = True
+                place_open[place] = True
+        for label, section in sorted(minion_where.get(mon, ())):
+            place = (section, (_BESTIARY_MINION_ORDER, 0), label)
+            places.append(place)
+            if (tokens is not None and mon not in checked
+                    and _bestiary_rule_open(minion_rules.get(mon, ()), mon,
+                                            tokens, party_cap)):
+                sec_open[section] = True
+                place_open[place] = True
+        if not places:
+            places.append((BESTIARY_BOSSES, (98, 0), "Elsewhere (random pools)"))
+        where[mon] = places
+
+    # section -> (own checks, of which found) for the colour gate
+    tally = {}
+    for mon in monsters:
+        for skey in {p[0] for p in where[mon]}:
+            tot, got = tally.get(skey, (0, 0))
+            tally[skey] = (tot + 1, got + (1 if mon in checked else 0))
+
+    # STRIP payload -- one entry per section that holds ANY sampled monster,
+    # cleared sections included, because the sub-tab bar keeps its tab either
+    # way and has to tell "you finished this" apart from "your seed never put
+    # anything here". Mirrors TrackerState.section_rollup / section_in_logic /
+    # section_shine so ApGui can paint both strips off the same rules:
+    #   in_logic -- something here is fightable RIGHT NOW and still unchecked
+    #   shine    -- in logic and nothing in the section found yet
+    # Both are None when no token set was supplied (those two looks then never
+    # fire, rather than showing a guess as fact).
+    strip = {}
+    for skey, (tot, got) in tally.items():
+        if tokens is None:
+            in_logic = shine = None
+        else:
+            if section_logic is not None and skey != BESTIARY_BOSSES:
+                # Mirror the Tracker: the tab follows its REGION, and a section
+                # with nothing left to hunt never lights regardless.
+                in_logic = bool(section_logic.get(skey)) and tot > got
+            else:
+                in_logic = bool(sec_open.get(skey))
+            # Shine stays a BESTIARY measure: in logic with no monster check
+            # found in this tab yet, not "no location found in the region".
+            shine = in_logic and got == 0
+        strip[skey] = {"total": tot, "found": got, "remaining": tot - got,
+                       "in_logic": in_logic, "shine": shine}
+
+    # A monster's quality is revealed once ANY section it appears in has earned
+    # its colors: the reveal belongs to the monster, not to the tab you happen
+    # to be looking at, so Hyenadon reads the same on Cornelia and on Elfheim.
+    unlocked_sections = {skey for skey, (tot, got) in tally.items()
+                         if got >= _bestiary_unlock_at(tot)}
+    revealed = {mon for mon in monsters
+                if any(p[0] in unlocked_sections for p in where[mon])}
+
+    grouped = {}
+    for mon in monsters:
+        if mon in checked:
+            continue
+        entry = {
+            "mon": mon,
+            "name": LOGIC.BESTIARY_MONSTER_NAME.get(mon, f"{mon:#04x}"),
+            "cls": _bestiary_cls(flags_by_mon.get(mon)),
+            "killed": mon in killed,
+            "revealed": mon in revealed,
+        }
+        for place in where[mon]:
+            grouped.setdefault(place, []).append(entry)
+
+    sections = []
+    for skey in BESTIARY_SECTION_ORDER:
+        keys = [k for k in grouped if k[0] == skey]
+        if not keys:
+            continue
+        # Places within a section that hold the SAME remaining monsters collapse
+        # into one group ("Desert / Grass (Cornelia)"): three identical
+        # rosters under three headers is the same list read three times.
+        merged, seen = {}, set()
+        for k in sorted(keys, key=lambda k: (k[1][0], str(k[1][1]), k[2])):
+            ms = sorted(grouped[k], key=lambda e: e["name"])
+            sig = frozenset(e["mon"] for e in ms)
+            seen.update(sig)
+            # A merged group is open if ANY of the places under that one header
+            # is walkable now -- the header still points somewhere you can go.
+            k_open = tokens is None or bool(place_open.get(k))
+            if sig in merged:
+                merged[sig]["labels"].append(k[2])
+                merged[sig]["open"] = merged[sig]["open"] or k_open
+            else:
+                merged[sig] = {"labels": [k[2]], "monsters": ms,
+                               "open": k_open}
+        groups = [{"label": _bestiary_merge_labels(g["labels"]),
+                   "monsters": g["monsters"], "open": g["open"]}
+                  for g in merged.values()]
+        total_here, found_here = tally.get(skey, (0, 0))
+        unlock_at = _bestiary_unlock_at(total_here)
+        sections.append({
+            "key": skey,
+            "display": BESTIARY_SECTION_DISPLAY.get(skey, skey.title()),
+            "rgb": BESTIARY_SECTION_COLOR.get(skey, (0.5, 0.5, 0.5)),
+            "dark_text": skey in BESTIARY_BRIGHT_SECTIONS,
+            "remaining": len(seen),
+            "found": found_here,
+            "total_here": total_here,
+            "unlock_at": unlock_at,
+            "colors_unlocked": found_here >= unlock_at,
+            "progress": _bestiary_progress_text(found_here, unlock_at),
+            "groups": groups,
+        })
+    return {
+        "enabled": True,
+        "done": len(checked & set(monsters)),
+        "total": len(monsters),
+        "progression_on": bool(bst.get("progression")),
+        "sections": sections,
+        "strip": strip,
+    }
+
+
+def bestiary_search(view, query):
+    """Find-tab result set: every group whose PLACE name matches the query,
+    plus, for groups that do not, the monsters whose own name matches. Section
+    names match too, so "bosses" or "wind" lists those tabs' contents.
+
+    Returns {"hits": n, "groups": [{"label", "section", "monsters"}]} where the
+    label carries its section so a hit reads unambiguously on one line."""
+    q = (query or "").strip().lower()
+    if not view or not view.get("enabled") or not q:
+        return {"hits": 0, "groups": []}
+    out, hits = [], 0
+    for sec in view.get("sections") or []:
+        sec_hit = q in sec["display"].lower()
+        for grp in sec["groups"]:
+            place_hit = sec_hit or q in grp["label"].lower()
+            ms = (grp["monsters"] if place_hit
+                  else [m for m in grp["monsters"] if q in m["name"].lower()])
+            if not ms:
+                continue
+            hits += len(ms)
+            out.append({"label": f"{sec['display']} -- {grp['label']}",
+                        "section": sec["key"], "monsters": ms,
+                        # a hit is colored only if ITS section is unlocked --
+                        # Find must not leak what a locked tab is hiding
+                        "colors_unlocked": sec.get("colors_unlocked", True)})
+    return {"hits": hits, "groups": out}

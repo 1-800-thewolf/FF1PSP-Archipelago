@@ -161,6 +161,14 @@ def _nonboss_stat_ids():
 # +15 crit rate, +20 magic defense. (+0 XP / +2 Gil handled by rewards above.)
 _BS_HP, _BS_EVA, _BS_DEF, _BS_HITS = 4, 8, 9, 10
 _BS_ACC, _BS_ATK, _BS_AGI, _BS_INT, _BS_MDEF = 11, 12, 13, 14, 20
+# +0x20 s32: the monster's INITIATIVE BONUS, added to agility by the battle
+# turn-order sort at ELF 0x088822A0 (score = AGI + rand()%40 + this, then
+# `andi 0xffff` and a clamp to 255). Every vanilla value is <= 0 (census over
+# all 203 records: 0 x85, -5 x54, -10 x39, -15 x14, -20 x8, -25/-30/-35 x1),
+# and each is smaller in magnitude than its own monster's AGI, so vanilla can
+# never make that sum negative. Scaling AGI down can -- see _AGI_FLOOR below.
+# Not a stat we scale; listed here because the AGI clamp reads it.
+_BS_INIT = 0x20
 _BS_DAMP = 0.585        # defense-family damping: Kraken 60 def -> ~200 at 500%
 _BS_HITS_CAP = 16   # live-verified 2026-07-14: 10 and 16 hits/turn run clean
                     # in-battle; 16 = worst overflow case (Omega/Shinryu @500%)
@@ -169,7 +177,8 @@ _BS_HITS_CAP = 16   # live-verified 2026-07-14: 10 and 16 hits/turn run clean
 def _scale_stat_records(blk, mult, ids):
     """Scale the combat stats of the given monster ids in a monster_stats block
     (in place). Linear x mult, clamped to the byte: attack, accuracy, agility,
-    intelligence. Damped (x 1+(mult-1)*0.585 above vanilla, linear below) so a
+    intelligence -- agility additionally floored at |initiative bonus| so the
+    turn-order sort's score can never go negative and wrap (see _BS_INIT). Damped (x 1+(mult-1)*0.585 above vanilla, linear below) so a
     monster never becomes unhittable/immune: defense, magic defense, evasion. HP
     scales linearly into its u16; overflow past 65535 converts into extra
     hits/turn (round, capped at 16) so lost HP comes back as offense. Crit rate
@@ -193,6 +202,17 @@ def _scale_stat_records(blk, mult, ids):
                                        max(hits, int(round(hits * wanted / 65535))))
         for off in (_BS_ATK, _BS_ACC, _BS_AGI, _BS_INT):
             b(base, off, mult)
+        # Never let scaled agility fall below |initiative bonus|: the turn-order
+        # sort masks its score with `andi 0xffff` and then clamps to 255, so a
+        # negative AGI+bonus wraps to a huge value and the monster acts FIRST --
+        # the exact opposite of what a lowered Monster Power asks for. Vanilla
+        # cannot reach it (see _BS_INIT); at monster_power 0.1 it hit 114 of the
+        # 203 records. The floor is |bonus| itself, which lands the sum on 0 --
+        # still the slowest a record can legally be. It can never raise a record
+        # above its vanilla agility, because vanilla AGI >= |bonus| everywhere.
+        init = struct.unpack_from("<i", blk, base + _BS_INIT)[0]
+        if init < 0:
+            blk[base + _BS_AGI] = max(blk[base + _BS_AGI], min(255, -init))
         for off in (_BS_DEF, _BS_MDEF, _BS_EVA):
             b(base, off, damped)
     return blk

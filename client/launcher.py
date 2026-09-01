@@ -24,13 +24,15 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 
 # The fixed local debugger port we pin in the ini. ppsspp_ws.LOCAL_HINT must match.
 DEBUG_PORT = 8765
 # FF1 20th Anniversary (US) disc id, as matched inside the ISO header read:
 # UMD_DATA.BIN carries the dashed form near the disc header; the plain form lives
-# deep in the data. Match either so a 1 MB header read is enough to verify.
+# deep in the data. Kept for callers outside this module; the live check is
+# iso_verdict(), which reads WHICHEVER id is there so it can name the region.
 GAME_ID_NEEDLES = (b"ULUS-10251", b"ULUS10251")
 
 def state_dir() -> str:
@@ -167,19 +169,91 @@ def find_ppsspp(saved: str = "") -> str:
 
 
 # --------------------------------------------------------------- ISO locating ---
-def _iso_is_ff1(path: str) -> bool:
-    """True if the ISO's UMD header carries the FF1 game id ULUS10251."""
+# Any PSP disc id as it appears in an image header: media/publisher pair, a
+# REGION letter, a type letter, five digits (dashed in UMD_DATA.BIN, undashed
+# deeper in the data). We read the region letter so a rejection can name what
+# the player actually picked instead of the useless "not FF1".
+DISC_ID_RE = re.compile(rb"[UN][LCP][UEJAKH][SMGHBZ]-?\d{5}")
+_REGION_NAME = {"U": "North America", "E": "Europe", "J": "Japan",
+                "A": "Asia", "K": "Korea", "H": "Asia"}
+# The one disc this randomizer is RE'd against. Every regional build is a
+# different ELF (the Europe ULES-00986 executable is 560 bytes larger), so the
+# ~600 absolute code addresses the patcher writes are wrong on any other disc.
+SUPPORTED_DISC_ID = "ULUS-10251"
+
+
+def iso_disc_id(path: str) -> str:
+    """The disc id in this image's header, dashed ("ULES-00986"), or "" when
+    none is visible. A compressed container hides its header behind the
+    compression blocks, so "" means "cannot tell yet", never "wrong disc"."""
     try:
         with open(path, "rb") as f:
             head = f.read(1 << 20)   # 1 MB covers the volume descriptors + boot
-        if any(n in head for n in GAME_ID_NEEDLES):
-            return True
-        # A compressed image hides the game id behind its blocks, so the needle
-        # scan cannot see it. Accept the container on its magic and let
-        # cso_decompress.ensure_plain_iso expand (or clearly refuse) it at bake
-        # time -- rejecting here just made a legitimate .cso look "not FF1".
-        from .cso_decompress import image_kind
-        return image_kind(path) in ("ciso", "ziso", "dax", "chd")
+    except OSError:
+        return ""
+    hits = [m.group(0).decode("latin1") for m in DISC_ID_RE.finditer(head)]
+    if not hits:
+        return ""
+    def norm(h):
+        h = h.replace("-", "")
+        return h[:4] + "-" + h[4:]
+    # Take EVERY match, not the first: the pattern is loose enough to hit
+    # arbitrary data, and one stray match ahead of UMD_DATA.BIN must not make a
+    # good disc read as the wrong one. A supported hit wins outright; otherwise
+    # prefer a dashed match (that is the header form) over a bare one.
+    for h in hits:
+        if norm(h) == SUPPORTED_DISC_ID:
+            return SUPPORTED_DISC_ID
+    for h in hits:
+        if "-" in h:
+            return norm(h)
+    return norm(hits[0])
+
+
+def iso_region(disc_id: str) -> str:
+    """Player-facing region for a disc id, "" if the letter is unknown."""
+    return _REGION_NAME.get(disc_id[2:3].upper(), "")
+
+
+def iso_verdict(path: str):
+    """(ok, complaint). ok is True for the supported disc AND for a compressed
+    container whose header we cannot read yet -- cso_decompress refuses those
+    clearly at bake time, and rejecting here just made a legitimate .cso look
+    "not FF1". complaint is one player-facing line, "" when ok."""
+    disc = iso_disc_id(path)
+    if disc.replace("-", "") == SUPPORTED_DISC_ID.replace("-", ""):
+        return True, ""
+    if not disc:
+        try:
+            from .cso_decompress import image_kind
+            if image_kind(path) in ("ciso", "ziso", "dax", "chd"):
+                return True, ""
+        except Exception:
+            pass
+        return False, (
+            "No PSP disc id was found in this file, so it is not a readable "
+            "PSP disc image. This randomizer needs Final Fantasy 20th "
+            f"Anniversary Edition for PSP, USA, disc id {SUPPORTED_DISC_ID}.")
+    region = iso_region(disc)
+    where = f" ({region})" if region else ""
+    # Same region, different id = they picked another game entirely; telling
+    # THAT player about regional builds would just confuse them.
+    why = ("which is a different game."
+           if region == "North America" else
+           "and other regions are not supported, or planned: each regional "
+           "build is a different executable, so every code address this "
+           "randomizer patches lands in the wrong place.")
+    return False, (
+        f"That image is disc id {disc}{where}, {why} This randomizer needs "
+        f"Final Fantasy 20th Anniversary Edition for PSP, USA, disc id "
+        f"{SUPPORTED_DISC_ID}.")
+
+
+def _iso_is_ff1(path: str) -> bool:
+    """True if this image is the supported FF1 disc (or a compressed container
+    we cannot read the id out of yet)."""
+    try:
+        return iso_verdict(path)[0]
     except Exception:
         return False
 
@@ -458,7 +532,14 @@ def patch_ini(ini_path: str) -> bool:
         # Backoff on = treat frequently-changing textures as dynamic and stop
         # caching/replacing them; ReplaceTextures off = no per-frame hash lookup
         # (there is no HD texture pack here). See memory: openworld texture lag.
-        _set_in_section(lines, "Graphics", "TextureBackoffCache", "True")
+        # DEV ESCAPE HATCH: FF1PSP_TEXBACKOFF=0 leaves lazy caching OFF for a
+        # session. Only for diagnosing stale-texture bugs (the RAM job-sprite
+        # pin writes from OUTSIDE the emulator, so PPSSPP sees it only when it
+        # re-hashes; backoff can therefore show a half-updated sheet). Costs
+        # open-world framerate -- never ship it off.
+        _set_in_section(lines, "Graphics", "TextureBackoffCache",
+                        "False" if os.environ.get("FF1PSP_TEXBACKOFF") == "0"
+                        else "True")
         _set_in_section(lines, "Graphics", "ReplaceTextures", "False")
         with open(ini_path, "w", encoding="utf-8") as f:
             f.write(bom + "\n".join(lines) + "\n")
@@ -486,11 +567,43 @@ async def _can_connect() -> bool:
         return False
 
 
+# Hard wall-clock ceiling on ONE debugger_up() probe. _can_connect already
+# time-boxes its own dial (open_timeout=4 + wait_for 3), but a PPSSPP whose WS
+# server has WEDGED accepts the TCP connection and then never finishes the
+# handshake, and that hang outlives BOTH of those timeouts (live 2026-08-31: a
+# probe survived open_timeout=4 inside wait_for(...,6) and was still running at
+# 60s). Without a ceiling here the connect never returns, so ensure_ppsspp never
+# reaches its "debugger unreachable -> close it and relaunch" branch and the
+# client sits on "Checking PPSSPP..." forever.
+_PROBE_CEILING = 12.0
+_probe_thread = None
+
+
 def debugger_up() -> bool:
-    try:
-        return asyncio.run(_can_connect())
-    except Exception:
-        return False
+    """True if the local PPSSPP debugger answers a dial within _PROBE_CEILING.
+
+    The probe runs on a DAEMON thread we join with a timeout: a wedged socket
+    cannot be cancelled, so the only way to stop waiting on it is to walk away
+    and let interpreter exit take the thread. While one probe is still stuck we
+    answer False immediately rather than stacking another -- wait_for_debugger
+    polls this once a second."""
+    global _probe_thread
+    t = _probe_thread
+    if t is not None and t.is_alive():
+        return False              # previous probe still wedged; don't pile on
+    box = []
+
+    def _run():
+        try:
+            box.append(asyncio.run(_can_connect()))
+        except Exception:
+            box.append(False)
+
+    t = threading.Thread(target=_run, name="ff1psp-debugger-probe", daemon=True)
+    _probe_thread = t
+    t.start()
+    t.join(_PROBE_CEILING)
+    return bool(box and box[0])
 
 
 # Last launch bookkeeping for self-healing: the Popen of OUR child (so a
@@ -749,6 +862,13 @@ def ppsspp_dialog(cfg: dict):
         if not os.path.isfile(iso_p):
             messagebox.showerror("FF1 PSP", "FF1 ISO not found.")
             return
+        # Verify the disc id HERE, not at bake time. This dialog used to accept
+        # any readable file, so a wrong-region or wrong-game image was only
+        # caught minutes later by the bake banner.
+        ok, why = iso_verdict(iso_p)
+        if not ok:
+            messagebox.showerror("FF1 PSP", why + "\n\nPick a different file.")
+            return
         result.update(ppsspp=exe_p, iso=iso_p)
         root.destroy()
 
@@ -780,6 +900,10 @@ def _console_dialog(ppsspp, iso):
     if not (os.path.isfile(exe) and os.path.isfile(iso)):
         print("Missing PPSSPP / ISO - aborting.")
         return None
+    ok, why = iso_verdict(iso)
+    if not ok:
+        print(why)
+        return None
     return dict(ppsspp=exe, iso=iso)
 
 
@@ -792,6 +916,25 @@ def bake_hash32(bake: dict) -> int:
     from . import iso_patcher
     h = hashlib.sha1()
     h.update(f"v{iso_patcher.PATCHER_VERSION}".encode())
+    # Class-sprite art is BAKED (job_sprite_bake splices each shipped MERGED
+    # palette into the dpk) but it reaches the disc from the apworld, not from
+    # a data patch -- so without folding it in here, re-merged art plus an
+    # unchanged PATCHER_VERSION hits the cached ISO whose palette belongs to
+    # the OLD art while the client pins the NEW pixels over it. Measured
+    # 2026-08-31: transparency moved from index 1 back to index 0, the launch
+    # reused a bake whose JOB01.GIM palette still had the custom colours one
+    # slot up, and the Stealth Thief drew scrambled in battle and on the load
+    # screen. Hashing the shipped blobs makes any art change re-bake on its
+    # own, with or without a version bump.
+    try:
+        from . import job_sprites as _js
+        for _cls in range(_js.CLASS_COUNT):
+            _art = _js.sheet(_cls)
+            if _art:
+                h.update(("job%02x=" % _cls).encode())
+                h.update(hashlib.sha1(_art[0] + _art[1]).digest())
+    except Exception:
+        pass
     feats = (bake or {}).get("features") or {}
     h.update(",".join(sorted(k for k, v in feats.items() if v)).encode())
     for p in (bake or {}).get("data") or []:
@@ -904,7 +1047,7 @@ def _write_bake_manifest(out_iso, hash32, feats, data, src_iso, src_stat):
     2026-08-08 wrong-bake reports needed the hash reconstructed by hand from
     the log. The manifest is pure diagnostics (nothing reads it to make a
     decision; the cache key is still the filename tag) and is shipped by
-    /ff1psp_logs. Never raises: a failed manifest must not fail a good bake."""
+    /logs. Never raises: a failed manifest must not fail a good bake."""
     try:
         from . import iso_patcher
         with open(out_iso + ".f1ap.json", "w", encoding="utf-8") as f:
@@ -1043,7 +1186,7 @@ def ensure_patched_iso(iso: str, bake: dict, notify=None) -> str:
             "!!!  NEXT STEP: type  /checkiso  in this window. It inspects the",
             "!!!  ISO you are already using and tells you exactly what is",
             "!!!  wrong with it and how to fix it. No file paths to type.",
-            "!!!  If /checkiso says the ISO is fine, type  /ff1psp_logs  and",
+            "!!!  If /checkiso says the ISO is fine, type  /logs  and",
             "!!!  send the zip it saves to whoever maintains this apworld.",
             bar, ""):
             say(line)

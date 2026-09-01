@@ -939,6 +939,7 @@ class TrackerMixin:
         self._tablets_lbl = None    # right side of totals line: "Lute Tablets x/n"
         self._runes_lbl = None      # right side of totals line: "Runes x/n"
         self._shards_lbl = None     # right side of totals line: "Levi Shards x/n"
+        self._members_lbl = None    # right side of totals line: "Members x/4"
         self._last_state = None
         # Shops tab (top-level sibling of Tracker)
         self._shops_tab = None
@@ -953,6 +954,26 @@ class TrackerMixin:
         self._search_focus_evts = []    # pending re-focus Clock events
         self._shops_expanded = set()    # (city, shop) groups opened by the user
         self._last_shops = None
+        # Bestiary tab (bestiarysanity; shows a note when the option is off).
+        # Sub-tab strip mirrors the Tracker's sections + Bosses, with Summary
+        # and Find in front (see tracker.BESTIARY_SECTION_ORDER).
+        self._bestiary_tab = None
+        self._bestiary_tabbar = None
+        self._bestiary_note = None
+        self._bestiary_summary_box = None
+        self._bestiary_find_box = None
+        self._bestiary_section_box = {}   # section key -> content column
+        self._bestiary_section_idx = {}   # section key -> tab index
+        self._bestiary_search = None
+        self._bestiary_query = ""
+        self._bestiary_head = None        # header row (note + search), detached
+        self._bestiary_off_label = None   # set while the tab is collapsed to
+                                          # a single line (bestiarysanity off)
+        self._bestiary_tab_widget = None  # the top-level tab button, so the
+                                          # whole tab can leave the strip when
+                                          # BestiarysanityPercent is 0
+        self._bestiary_tab_home = None    # (parent, index) it was removed from
+        self._last_bestiary = None
         # Boost tab (top-level sibling of Tracker/Shops)
         self._boost_tab = None
         self._boost_rows = {}           # stat key -> _BoostSlider
@@ -979,6 +1000,10 @@ class TrackerMixin:
         except Exception as ex:
             logger.warning(f"Could not build the Shops tab: {ex}")
         try:
+            self.build_bestiary_tab()
+        except Exception as ex:
+            logger.warning(f"Could not build the Bestiary tab: {ex}")
+        try:
             self.build_boost_tab()
         except Exception as ex:
             logger.warning(f"Could not build the Boost tab: {ex}")
@@ -988,6 +1013,8 @@ class TrackerMixin:
             self._paint_shops(self._last_shops)
         if self._last_boost is not None:
             self._paint_boost(self._last_boost)
+        if self._last_bestiary is not None:
+            self._paint_bestiary_safe(self._last_bestiary)
 
     def build_tracker_tab(self):
         if self._tracker_tab is not None:
@@ -1057,11 +1084,16 @@ class TrackerMixin:
                                  valign="middle", size_hint_x=None, width=dp(150))
         self._shards_lbl.bind(
             size=lambda w, _v: setattr(w, "text_size", w.size))
+        self._members_lbl = Label(text="", markup=True, halign="right",
+                                  valign="middle", size_hint_x=None, width=dp(110))
+        self._members_lbl.bind(
+            size=lambda w, _v: setattr(w, "text_size", w.size))
         line.add_widget(self._totals_lbl)
         line.add_widget(self._crystals_lbl)
         line.add_widget(self._tablets_lbl)
         line.add_widget(self._runes_lbl)
         line.add_widget(self._shards_lbl)
+        line.add_widget(self._members_lbl)
         box.add_widget(line)
         return box
 
@@ -1175,6 +1207,16 @@ class TrackerMixin:
                 f"{state.shards_need}[/color]")
         else:
             self._shards_lbl.text = ""
+        # starting_party_members: "Members x/4", hidden on full-party seeds
+        # (members_need 0). Green once everyone has been found.
+        if getattr(state, "members_need", 0) > 0:
+            m_hex = (UNUSED_HEX if state.members_have >= state.members_need
+                     else TOTALS_HEX)
+            self._members_lbl.text = (
+                f"[color={m_hex}]Members {state.members_have}/"
+                f"{state.members_need}[/color]")
+        else:
+            self._members_lbl.text = ""
 
         for section in self._section_grids:
             self._paint_section(section, state)
@@ -1363,17 +1405,24 @@ class TrackerMixin:
     _SEARCH_REFOCUS_AT = (0.0, 0.05, 0.3, 0.6, 1.0, 1.5)
 
     def _focus_shops_search(self):
-        """Put the caret in the search box and keep it there briefly -- unless the
-        user clicks somewhere else first, which cancels the whole sequence (never
-        yank focus back out of a field somebody deliberately clicked into)."""
-        box = self._shops_search
+        return self._focus_search_box(self._shops_search)
+
+    def _focus_search_box(self, box):
+        """Put the caret in `box` and keep it there briefly -- unless the user
+        clicks somewhere else first, which cancels the whole sequence (never
+        yank focus back out of a field somebody deliberately clicked into).
+
+        Shared by the Shops and Bestiary Find tabs: one scheduled attempt is not
+        enough, because the touch that selected the tab is still being
+        dispatched and steals focus back (live 2026-08-28)."""
         if box is None:
             return
         self._cancel_search_refocus()
+        self._search_focus_target = box
 
         def attempt(_dt):
-            if self._shops_search is not None and not self._shops_search.focus:
-                self._shops_search.focus = True
+            if box is not None and not box.focus:
+                box.focus = True
 
         self._search_focus_evts = [Clock.schedule_once(attempt, t)
                                    for t in self._SEARCH_REFOCUS_AT]
@@ -1386,7 +1435,7 @@ class TrackerMixin:
             self._SEARCH_REFOCUS_AT[-1] + 0.1))
 
     def _search_touch_guard(self, _window, touch):
-        box = self._shops_search
+        box = getattr(self, "_search_focus_target", None) or self._shops_search
         if box is None or not box.collide_point(*box.to_widget(*touch.pos)):
             self._cancel_search_refocus()
         return False              # never consume the touch
@@ -1633,6 +1682,396 @@ class TrackerMixin:
                 "[color=6E6E6E]   Nothing in the towns you have visited matches. "
                 "Locked towns are not searched.[/color]"))
 
+
+    # ---------------------------------------------------------- bestiary tab --
+    # Row color IS the classification -- the AP client's font has no color-emoji
+    # coverage (live 2026-08-28: dots rendered as tofu), so nothing here may lean
+    # on a glyph to carry meaning. Traps deliberately share the filler color:
+    # flagging them would let a player skip exactly the checks that bite.
+    _BESTIARY_CLS_COLOR = {
+        "progression": "CE93D8",
+        "useful": "64B5F6",
+        "filler": "9E9E9E",
+        "trap": "FF8C00",
+        "unknown": "6E6E6E",
+    }
+    # Suffix letter shown once a monster's quality is revealed. An unscouted
+    # entry gets no letter rather than a wrong one.
+    _BESTIARY_CLS_LETTER = {
+        "progression": "P",
+        "useful": "U",
+        "filler": "F",
+        "trap": "T",
+    }
+    _BESTIARY_KILLED_COLOR = "81C784"
+
+    def build_bestiary_tab(self):
+        if self._bestiary_tab is not None:
+            return
+        root = BoxLayout(orientation="vertical", padding=dp(6), spacing=dp(5))
+
+        # Header: seed note on the left, always-visible search on the right.
+        # Typing jumps to Find, exactly like the Shops tab.
+        head = BoxLayout(orientation="horizontal", size_hint_y=None,
+                         height=dp(28), spacing=dp(6))
+        self._bestiary_note = Label(text="", markup=True, size_hint_x=0.42,
+                                    halign="left", valign="middle")
+        self._bestiary_note.bind(
+            size=lambda w, _v: setattr(w, "text_size", w.size))
+        head.add_widget(self._bestiary_note)
+        cap = Label(text="[b]Search:[/b]", markup=True, size_hint_x=None,
+                    width=dp(56), halign="right", valign="middle")
+        cap.bind(size=lambda w, _v: setattr(w, "text_size", w.size))
+        head.add_widget(cap)
+        self._bestiary_search = TextInput(
+            text="", multiline=False, size_hint_x=0.42,
+            hint_text="monster or place name...",
+            padding=(dp(6), dp(4)), font_size=dp(14),
+            background_color=(0.14, 0.14, 0.16, 1),
+            foreground_color=(0.92, 0.92, 0.92, 1),
+            cursor_color=(0.92, 0.92, 0.92, 1),
+            hint_text_color=(0.55, 0.55, 0.58, 1))
+        self._bestiary_search.bind(text=self._on_bestiary_query)
+        head.add_widget(self._bestiary_search)
+        clear = Button(text="Clear", size_hint_x=None, width=dp(56),
+                       font_size=dp(13))
+        clear.bind(on_press=lambda _b: self.set_bestiary_query(""))
+        head.add_widget(clear)
+        root.add_widget(head)
+        self._bestiary_head = head
+
+        self._bestiary_tabbar = _WrapTabBar(cols=4, btn_height=dp(38))
+        root.add_widget(self._bestiary_tabbar)
+
+        def _scroll_box(width=0.6):
+            sv = ScrollView(do_scroll_x=False)
+            row = BoxLayout(orientation="horizontal", size_hint_y=None,
+                            padding=(dp(4), dp(4)))
+            row.bind(minimum_height=row.setter("height"))
+            box = BoxLayout(orientation="vertical", size_hint=(width, None),
+                            spacing=dp(2), pos_hint={"top": 1})
+            box.bind(minimum_height=box.setter("height"))
+            row.add_widget(box)
+            row.add_widget(BoxLayout(size_hint=(1 - width, None), height=dp(1)))
+            sv.add_widget(row)
+            return sv, box
+
+        sv, self._bestiary_summary_box = _scroll_box(0.5)
+        self._bestiary_tabbar.add_tab("Summary", TR.SECTION_COLOR[TR.SUMMARY],
+                                      sv)
+        sv, self._bestiary_find_box = _scroll_box()
+        self._bestiary_tabbar.add_tab(
+            "Find", TR.SECTION_COLOR["shops"], sv,
+            dark_text=True, on_select=self._focus_bestiary_search)
+
+        self._bestiary_section_box = {}
+        self._bestiary_section_idx = {}
+        for skey in TR.BESTIARY_SECTION_ORDER:
+            sv, box = _scroll_box()
+            idx = self._bestiary_tabbar.add_tab(
+                TR.BESTIARY_SECTION_DISPLAY.get(skey, skey),
+                TR.BESTIARY_SECTION_COLOR.get(skey, (0.5, 0.5, 0.5)), sv,
+                dark_text=(skey in TR.BESTIARY_BRIGHT_SECTIONS))
+            self._bestiary_section_box[skey] = box
+            self._bestiary_section_idx[skey] = idx
+
+        self._bestiary_tabbar.select(0)
+        self._bestiary_tab_widget = self.add_client_tab("Bestiary", root)
+        self._bestiary_tab = root
+        self._bestiary_show_off("Waiting for the seed...")
+        self._bestiary_summary_box.add_widget(_offer_label(
+            "[color=9AA0A6]Waiting for the seed...[/color]"))
+
+    # ---- search -------------------------------------------------------------
+    def _on_bestiary_query(self, _widget, text):
+        self._bestiary_query = (text or "").strip()
+        self._paint_bestiary_find()
+        if self._bestiary_query and self._bestiary_tabbar is not None:
+            self._bestiary_tabbar.select(1)         # Find
+
+    def set_bestiary_query(self, text):
+        def apply(_dt=None):
+            if self._bestiary_search is None:
+                return
+            self._bestiary_search.text = text or ""
+            self._focus_bestiary_search()
+        Clock.schedule_once(apply, 0)
+
+    def _focus_bestiary_search(self):
+        return self._focus_search_box(self._bestiary_search)
+
+    # ---- paint --------------------------------------------------------------
+    def update_bestiary(self, payload):
+        """Thread-safe entry point from the client's asyncio loop."""
+        self._last_bestiary = payload
+        if self._bestiary_tab is None:
+            return
+        Clock.schedule_once(lambda _dt: self._paint_bestiary_safe(payload), 0)
+
+    def _paint_bestiary_safe(self, payload):
+        try:
+            self._paint_bestiary(payload)
+        except Exception as ex:
+            logger.warning(f"Bestiary repaint failed: {ex}")
+
+    # Rows render plain until a section has been explored enough to earn its
+    # item-quality colors (tracker.BESTIARY_COLOR_UNLOCK).
+    _BESTIARY_LOCKED_COLOR = "E0E0E0"
+
+    # Header colour for a place you cannot walk to yet. The group stays listed
+    # -- the tab is a hunting reference, not a to-do list -- and only its HEADER
+    # dims, so the reachable places are the ones that catch the eye.
+    _BESTIARY_DIM_COLOR = "5A5A5A"
+
+    def _bestiary_row(self, entry, indent="  "):
+        """One monster line. Colour AND quality letter ride the ENTRY, not the
+        tab -- a monster revealed anywhere reads the same on every section."""
+        cls = entry.get("cls")
+        # NOT dimmed by reachability: reachability belongs to the PLACE, the
+        # quality to the monster. Greying these rows also swallowed the letter,
+        # so a tab reading "Monster Item Qualities Unlocked" still showed plain
+        # names for every gated group (live 2026-08-31).
+        if not entry.get("revealed", True):
+            hexc, letter = self._BESTIARY_LOCKED_COLOR, ""
+        else:
+            hexc = self._BESTIARY_CLS_COLOR.get(cls, "9E9E9E")
+            lt = self._BESTIARY_CLS_LETTER.get(cls, "")
+            letter = f" ({lt})" if lt else ""
+            if entry.get("killed"):
+                hexc = self._BESTIARY_KILLED_COLOR
+        tail = " (defeated)" if entry.get("killed") else ""
+        return _offer_label(
+            f"[color={hexc}]{indent}{entry['name']}{letter}{tail}[/color]")
+
+    def _fill_bestiary_groups(self, box, groups):
+        for grp in groups:
+            # "open" is absent on a payload built with no token set; unknown
+            # reachability paints normally rather than greying everything.
+            dim = grp.get("open", True) is False
+            if dim:
+                box.add_widget(_wrap_label(
+                    f"[color={self._BESTIARY_DIM_COLOR}]{grp['label']}"
+                    f"  -- not reachable yet[/color]"))
+            else:
+                box.add_widget(_shop_header(grp["label"]))
+            for e in grp["monsters"]:
+                box.add_widget(self._bestiary_row(e))
+
+    def _bestiary_show_off(self, message):
+        """Collapse the whole tab to one line. With bestiarysanity off there is
+        nothing to search and nowhere to go, so the search box and the whole tab
+        strip come OUT of the tree rather than sitting there inert."""
+        root = self._bestiary_tab
+        if root is None:
+            return
+        if self._bestiary_off_label is None:
+            root.clear_widgets()
+            self._bestiary_off_label = _offer_label("")
+            root.add_widget(self._bestiary_off_label)
+            root.add_widget(BoxLayout())          # push the line to the top
+        self._bestiary_off_label.text = f"[color=9AA0A6]{message}[/color]"
+        if self._bestiary_note is not None:
+            self._bestiary_note.text = ""
+
+    def _bestiary_hide_tab(self):
+        """Take the whole Bestiary tab OUT of the client's top-level strip.
+        BestiarysanityPercent 0 means the feature does not exist this seed, so a
+        tab that only ever says "off" is noise. The tab BUTTON is what gets
+        detached; its MDScreen stays parked in the screen manager (kvui has no
+        remove-tab API, and unwinding the screen as well risks the selection
+        state). If detaching fails on this kvui build, the caller falls back to
+        the one-line collapsed tab -- still correct, just visible."""
+        tab = self._bestiary_tab_widget
+        if tab is None or self._bestiary_tab_home is not None:
+            return False
+        parent = getattr(tab, "parent", None)
+        if parent is None:
+            return False
+        try:
+            idx = list(parent.children).index(tab)
+            parent.remove_widget(tab)
+        except Exception as ex:
+            logger.debug(f"Could not hide the Bestiary tab: {ex}")
+            return False
+        self._bestiary_tab_home = (parent, idx)
+        return True
+
+    def _bestiary_unhide_tab(self):
+        """Put the tab back if a later payload turns the feature on."""
+        if self._bestiary_tab_home is None:
+            return
+        parent, idx = self._bestiary_tab_home
+        self._bestiary_tab_home = None
+        try:
+            parent.add_widget(self._bestiary_tab_widget, index=idx)
+        except Exception as ex:
+            logger.debug(f"Could not restore the Bestiary tab: {ex}")
+
+    def _bestiary_show_tabs(self):
+        """Restore the header + strip after an off state."""
+        root = self._bestiary_tab
+        if root is None or self._bestiary_off_label is None:
+            return
+        root.clear_widgets()
+        self._bestiary_off_label = None
+        root.add_widget(self._bestiary_head)
+        root.add_widget(self._bestiary_tabbar)
+
+    # Tab 0 is Summary and tab 1 is Find; the section tabs follow (see
+    # build_bestiary_tab). Only Summary is painted by index here.
+    _BESTIARY_SUMMARY_IDX = 0
+
+    # The Bestiary strip uses the EXACT scheme _paint_tab_titles gives the
+    # Tracker strip, driven off tracker.bestiary_view's "strip" block:
+    #   never held anything   -> grayscale, caption "-"
+    #   cleared               -> grayscale, caption "0" (still clickable)
+    #   region not in logic   -> out-of-logic dark grey + slashes
+    #   in logic, none found  -> section colour + shine
+    #   otherwise             -> section colour, no shine
+    # The caption is the REMAINING COUNT, not the Tracker's percent: a monster
+    # hunt is a to-do list and "12 left" is the actionable number.
+    def _paint_bestiary_tab(self, idx, skey, info):
+        bar = self._bestiary_tabbar
+        if bar is None or skey is None:
+            return
+        name = TR.BESTIARY_SECTION_DISPLAY.get(skey, skey)
+        base = TR.BESTIARY_SECTION_COLOR.get(skey, (0.5, 0.5, 0.5))
+        bar.set_enabled(idx, True)
+        if not info or info.get("total", 0) <= 0:
+            bar.set_out_logic(idx, False)
+            bar.set_text(idx, f"{name} [b]-[/b]")
+            bar.set_base(idx, _grayscale(base))
+            bar.set_shine(idx, False)
+            return
+        left = info.get("remaining", 0)
+        bar.set_text(idx, f"{name} {left}")
+        if left <= 0:
+            bar.set_out_logic(idx, False)
+            bar.set_base(idx, _grayscale(base))
+            bar.set_shine(idx, False)
+        elif info.get("in_logic") is False:
+            # NO "found > 0 reverts it to colour" escape here, unlike the
+            # Tracker strip: a monster is filed under EVERY section it roams,
+            # so one Cornelia kill also counts as `found` in Fire, Earth, Water,
+            # Elfheim and Lategame and would light all of them on turn 1 (live
+            # 2026-08-31, 6/97 checks in). The tab follows its REGION only.
+            bar.set_out_logic(idx, True)
+        else:
+            bar.set_out_logic(idx, False)
+            bar.set_base(idx, base)
+            bar.set_shine(idx, bool(info.get("shine")))
+
+    def _paint_bestiary(self, payload):
+        if self._bestiary_summary_box is None:
+            return
+        for box in [self._bestiary_summary_box] + list(
+                self._bestiary_section_box.values()):
+            box.clear_widgets()
+        if not payload or not payload.get("enabled"):
+            # A payload only exists once slot_data is in, so this is a real
+            # "off for this seed", not the pre-connect placeholder.
+            if not self._bestiary_hide_tab():
+                self._bestiary_show_off("Bestiarysanity is off for this seed.")
+            return
+        self._bestiary_unhide_tab()
+        self._bestiary_show_tabs()
+
+        done, total = payload.get("done", 0), payload.get("total", 0)
+        if self._bestiary_note is not None:
+            self._bestiary_note.text = f"[b]Bestiary checks: {done}/{total}[/b]"
+        # No colour legend here: it ran wider than the window and the row it
+        # sat in could only clip. The (P)/(U)/(F)/(T) letters ride the monster
+        # rows themselves, which is where a player reads them anyway.
+        self._bestiary_summary_box.add_widget(_wrap_label(
+            f"[b]{done}/{total} monster checks found[/b]"))
+
+        by_key = {s["key"]: s for s in payload.get("sections") or []}
+        strip = payload.get("strip") or {}
+        # Summary carries the whole seed's remaining count and shines while any
+        # hunt is left -- the same thing the Tracker's Summary tab does.
+        left_all = max(0, total - done)
+        self._bestiary_tabbar.set_text(self._BESTIARY_SUMMARY_IDX,
+                                       f"Summary  {left_all}")
+        self._bestiary_tabbar.set_shine(self._BESTIARY_SUMMARY_IDX,
+                                        left_all > 0)
+        for skey, idx in self._bestiary_section_idx.items():
+            sec = by_key.get(skey)
+            name = TR.BESTIARY_SECTION_DISPLAY.get(skey, skey)
+            box = self._bestiary_section_box[skey]
+            self._paint_bestiary_tab(idx, skey, strip.get(skey))
+            if sec is None:
+                # Nothing LEFT here (or the seed never put anything here). The
+                # tab stays in place -- a static strip never reshuffles under
+                # the player -- and stays open, like a completed Tracker tab.
+                box.add_widget(_offer_label(
+                    "[color=81C784]Nothing left to hunt here.[/color]"))
+                continue
+            unlocked = sec.get("colors_unlocked", True)
+            box.add_widget(_wrap_label(
+                f"[b]{sec['display']}[/b][color=6E6E6E] -- "
+                f"{sec['remaining']} monster"
+                f"{'' if sec['remaining'] == 1 else 's'} left to defeat"
+                f"[/color]"))
+            box.add_widget(_wrap_label(
+                f"[color={'81C784' if unlocked else '9AA0A6'}]"
+                f"{sec.get('progress', '')}[/color]"))
+            self._fill_bestiary_groups(box, sec["groups"])
+
+        if done >= total and total:
+            self._bestiary_summary_box.add_widget(_offer_label(
+                "[color=81C784]Every monster check is complete![/color]"))
+        else:
+            self._bestiary_summary_box.add_widget(_offer_label(
+                "[color=6E6E6E]Each tab lists the monsters still holding a "
+                "check there.[/color]"))
+            for skey in TR.BESTIARY_SECTION_ORDER:
+                sec = by_key.get(skey)
+                name = TR.BESTIARY_SECTION_DISPLAY.get(skey, skey)
+                if sec is None:
+                    self._bestiary_summary_box.add_widget(_offer_label(
+                        f"[color=4E4E4E]  {name}: done[/color]"))
+                else:
+                    self._bestiary_summary_box.add_widget(_offer_label(
+                        f"  {name}: [b]{sec['remaining']}[/b] left"))
+        self._paint_bestiary_find()
+
+    def _paint_bestiary_find(self):
+        box = self._bestiary_find_box
+        if box is None:
+            return
+        box.clear_widgets()
+        view = self._last_bestiary
+        if not view or not view.get("enabled"):
+            box.add_widget(_offer_label(
+                "[color=9AA0A6]Bestiarysanity is off for this seed.[/color]"))
+            return
+        q = self._bestiary_query
+        if not q:
+            # One _offer_label is ONE fixed-height row: a long sentence gets
+            # clipped mid-word and the tail reads as broken punctuation (live
+            # 2026-08-28). Short lines only.
+            box.add_widget(_offer_label(
+                "[color=9AA0A6]Search every remaining bestiary check.[/color]"))
+            box.add_widget(_offer_label(
+                "[color=6E6E6E]By monster: dragon, sahagin, ogre[/color]"))
+            box.add_widget(_offer_label(
+                "[color=6E6E6E]By place: gulg, ocean, whisperwind[/color]"))
+            box.add_widget(_offer_label(
+                "[color=6E6E6E]By tab: bosses, lategame, bonus[/color]"))
+            return
+        found = TR.bestiary_search(view, q)
+        hits = found["hits"]
+        box.add_widget(_offer_label(
+            f"[color=8C8C8C]{hits} remaining monster"
+            f"{'' if hits == 1 else 's'} match \"{q}\"[/color]"))
+        for grp in found["groups"]:
+            box.add_widget(_shop_header(grp["label"]))
+            for e in grp["monsters"]:
+                box.add_widget(self._bestiary_row(e))
+        if not hits:
+            box.add_widget(_offer_label(
+                "[color=6E6E6E]   No remaining check matches. Monsters you "
+                "have already defeated are not listed.[/color]"))
 
     # ------------------------------------------------------------- boost tab --
     # One snapped slider per stat: (key, title, lo, hi, step, note). The step is
@@ -1977,6 +2416,20 @@ def _offer_label(markup):
     lbl = Label(text=markup, markup=True, size_hint_y=None, height=ROW_HEIGHT,
                 halign="left", valign="middle")
     lbl.bind(size=lambda w, _v: setattr(w, "text_size", w.size))
+    return lbl
+
+
+def _wrap_label(markup):
+    """_offer_label that GROWS instead of clipping. A plain _offer_label is one
+    fixed ROW_HEIGHT row with text_size pinned to its own size, so a line wider
+    than the window is cut mid-word (live 2026-08-31: the Bestiary header lost
+    its left half at a narrow width). Here the wrap is width-only and the height
+    follows the rendered texture, so the row takes the lines it needs."""
+    lbl = Label(text=markup, markup=True, size_hint_y=None, height=ROW_HEIGHT,
+                halign="left", valign="top")
+    lbl.bind(width=lambda w, _v: setattr(w, "text_size", (w.width, None)),
+             texture_size=lambda w, ts: setattr(
+                 w, "height", max(ROW_HEIGHT, ts[1] + dp(2))))
     return lbl
 
 

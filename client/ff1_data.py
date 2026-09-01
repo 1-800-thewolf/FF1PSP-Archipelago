@@ -25,6 +25,14 @@ GIL_MAX = 999_999                 # game cap (6-digit display; over-cap shows th
                                   # LOW 6 digits, e.g. 1_003_399 -> "003399")
 INVENTORY_BASE_SA = 0x08D12034    # start of packed consumable records
 
+# --- bestiary kill counts (bestiarysanity) ---
+# u16[203] at save+0x1198, indexed by MONSTER id (monster_names.MONSTER_NAME
+# keys), one count per bestiary entry; save-durable, NG+ carries it over.
+# Found 2026-08-27 by RAM-dump pattern scan against a live save (single hit,
+# zero-padded past entry 202; 95 nonzero == the screen's "046%" defeated).
+BESTIARY_KILLS_SA = 0x08D12298    # == SAVE_BLOCK_PTR_CANON + 0x1198
+BESTIARY_KILLS_N = 203
+
 # --- Archipelago received-items counter (save-resident; "Opt A" item delivery) ---
 # A u32 WE own, stored INSIDE the save struct so it rolls back together with the
 # save on death/load. It holds the count of AP received-items already granted (the
@@ -373,6 +381,15 @@ SPELLS = {}  # category 7 (id 1 = Cure confirmed). FFRPSP: 64. TODO: flood [7,i,
 # Gilles (Black Mage): HP25 MP10 STR3  AGI5  INT20 STA2  LCK10 Atk7  Acc23 Def1 Eva56  MagicLv1
 # PARTY ARRAY (decoded 2026-06). Working copy at 0x08D11EE4; a backup copy lives
 # near 0x08D29xxx. 4 characters, stride 0x5C. Order: Argus, Sarisa, Jenica, Gilles.
+# Cumulative level-up EXP thresholds: u32[98] in BOOT static data (fixed
+# address, NOT save-arena -- no sa()). Entry 0 = EXP to REACH Lv2, so
+# exp-for-level(L) reads +4*(L-2); Lv1 needs 0. One table for all jobs.
+# RE'd live 2026-08-27: anchor Lv50 "Next Level 21463" -> threshold(51)
+# 427473 at 0x89534a8; Gilles leveled 49->50 inside (404326, 409978] and
+# the table's threshold(50) is 405723. Used by the missing-member revive
+# (join-level EXP floor; the engine grants the levels at the next victory).
+EXP_FOR_LEVEL_ADDR = 0x089533E4
+
 PARTY_BASE_SA = 0x08D11EE4
 PARTY_STRIDE = 0x5C
 PARTY_COUNT = 4
@@ -415,6 +432,15 @@ STATUS_BASE_SA = PARTY_BASE_SA - 1           # 0x08D11EE3
 P_STATUS_KO = 0x01
 def status_addr_sa(row):                     # row 0..3 = menu order
     return STATUS_BASE_SA + row * PARTY_STRIDE
+
+# Identity key: unique per character, and it TRAVELS WITH a Formation swap
+# (2026-08-17 incident note) while row-keyed state does not. At new game row r
+# holds identity r (identity = original creation slot), so plan state keyed by
+# creation slot resolves a character's CURRENT row through this array
+# (ApClient._member_identity_rows -- formation-swap hazard, review 2026-08-28).
+IDENTITY_BASE_SA = PARTY_BASE_SA - 4         # 0x08D11EE0
+def identity_addr_sa(row):                   # row 0..3 = menu order
+    return IDENTITY_BASE_SA + row * PARTY_STRIDE
 
 CLASS_BASE_SA   = PARTY_BASE_SA - 2          # 0x08D11EE2
 CLASS_STRIDE = PARTY_STRIDE            # 0x5C
@@ -505,6 +531,81 @@ BATTLE_DROP_STRIDE   = 3            # bytes per entry: [cat, id, qty]
                                    # +0=category blez->skip, +1=id. The 2026-07-08
                                    # [id,cat,qty] swap FROZE the loot phase; reverted.)
 BATTLE_DROP_SLOTS    = 9            # max entries the drop fn scans (index < 9)
+BATTLE_ENEMY_ROWS    = 9            # enemy unit rows (4..12) -- the same 9, which
+                                    # is WHY drop slot N belongs to enemy row N
+
+# --- battle sprite holder diagnostics (crash forensics, 2026-08-31) --------
+# ABSOLUTE module/heap addresses, NOT save-relative -- never pass these to sa().
+#
+# A battle party-sprite object (0x874 bytes, vtable SPRITE_VTBL_BATTLE) holds a
+# pointer at +0x0c to a HOLDER, and the initializer's epilogue dereferences the
+# holder's first word with no null check:
+#
+#   088fb9ec  lw   v0, 0xb4(s1)     <- entries this object got
+#   088fb9f8  bne  v0, zero, loop   <- 0 => the fill loop never ran
+#   088fba08  jalr t9               -> 0x088e9424 "return this+0xc"
+#   088fba10  lw   v0, 0x0(v0)      -> the holder pointer
+#   088fba14  lw   a0, 0x0(v0)      -> 0 when the object never GOT a holder
+#   088fba20  jalr t9               -> "CPU Jump to 00000000", RA 0x088fba28
+#
+# MEASURED in the frozen crash 2026-08-31 (not inferred): 19 objects of this
+# class were live. 18 had their own heap holder with a valid buffer and count 1.
+# Exactly ONE -- the object at 0x08dad080, which is s1 in the crash registers --
+# had holder == SPRITE_HOLDER_FALLBACK, whose first word is a permanent 0, and
+# count 0. The fallback is a static zero-initialised by 0x088e5d74; an object
+# pointing at it never obtained a holder. Objects of the OTHER class
+# (SPRITE_VTBL_OTHER) also point at the fallback and are harmless -- their
+# +0x64 does not take this path -- so the class check is load-bearing.
+SPRITE_HOLDER_FALLBACK = 0x089E8868  # static empty holder; first word always 0
+SPRITE_OBJ_SIZE        = 0x874       # heap size word of the sprite object
+SPRITE_OBJ_MAGIC       = 0xBABEFACE  # heap header magic that follows the size
+SPRITE_OBJ_HDR_SKIP    = 0x1C        # size word -> object base
+SPRITE_OBJ_HOLDER_OFF  = 0x0C        # u32 holder ptr (== FALLBACK means starved)
+SPRITE_OBJ_VTBL_OFF    = 0xAC        # u32 class vtable
+SPRITE_OBJ_COUNT_OFF   = 0xB4        # u32 entries held (0 = starved = fatal)
+# Fields that separate a built object from a stillborn one. Crash-state diff
+# against a healthy neighbour of the same kind: healthy read w/h 0x100/0x20,
+# a non-null asset pointer and count 1; the starved object read 0/0, asset 0,
+# count 0, with its tail still at the allocator's 0xffffffff fill. So the object
+# was never given its asset -- it is NOT holder exhaustion (110 holder nodes
+# were free at crash time).
+SPRITE_OBJ_W_OFF       = 0x28        # u32 texture width  (0 on a stillborn)
+SPRITE_OBJ_H_OFF       = 0x2C        # u32 texture height (0 on a stillborn)
+SPRITE_OBJ_ASSET_OFF   = 0xA8        # u32 asset/descriptor ptr (0 on a stillborn)
+SPRITE_OBJ_KIND_OFF    = 0x868       # u32 type argument the caller varies per row
+SPRITE_VTBL_BATTLE     = 0x089C9348  # the class whose epilogue crashes
+SPRITE_VTBL_OTHER      = 0x089C8AD0  # same block size, safe on the fallback
+# Object census window: every block of this class in the crash state sat inside
+# [0x08bec9e4, 0x08eb1c24]. Clamped well inside PSP RAM -- a read crossing
+# 0x0A000000 falls back to a minutes-long WS read (hybridpsp-oob-read wedge).
+SPRITE_HEAP_LO         = 0x08B00000
+SPRITE_HEAP_HI         = 0x08F00000
+# Holders come from 0x80-byte heap nodes carrying their own header
+# [size 0x80][0x0c][BABEFACE]; the node's first word is 1 while it is in use and
+# 0 once free, and the object's holder pointer is node+0x40. Walking the live
+# arena counts supply, which is the LEADING indicator: the fatal state is
+# reached when a request finds none. The arena measured 52 nodes (49 in use,
+# 3 free) at crash time and fits in one 128KB read, so this is cheap enough to
+# sample every tick.
+SPRITE_NODE_SIZE       = 0x80
+SPRITE_NODE_HDR_SKIP   = 0x20        # header -> node base
+SPRITE_NODE_USED_OFF   = 0x00        # u32 1 = in use, 0 = free
+SPRITE_NODE_LO         = 0x08B30000
+SPRITE_NODE_HI         = 0x08B50000
+
+# magic_info: the effect table every spell AND enemy skill is defined by.
+# 14-byte records, effect ids are 1-BASED, so record(id) = REC0 + (id-1)*14.
+# +0 side, +1 TARGET MODE, +2 status mask or power, +4 element, +6 type,
+# +7 name index, +8 accuracy. Ids 0x01-0x40 are player spells, 0x41-0x65 are
+# enemy skills. All four trap records were read back from live RAM matching
+# the disc exactly (2026-08-30).
+MAGIC_INFO_REC0   = 0x08954D1A
+MAGIC_INFO_STRIDE = 14
+MI_TARGET_MODE    = 1      # u8: 0x01 all / 0x02 single / 0x04 self /
+                           #     0x08 all allies / 0x10 one ally
+MI_TARGET_SINGLE  = 0x02   # the only mode needing a per-row selector in
+                           # unit+0x41; the rest take 0xFF
+
 # SLOT N IS OWNED BY ENEMY ROW N -- it is not a free-for-all list. The victory
 # reward loop (0x888646c) walks enemy rows 0..8 and calls set_drop(0x8886654)
 # with slot = row, which stamps [cat, id, 1] from the monster drop table
@@ -513,6 +614,12 @@ BATTLE_DROP_SLOTS    = 9            # max entries the drop fn scans (index < 9)
 # OCCUPIED row's slot gets silently replaced at victory -- the client must pick
 # a row whose BU_SPECIES reads 0xFF (see ApClient._steal_drop_slot).
 # (Disasm 2026-08-06, after two live steal->wrong-item mismatches.)
+# The drop table itself, so a FULL formation (no 0xFF row -- KingDragonite
+# 2026-08-20, nine enemies, the steal parked in row 0 and vanished) can still be
+# scored instead of guessed: a species whose entry has category 0 or chance 0
+# never reaches the stamp at all, so ITS row is as safe as an empty one.
+MONSTER_DROP_TABLE  = 0x0894C446   # + species*MONSTER_DROP_STRIDE
+MONSTER_DROP_STRIDE = 36           # +0 category, +1 item id, +2 percent chance
 
 # --- Per-actor battle-unit records (job-scroll boosts) ----------------------------
 # Battle runs on per-battle COPIES of the party stats (battle-engine-re +
@@ -524,6 +631,20 @@ BATTLE_DROP_SLOTS    = 9            # max entries the drop fn scans (index < 9)
 BATTLE_UNIT_OFF    = 0xC714
 BATTLE_UNIT_STRIDE = 0x6C
 BU_STATUS = 0x00   # u16 status bits (bit0=KO, bit1=stone; &3 = out of action)
+# Full ailment bit map (classic FF1 order), derived offline 2026-08-24 from the
+# magic_info status masks bundled in rando_data._B64 (each -na cure spell carries
+# the mask it cures: Life->0x01, Stona->0x02, Poisona->0x04, Blindna->0x08,
+# Vox->0x40; Sleep/Sleepra->0x20, Confuse->0x80, Hold/Stun/Stop->0x10). Bits
+# 0x01/0x02/0x08 were already live-confirmed (deathlink / thief-steal / blind
+# balloon). Poison and stone persist after battle; the rest are battle-only.
+BU_ST_KO      = 0x01
+BU_ST_STONE   = 0x02
+BU_ST_POISON  = 0x04
+BU_ST_BLIND   = 0x08
+BU_ST_STUN    = 0x10
+BU_ST_SLEEP   = 0x20
+BU_ST_SILENCE = 0x40
+BU_ST_CONFUSE = 0x80
 BU_HP     = 0x08   # u16 current HP
 BU_MAXHP  = 0x0A   # u16 max HP
 BU_MP     = 0x0C   # u16 current MP
@@ -866,6 +987,18 @@ RUNE_KEY_FLAG_MASK = 0x40              # bit 62 & 7 = b6
 BONUS_CRYSTAL_SHADOW_ADDR = 0x08D11934   # save+0x834 (dead slot-magic reserve)
 def bonus_crystal_shadow_mask(dg):       # dg 0..3 -> bit 0..3 of that byte
     return 0x01 << dg
+# The four Fiend-defeated story flags (17 Lich / 19 Marilith / 29 Kraken /
+# 34 Tiamat), as (addr, mask) into the 0x1151C flag bitfield (flag N -> byte
+# 0x1151C + N//8, bit N%8). Same bits the on-disc crystals_needed wrapper
+# counts (iso_patcher _CRY_FLAG offsets 0x41E/0x41F/0x420). Read-only in the
+# client: the tracker's "Crystals x/n" line counts these instead of the
+# reachability fixpoint, so it matches the in-game crystal display.
+FIEND_FLAG_BITS = (
+    (0x08D1151E, 0x02),                  # Lich     (flag 17)
+    (0x08D1151E, 0x08),                  # Marilith (flag 19)
+    (0x08D1151F, 0x20),                  # Kraken   (flag 29)
+    (0x08D11520, 0x04),                  # Tiamat   (flag 34)
+)
 # DLC bonus-dungeon superbosses: monster ids 0x80-0x90 are the Soul-of-Chaos
 # "blue-flame" bosses, but only SOME of each dungeon's blue-flame bosses sit at the
 # END (clearing the dungeon = lighting its crystal); the rest are MIDPOINT bosses
@@ -1487,21 +1620,18 @@ SMITH_EVENT_MASK        = 0x08        # b3: Smith forged Excalibur (location det
 SMITH_NPC_ORDINAL       = 14
 EXCALIBUR_WEAPON_ID     = 39          # cat 2 (weapon) game id -> WEAPONS[39] == "Excalibur"
 
-# --- Bahamut = AP LOCATION ONLY, NO promotion (design decision, user 2026-07-08) --
-# The player wants reaching Bahamut with the Rat's Tail to grant the location's AP
-# item WITHOUT the party class change. The native turn-in IS the promotion, so we
-# must NOT let Bahamut accept the tail: Rat's Tail is granted possession-only (its
-# entry is REMOVED from KEY_ITEM_FUNCTION_BITS), so Bahamut refuses it (gives his
-# "return with a token of your courage" dialog, promotes nobody) and the old
-# class-change-done event 0x1151F b0 never sets. The location detector is therefore
-# NOT that bit -- it is: standing in Bahamut's room (FIELD_MAP_ID == BAHAMUT_ROOM_ID)
-# while owning the AP Rat's Tail (possession bit 0x1153A b3 via key_item_bit(13)).
-# Logic (logic.py) still gates the location on AIRSHIP + RATS_TAIL, so it is only
-# ever reachable with the tail in hand.
-#   NB: LOADED_MAP_ID_SA (0x13118) is a COARSE bucket -- it reads 1 for EVERY dungeon
-#   (Bahamut's room AND Chaos Shrine both == 1), so it CANNOT identify Bahamut. The
-#   fine-grained per-map id is FIELD_MAP_ID_SA (0x13108, u32): live-verified distinct
-#   (Bahamut=0x1D, Chaos Shrine=0x4E) via re_only/dump_mapstate.py, 2026-07-08.
+# --- Bahamut = native promotion only, NOT an AP location (2026-08-27) -------------
+# History: 2026-07-08 made him an AP location with promotion suppressed; 2026-07-13
+# restored the native turn-in (tail granted WITH its function bit, whole party
+# promotes) while keeping the AP location on top. 2026-08-27 removed the AP
+# location (former NPC ordinal 15, retired -- never reuse): the promotion is his
+# only reward, and the AP item was double-dipping. Tail-spent detection is the
+# party-job fingerprint (KEY_ITEM_CONSUMED_ON_PROMOTION below); no room detector
+# remains.
+#   NB (kept -- general map-id RE): LOADED_MAP_ID_SA (0x13118) is a COARSE bucket --
+#   it reads 1 for EVERY dungeon (Bahamut's room AND Chaos Shrine both == 1). The
+#   fine-grained per-map id is FIELD_MAP_ID_SA (0x13108, u32): live-verified
+#   distinct (Bahamut=0x1D, Chaos Shrine=0x4E) via re_only/dump_mapstate.py.
 FIELD_MAP_ID_SA         = 0x08D13108  # u32 fine per-map id (unlike coarse 0x13118)
 # Shop-building interior fine map ids: town shops share THREE generic interior
 # maps (full 7-town / 17-shop tour live-captured 2026-08-05):
@@ -1539,9 +1669,9 @@ TOWN_STREET_MAP_IDS = {
 # sa(0x08D18164) reads a constant 2 in every shop).
 SHOP_STORE_ID_SA = 0x08D262A4     # u32 shop-def index (== rando._DEF_IDX values)
 SHOP_STORE_TYPE_SA = 0x08D262A8   # u32 1=weapon 2=armor 3=item
-BAHAMUT_ROOM_ID         = 0x1D        # FIELD_MAP_ID value in Bahamut's room
-BAHAMUT_NPC_ORDINAL     = 15
-RATS_TAIL_KEY_ID        = 13          # KEY_ITEMS id -> possession bit via key_item_bit()
+BAHAMUT_ROOM_ID         = 0x1D        # FIELD_MAP_ID value in Bahamut's room (RE record;
+                                      # no live consumer since the AP location was removed.
+                                      # Rat's Tail KEY_ITEMS id 13 = KEY_ITEM_CONSUMED_ON_PROMOTION)
 # FIELD_MAP_ID for Crescent Lake (the sages' circle). Live-captured 0x43 on
 # 2026-07-15 (re_only/state_probe.py, delta +0x6000, standing at the sages).
 # Used as the map-presence proxy for the Sage-check item-order fix (the sage
@@ -2114,6 +2244,36 @@ def bonus_mapid_band(v):
         if lo <= v <= hi:
             return dg
     return None
+
+
+# --- SOUL-OF-CHAOS VEHICLE LOAN (live-proven 2026-08-21) ---------------------
+# Some DLC floors are FAKE OVERWORLDS navigated by ship / canoe / airship (live:
+# a Hellfire Chasm floor, encounter map-id 0xD2 -- one of the special floors that
+# sit OUTSIDE every band, so this is not a per-dungeon quirk and any dungeon can
+# roll one). Measured on that floor with the AP client stopped:
+#   * SHIP  -- the floor supplies its own. It rides with story flag 5
+#     (SHIP_FLAG_ADDR b5) CLEAR, i.e. with no AP Ship item received. Not loaned.
+#   * CANOE -- the floor supplies NOTHING. The engine river/shallow check reads
+#     the player's real bits: both canoe bits clear -> rivers refuse; the SAILING
+#     bit alone, canoe possession still clear -> rivers work.
+# So a player who has not yet won the Canoe loses every river on that floor, and
+# with it the floor's exit route and any dynamic AP chest behind one -- reported
+# as an unbeatable floor. The client therefore LOANS the movement bits while the
+# party is on a bonus floor and TAKES THEM BACK on the true overworld (ApClient
+# _bonus_vehicle_loan).
+#
+# FUNCTION BITS ONLY -- never possession. Possession is the Key Items menu entry
+# (and nothing else: rivers work without it, measured), while it IS what the NPC
+# strips and native-grant detectors read, so loaning it would fight the sage
+# strip and show the player a Canoe they never won.
+# The Levistone's OBTAINED bit b4 is deliberately absent for the same reason: it
+# is the Ice Cavern pickup's detector and its NPC_MAP_RESET hold target. b5
+# (airship raised) is the bit that actually puts the airship in the world.
+# Rows: (addr, mask, key id, label). Both rows share byte 0x1151E by design.
+BONUS_VEHICLE_LOAN = (
+    (CANOE_FUNCTION_ADDR, CANOE_FUNCTION_MASK, 17, "canoe sailing"),
+    (LEVISTONE_EVENT_ADDR, LEVISTONE_AIRSHIP_MASK, 11, "airship raised"),
+)
 # DUNGEON ID: the current dungeon's per-floor map-id table. stride-6 records, map-id
 # byte at record+2; the COUNT of records with mapid >= 0x87 == the dungeon's FLOOR
 # COUNT, which is unique per dungeon (5/10/20/40) -> the dungeon index. Stable across

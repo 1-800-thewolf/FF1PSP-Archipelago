@@ -5621,6 +5621,13 @@ def apply_strength_popups(elf: bytearray, feats=None):
 
 _BU_OFF, _BU_STRIDE, _BU_HP, _BU_MAXHP = 0xC714, 0x6C, 0x08, 0x0A
 _BU_ATTACK, _BU_ATTACK_BONUS = 0x18, 0x26   # derived attack / durable bonus input
+# Creature-family bitmask on the battle unit record -- the SAME byte the engine's
+# own dia gate reads as [target+0x21] & 0x8 (see the _WW_HOOK notes). It is copied
+# from the on-disc monster record's +0x13 (0x24 stride); bit3 = UNDEAD across all
+# 27 undead ids (Skeleton, Bloodbones, Zombie/Ghoul/Ghast/Wight, Vampire(-Lord),
+# Dragon Zombie, Mummy/King Mummy, Lich 0x77/0x78, Scarmiglione, Reaper, ...) and
+# is clear for every living species. Party members are never flagged.
+_BU_FAMILY, _FAMILY_UNDEAD = 0x21, 0x08
 # Battle-unit INT: what the magic-damage path actually reads (u8 [s4+0x34]+0x36).
 _BU_INT = 0x36
 # The engine's own "what INT does this party member actually have" getter,
@@ -5649,6 +5656,10 @@ _FLD_LEVEL, _FLD_INT = 0x20, 0x33
 # gated Knight caster (class {0,6}) heal the attacker unit rec [s5+0x34] (curHP@+8,
 # maxHP@+0xA -- same rec family the blood-magic caster uses) by dealt // DIV
 # (>=1 when dealt>0). KO attacker (curHP==0) is skipped -- no lifesteal-revive.
+# v275: an UNDEAD target ([s5+0x38] = the target's unit rec, _BU_FAMILY & 0x8 --
+# the engine's own dia byte) drains nothing; the attack lands as normal, only the
+# self-heal is skipped. [s5+0x38] is stored ONCE at 0x088841f8 and never rewritten
+# in the fn, so it still names this attack's target at the epilogue.
 _LIFE_HOOK, _LIFE_RET = 0x088846B0, 0x088846B8
 KNIGHT_LIFESTEAL_PCT = 15   # heal = damage_dealt * this // 100; user-tunable.
                             # v248: 20% -> 10% to match the defense-pierce leg.
@@ -6969,12 +6980,18 @@ def apply_job_scroll_boosts(elf: bytearray, feats=None):
     # total damage this attack dealt sits in [s4+4] (result block). For a gated
     # Knight caster {0,6} heal the attacker (unit rec [s5+0x34], curHP@+8) by
     # dealt * KNIGHT_LIFESTEAL_PCT // 100 (=15%; min 1 when dealt>0). Skip if KO'd
-    # (curHP==0). Flag bit2 (client-armed when the Blood Knight Scroll is owned). ---
+    # (curHP==0), and (v275) skip if the TARGET is undead -- there is nothing to
+    # drain out of a Lich/Skeleton/Dragon Zombie, so the swing does full damage but
+    # heals nothing. Flag bit2 (client-armed when the Blood Knight Scroll is owned). ---
     life = A.asm_labels(
         [A.lw("s7", 0x24, "sp"), A.lw("s6", 0x20, "sp")]     # displaced originals
         + _SCROLL_SAVE
         + _scroll_gate(mb_vaddr, "s5", 0x04, 0, 6, done="RWCHK")  # Knight? else try RW tgt
-        + [A.lw("t1", 0x04, "s4"),                           # dealt damage
+        + [A.lw("t2", 0x38, "s5"),                           # target unit record
+           A.lbu("t3", _BU_FAMILY, "t2"),
+           A.andi("t3", "t3", _FAMILY_UNDEAD),               # v275: undead target?
+           ("bne", "t3", "zero", "DONE"), A.nop(),           # no blood to drain
+           A.lw("t1", 0x04, "s4"),                           # dealt damage
            A.slt("at", "zero", "t1"),                        # at = dealt > 0
            ("beq", "at", "zero", "DONE"), A.nop(),
            A.addiu("t5", "zero", KNIGHT_LIFESTEAL_PCT),
@@ -8378,6 +8395,1060 @@ def apply_super_dash(elf: bytearray, feats=None):
     E.install_detour(elf, _SD_HALVE_HOOK, E.add_segment_cave(elf, cave_b))
 
 
+# --- Reduced party: menu/battle row hiding (reduced_party) -------------------
+# starting_party_members Phase 3 (2026-08-28): party display rows whose member
+# is MISSING (held by the client's _member_loop) are visually skipped and the
+# char-select cursor pages past them. Every cave reads ONE mailbox byte
+# (magic "RPMK", mask u8 @+4, bit N = display row N held) that the client
+# re-arms every member-loop tick -- so a held row un-hides the very frame its
+# member joins, and a savestate load (which reverts cave RAM) self-heals on
+# the next arm write. The client never arms 0xF (a party keeps >= 1 member);
+# the vanilla-skip-loop cave guards against it anyway (spin risk).
+#
+# RE provenance: workflow phase3-re-analysis 2026-08-28 -- all hook sites
+# passed the 5-rule audit (displaced words verified, no branch/jump displaced,
+# no delay-slot overlap, no branch targets a displaced word, no loop heads).
+# Vanilla words below were read from the ELF (RAM reads show JIT emuhacks).
+_RP_MB_MAGIC = b"RPMK"
+RP_MB_MASK_OFF = 4            # u8 bitmask: bit N = display row N held
+_RP_MB_LEN = 8
+
+# (1) Pause-panel row fn 0x088CEAA0(a0=ctx, a1=row, a2=x, a3=y, t0=cursor_mode)
+# -- called once per row, straight-line, by ~7 screens (pause list, item
+# target-select, ...). Prologue detour: held row -> jr ra before the frame is
+# pushed, skipping the row's sprite+name+Lv+HP+MP+cursor records everywhere.
+_RP_PANEL_HOOK = 0x088CEAA0   # addiu sp,sp,-0x50 ; sw ra,0x2C(sp)
+_RP_PANEL_W0 = 0x27BDFFB0
+_RP_PANEL_W1 = 0xAFBF002C
+
+# (2) Battle bottom-right status window: three sibling per-row loop fns (HP,
+# MP, name); each clears its text layer before the loop, so a skipped row is
+# BLANK. Hook = loop-head+4 (the head itself is the back-edge target); skip =
+# the row-increment word. Row register: v1 (HP/MP), s1 (name).
+_RP_BHP_HOOK = 0x0886F3E8     # addu v1,v0,v1 ; sll v0,v1,0x2
+_RP_BHP_SKIP = 0x0886F528     # addiu v1,s1,0x1 (row increment)
+_RP_BMP_HOOK = 0x0886F5AC     # same displaced pair as HP
+_RP_BMP_SKIP = 0x0886F6A8
+_RP_BNAME_HOOK = 0x0886F740   # addu v1,v0,s1 ; sll v0,v1,0x2
+_RP_BNAME_SKIP = 0x0886FA2C   # addiu v1,s3,0x1
+_RP_BROW_W0 = 0x00431821      # addu v1,v0,v1 (HP/MP)
+_RP_BNAME_W0 = 0x00511821     # addu v1,v0,s1 (name)
+_RP_BROW_W1 = 0x00031080      # sll v0,v1,0x2 (all three)
+
+# (3) Field spell-USE char paging fn 0x088C2948: the engine already re-steps
+# past chars whose status byte [rec+0x1F]&3 != 0 (KO/stone). The cave OR's the
+# held bit into that test, riding the vanilla wrap/re-step loop. a0 = the
+# candidate row at both hooks; a1 (dec-path wrap constant 3) and s0 preserved.
+_RP_MUSE_DEC_HOOK = 0x088C29A0
+_RP_MUSE_INC_HOOK = 0x088C2A30
+_RP_MUSE_W0 = 0x9042001F      # lbu v0,0x1F(v0)
+_RP_MUSE_W1 = 0x30420003      # andi v0,v0,0x3
+
+# (4) Magic-menu tick paging fn 0x088C48A8 (no vanilla skip loop): cave runs a
+# bounded (<=4 step) skip loop AFTER the native wrap committed [s0+0x7090].
+# v0/v1/at/a0/a1 all dead at the hooks (join points after the wrap).
+_RP_MTICK_DEC_HOOK = 0x088C4940
+_RP_MTICK_INC_HOOK = 0x088C4998
+_RP_MTICK_W0 = 0x24020064     # li v0,0x64
+_RP_MTICK_W1 = 0xA60270B0     # sh v0,0x70B0(s0)
+
+# (5) Status/Equipment shared paging leaf 0x088CA844 (callers = the two pause
+# sub-screens): cave computes the FINAL row in v1 with a bounded skip loop and
+# lets the native branch+delay-slot sw commit it. Leaf fn: ra untouched, a0
+# (ctx) preserved, t-regs dead across the call boundary.
+_RP_LEAF_DEC_HOOK = 0x088CA858
+_RP_LEAF_DEC_W1 = 0x2463FFFF  # addiu v1,v1,-0x1
+_RP_LEAF_INC_HOOK = 0x088CA8B0
+_RP_LEAF_INC_W1 = 0x24630001  # addiu v1,v1,0x1
+_RP_LEAF_W0 = 0x8C837090      # lw v1,0x7090(a0)
+
+# (6) Shared pause char-pick commit (tick fn 0x088C1870, RE 2026-08-28): ONE
+# X-press block serves Magic/Status/Equipment. Picked display row = cursor
+# byte lb 0x1([s0+0x718C]); the native KO test (status +0x1F & 3) rejects
+# ONLY the Magic item with bonk sound 0x66 -> [s0+0x70B0] and a jump to the
+# cursor-refresh tail 0x088C1D20. The cave rejects a HELD row for ALL three
+# items the same way, before the native test (jal-style hook: cave returns
+# via jr ra into the untouched KO logic when the row is not held).
+_RP_PICK_HOOK = 0x088C1C74    # lw a2,0x718C(s0) ; lw a1,0x7098(s0)
+_RP_PICK_W0 = 0x8E06718C
+_RP_PICK_W1 = 0x8E057098
+_RP_PICK_BONK = 0x088C1D20    # native reject continuation (cursor refresh)
+_RP_SND_OFF = 0x70B0          # sh sound id; 0x66 = bonk/invalid
+
+# (7) Formation picks (case-5 handler 0x088C1DAC, same dispatcher): first
+# pick latches phase+row (sw a0,0x7088 / row -> 0x70B2), second pick commits
+# phase 2. NO native KO/held check -- a hidden row was swappable (user call
+# 2026-08-28: block those swaps). Both picks bonk on a held row via the
+# handler's own exit (sh 0x66 -> +0x70B0; j 0x088C1F44).
+_RP_FPICK1_HOOK = 0x088C1E9C  # sw a0,0x7088(s0) ; lw a0,0x718C(s0)
+_RP_FPICK1_W0 = 0xAE047088
+_RP_FPICK1_W1 = 0x8E04718C
+_RP_FPICK2_HOOK = 0x088C1ED4  # sw a1,0x7088(s0) ; li v1,0x65
+_RP_FPICK2_W0 = 0xAE057088
+_RP_FPICK2_W1 = 0x24030065
+_RP_FPICK_EXIT = 0x088C1F44   # case-5 common exit
+
+# (8) Battle popup constructor 0x08886E54 (v274 ground truth): the party
+# sprite layers (slots 0x00-0x0B, row = slot & 3) set their act/draw byte
+# +0x77 = 1 during battle init. Hooking the ctor's cursor-writeback tail
+# writes act=0 instead for a held row -- FRAME-PERFECT hiding at build time,
+# killing the ~2-frame party flash the client poll left. The record keeps
+# its valid +0x38 buffer, so this is the exact benign state the v274 fix
+# proved ("act=0 un-vanished Philip"); it never touches the free-batch
+# descriptor (0x68C3/0x68CA) or the z-order machinery.
+_RP_CTOR_HOOK = 0x08886F30    # lbu v0,0x67B6(s5) ; addiu v1,v0,1
+_RP_CTOR_W0 = 0x92A267B6      # slot index = allocator cursor (pre-increment)
+_RP_CTOR_W1 = 0x24430001
+_RP_CTOR_RESUME = 0x08886F38  # cursor writeback (uses v1 = slot+1)
+_RP_ACT_OFF = 0x77
+
+# (9) Magic shop "Who will learn?" (module 0x08820600): the learn-target
+# confirm calls class-eligibility fn 0x08820DC4 (v0==0 -> "cannot learn"
+# bonk). Retargeting that ONE call site so a HELD row forces v0=0 blocks
+# teaching a spell to a missing member (the commit reads the same row, so
+# gating the check fully protects it). Learn-target row = u32 [ctx+0x7078].
+_RP_SLEARN_HOOK = 0x088207DC  # jal 0x08820DC4 (confirm-path eligibility)
+_RP_SLEARN_W = 0x0E208371     # jal 0x08820DC4
+_RP_SLEARN_FN = 0x08820DC4
+_RP_LEARN_ROW_OFF = 0x7078
+# ...and the target cursor: skip held rows on next/prev (mirrors the pause
+# menu's L/R skip). Each replaces the inc/dec+wrap+store block and jumps to
+# the shared SE-0x64 exit past the original store.
+_RP_SCUR_INC_HOOK = 0x08820688  # lw v0,0x7078(s0) ; addiu v0,v0,1
+_RP_SCUR_INC_RESUME = 0x088206A0
+_RP_SCUR_DEC_HOOK = 0x088206B8  # lw v0,0x7078(s0) ; addiu v0,v0,-1
+_RP_SCUR_DEC_RESUME = 0x088206D0
+_RP_SCUR_W0 = 0x8E027078        # lw v0,0x7078(s0) (both)
+
+# (10) The OTHER two act=1 construction sites (live 2026-08-28: the battle-
+# start flash survived v279's main-ctor hook and recurs on the first battle
+# after every arena relocation, so the party layers are built -- at least
+# sometimes -- by a sibling ctor). Cover every act=1 writer in the ctor
+# cluster; free_range's clear sub-ctor (0x08886D24) only ever writes 0.
+#   Leaf ctor 0x08886F68: slot = lbu 0x67B6(a0) at entry (cursor bumps at
+#   the jr), record in a2, act=1 = sb v1,0x497(a2) with v1==1 LIVE later
+#   (sw v1,0x428(a2)) -- the cave must preserve v1 and re-derive the slot
+#   from the cursor. Straight-line fn: no branches, no loop heads.
+_RP_CTOR2_HOOK = 0x08886F8C   # sb v1,0x497(a2) ; sb zero,0x498(a2)
+_RP_CTOR2_W0 = 0xA0C30497
+_RP_CTOR2_W1 = 0xA0C00498
+_RP_CTOR2_RESUME = 0x08886F94
+#   Re-init-by-index ctor 0x08886FD8: at 0x08886FF8 a0 STILL holds the pool
+#   base (the displaced addiu overwrites it) and a2 = base + slot*124, so
+#   slot = (a2-a0)/124. Straight-line fn: no branches at all.
+_RP_CTOR3_HOOK = 0x08886FF8   # addiu a0,zero,1 ; sb a0,0x497(a2)
+_RP_CTOR3_W0 = 0x24040001
+_RP_CTOR3_W1 = 0xA0C40497
+_RP_CTOR3_RESUME = 0x08887000
+
+# (11) Save/Load FILE-SELECT preview (RE 2026-08-28, rides the slot_magic
+# v185/v188 groundwork): fn 0x088274F8 draws all 4 characters of a file in
+# one internal loop (s4 = the FILE's own char record walking stride 0x5C,
+# s2 = char index, s5 = ctx). A record reading SOFT-DEAD (HP +0x28 == 0
+# with status +0x1F bit0 CLEAR) is a missing member IN THAT FILE -- per-file
+# truth, no mailbox. Legit KO'd members (bit0 set) still draw.
+#
+# v289 REDESIGN (2026-08-29): the v281-v288 cave skipped the WHOLE loop body
+# for a held char. On a save into a VIRGIN file slot that body-skip left the
+# portrait rows' atlas cells never authored by ANYONE, and the renderer
+# measures every retained row's cell even when act=0 -- engine bounds trap
+# `b .` 0x08914990, thread FF1 parked, save dialog frozen (live-caught
+# 2026-08-29; occupied-slot saves survived because a previous full draw had
+# authored the cells, which is why the v285-v287 bisect never saw it). Now
+# the body runs UNTOUCHED through the portrait authoring + submits, and two
+# small hooks blank the char instead:
+#   A. name prim call 0x08827668 (jal 0x8817374, a3=s4+0xE, t0=sp+0x60
+#      style ptr armed by the delay slot -- scratch must be v0, NOT t0):
+#      held -> jr ra (no name), else tail-call.
+#   B. post-submit 0x08827990 (seh s6,s3 ; addiu s7,s6,4 -- both words
+#      branch-target-CLEAN ELF-wide, prior word not a jump): held -> clear
+#      act (+0x497) on rows ([ctx+0x10]+s2)/([ctx+0x11]+s2) of table
+#      [ctx+4] stride 0x7C (the engine's own empty-file hide idiom) and
+#      j the loop advance (skips only the Lv/HP/MP text prims); else
+#      displaced words + resume. The old 0x08827634 hook is GONE, and with
+#      it the canvas-counter replica (that block now always runs natively).
+_RP_SPNAME_CALL = 0x08827668    # jal 0x8817374 ; addiu t0,sp,0x60
+_RP_SPNAME_CALL_W0 = 0x0E205CDD
+_RP_SPNAME_CALL_W1 = 0x27A80060
+_RP_SPNAME_FN = 0x08817374
+_RP_SPTEXT_HOOK = 0x08827990    # seh s6,s3 ; addiu s7,s6,4
+_RP_SPTEXT_W0 = 0x7C13B620
+_RP_SPTEXT_W1 = 0x26D70004
+_RP_SPTEXT_RESUME = 0x08827998
+_RP_SAVEPRV_ADVANCE = 0x08827A7C  # loop tail: counters/coords advance
+_RP_WIDGET_VIS_OFF = 0x497
+
+# (12) Field item-use validity fn 0x088C4C94 (a0=ctx, a1=item id -- already
+# rescaled to id*16 by the hook point, a2 = TARGET DISPLAY ROW): every
+# single-target case gates on the target record and rejects by reaching the
+# common exit 0x088C5428 with s0 == 0 (caller then refuses, the same as
+# Phoenix Down on a living member). The cave forces that exit when the
+# RPMK bit for a2 is set AND the item's flag byte u8[0x089538F3 + id*16]
+# has the single-target bit 0x10 -- party-wide items keep their native
+# loop (a held row takes a redundant heal the enforcement re-kills).
+_RP_IVAL_HOOK = 0x088C4CC4      # sw s1,8(sp) ; sw s0,4(sp) (prologue)
+_RP_IVAL_W0 = 0xAFB10008
+_RP_IVAL_W1 = 0xAFB00004
+_RP_IVAL_RESUME = 0x088C4CCC
+_RP_IVAL_REJECT = 0x088C5428    # sltu v0,zero,s0 -> epilogue (s-regs saved)
+_RP_ITEM_FLAGS = 0x089538F3     # + id*16; bit 0x10 = single-target
+
+# (13) Shop member strips: each shop draws its 4-member strip via a
+# per-member helper called once per row from a refresh-gated loop --
+# equip shop: 0x0882000C (row in t2), magic shop: 0x08820E18 (row in t1).
+# Hooked at the CALL SITES, not the helper entries: a jal-word scan cannot
+# see register-indirect (jalr/vtable) callers, and the v281 entry detours
+# fired on the SAVE SCREEN with garbage t-regs and froze it (bisected live
+# 2026-08-28). The retargeted jal's own delay slot (`move t2,s4` /
+# `move t1,s1`) still runs first, so the row register is armed on cave
+# entry; held row -> jr ra (no sprite, no delta indicator), else tail-call
+# the real helper. v0 is the only clobber (caller-saved at a call site).
+_RP_ESTRIP_FN = 0x0882000C
+_RP_ESTRIP_CALL = 0x0881FEA0    # jal 0x0882000C ; move t2,s4 (row)
+_RP_ESTRIP_CALL_W0 = 0x0E208003
+_RP_ESTRIP_CALL_W1 = 0x02805021
+_RP_SSTRIP_FN = 0x08820E18
+_RP_SSTRIP_CALL = 0x08820D8C    # jal 0x08820E18 ; move t1,s1 (row)
+_RP_SSTRIP_CALL_W0 = 0x0E208386
+_RP_SSTRIP_CALL_W1 = 0x02204821
+
+# (14) VIRTUAL battle KO (v290): the per-unit state classifier 0x08871A14
+# (19 jal callers, ALL battle-module, zero indirect refs) takes a1 = unit
+# index; for party rows (a1 < 4 branch) it loads BU_STATUS via
+# ctx + 0x10000-0x38EC (= +0xC714 = unit+0) + row*0x6C and tests bit0 to
+# dispatch the dead-state handler (0x8872538, a2=2 -- the exact path the
+# client's deathlink stamp always drove). Soft-dead units (HP 0, status 0)
+# natively get no turn / no targeting / no XP, so the ONLY thing the old
+# per-battle client stamp bought was this classifier registering them
+# out-of-action for the wipe check. ORing the RPMK bit into the loaded
+# status word right here makes that VIRTUAL: no BU write, no init race
+# (re-classified every sweep tick), no battle-end KO write-back
+# contaminating the field record, and no kneel-then-collapse wart (the
+# stamp's accepted cost). The beql at RESUME annuls its delay slot on the
+# taken bit0 path, so the stone test never sees our bit. a1's low 5 bits
+# ARE the row on this path (the fn's own a1&0xFF < 4 gate ran first);
+# v0 is dead (the displaced andi overwrote it in vanilla too).
+_RP_WIPE_HOOK = 0x08871A6C      # lhu v1,-0x38ec(v0) ; andi v0,v1,1
+_RP_WIPE_W0 = 0x9443C714
+_RP_WIPE_W1 = 0x30620001
+_RP_WIPE_RESUME = 0x08871A74
+
+# (15) Held battle sprites, per-FRAME (v292): the popup FLATTEN
+# (0x08887A28, a0 = the popup/battle block; copies order list 0x4220 ->
+# flat list 0x4320; single jal caller 0x088876C8 = the draw driver) runs
+# from the FIRST intro frame -- before the sweep/classifier ever ticks --
+# so a pre-pass here clears the held rows' three layer act bytes
+# (bb + row*124 + 0x497/0x687/0x877 = body/shadow/weapon) every frame,
+# no matter which of the ~224 act-arm sites fired (the battle walk-in
+# armed the SHADOWS during the intro, live 2026-08-29: v290's classifier
+# clears only start ticking ~0.5s in). MUST be battle-gated: the popup
+# pool is screen-generic (v284) and this fn flattens every screen's pool.
+# a1/a2 scratch (the displaced entry words re-set both); rows unrolled,
+# all offsets imm16-safe.
+_RP_FLAT_HOOK = 0x08887A28      # lbu a1,0x67b4(a0) ; lbu a2,0x67b5(a0)
+_RP_FLAT_W0 = 0x908567B4
+_RP_FLAT_W1 = 0x908667B5
+_RP_FLAT_RESUME = 0x08887A30
+
+# (16) Inn-sleep cutscene sleepers (2026-08-29): the field event VM's
+# "spawn a party member as a walking actor" opcode 0x12 (handler
+# 0x08844414) is what puts four sleepers in the beds -- it reads the
+# display row from script byte 2, maps that row's class (arena
+# +0xDE2 + row*0x5C) through table 0x0893F9E4 to a field sprite, and
+# builds actor slot 0x20+row via 0x0883E474 (actor = scene + 0x6998 +
+# slot*0xE4). Vanilla runs it four times regardless of who is present,
+# so held rows walked to bed like everyone else.
+#
+# The actor is allowed to spawn and run COMPLETELY -- movement, script
+# waits and despawn all stay vanilla (lesson 1). Only the OUTPUT is
+# suppressed: flag bit 0x2 of the actor's u16 at +0xB4 is the draw
+# enable, and clearing it once at spawn hides the actor for the whole
+# scene (the engine never re-sets it; live-proven 2026-08-29, slot 0x23
+# read 0x813d/0x8039 for an entire stay off a single write). This is
+# exactly what native opcode 0x68 already does to the leader's cutscene
+# actor two words after ITS spawn, so the state is one the engine
+# supports rather than one we invented.
+#
+# Hook = the flag OR that immediately follows the spawn call, so v0 is
+# still the fresh actor and s0 is still the script pointer (row is
+# re-read from it -- a1 was reclaimed as an argument by then). Resume is
+# the vanilla `sh v1,0xb4(v0)`, so held and present rows share one store.
+# t0/t1 are dead here (they were spawn arguments, caller-saved across
+# the jal). Row 0 is the leader, which leader normalization guarantees is
+# present, so mask bit 0 is never set; a non-row byte 2 would shift the
+# mask past its 4 live bits and read 0 = not held.
+_RP_INN_HOOK = 0x088444F4       # lhu v1,0xb4(v0) ; ori v1,v1,0x8018
+_RP_INN_W0 = 0x944300B4
+_RP_INN_W1 = 0x34638018
+_RP_INN_RESUME = 0x088444FC     # sh v1,0xb4(v0)
+_RP_INN_ROW_OFF = 2             # script byte 2 = display row
+_RP_INN_DRAW_BIT = 0x2          # actor +0xB4 bit 1 = draw this actor
+
+_RP_SITES = (                 # (hook, expected w0, expected w1)
+    (_RP_PANEL_HOOK, _RP_PANEL_W0, _RP_PANEL_W1),
+    (_RP_CTOR2_HOOK, _RP_CTOR2_W0, _RP_CTOR2_W1),
+    (_RP_CTOR3_HOOK, _RP_CTOR3_W0, _RP_CTOR3_W1),
+    (_RP_SPNAME_CALL, _RP_SPNAME_CALL_W0, _RP_SPNAME_CALL_W1),
+    (_RP_SPTEXT_HOOK, _RP_SPTEXT_W0, _RP_SPTEXT_W1),
+    (_RP_IVAL_HOOK, _RP_IVAL_W0, _RP_IVAL_W1),
+    (_RP_ESTRIP_CALL, _RP_ESTRIP_CALL_W0, _RP_ESTRIP_CALL_W1),
+    (_RP_SSTRIP_CALL, _RP_SSTRIP_CALL_W0, _RP_SSTRIP_CALL_W1),
+    (_RP_WIPE_HOOK, _RP_WIPE_W0, _RP_WIPE_W1),
+    (_RP_FLAT_HOOK, _RP_FLAT_W0, _RP_FLAT_W1),
+    (_RP_INN_HOOK, _RP_INN_W0, _RP_INN_W1),
+    (_RP_PICK_HOOK, _RP_PICK_W0, _RP_PICK_W1),
+    (_RP_FPICK1_HOOK, _RP_FPICK1_W0, _RP_FPICK1_W1),
+    (_RP_FPICK2_HOOK, _RP_FPICK2_W0, _RP_FPICK2_W1),
+    (_RP_BHP_HOOK, _RP_BROW_W0, _RP_BROW_W1),
+    (_RP_BMP_HOOK, _RP_BROW_W0, _RP_BROW_W1),
+    (_RP_BNAME_HOOK, _RP_BNAME_W0, _RP_BROW_W1),
+    (_RP_MUSE_DEC_HOOK, _RP_MUSE_W0, _RP_MUSE_W1),
+    (_RP_MUSE_INC_HOOK, _RP_MUSE_W0, _RP_MUSE_W1),
+    (_RP_MTICK_DEC_HOOK, _RP_MTICK_W0, _RP_MTICK_W1),
+    (_RP_MTICK_INC_HOOK, _RP_MTICK_W0, _RP_MTICK_W1),
+    (_RP_LEAF_DEC_HOOK, _RP_LEAF_W0, _RP_LEAF_DEC_W1),
+    (_RP_LEAF_INC_HOOK, _RP_LEAF_W0, _RP_LEAF_INC_W1),
+    (_RP_CTOR_HOOK, _RP_CTOR_W0, _RP_CTOR_W1),
+    (_RP_SLEARN_HOOK, _RP_SLEARN_W, 0x02002021),   # delay: move a0,s0
+    (_RP_SCUR_INC_HOOK, _RP_SCUR_W0, 0x24420001),
+    (_RP_SCUR_DEC_HOOK, _RP_SCUR_W0, 0x2442FFFF),
+)
+
+
+# Scene-class vtables (fixed BOOT rodata; each class ctor stores its vtable
+# into obj+4, and the engine dispatches through `lw t9,4(obj); lw t9,N(t9)`
+# -- see the current-scene setter/getter pair at 0x088D8510). Captured live
+# 2026-08-29 and cross-checked against the ctor that materialises each
+# constant, so the module each scene belongs to is not a guess:
+_RP_VT_FIELD = 0x089C7A70     # field scene   (ctor 0x08834554, field module)
+_RP_VT_BATTLE1 = 0x089C7ABC   # battle scene  (ctor 0x088687E0, battle module)
+_RP_VT_BATTLE2 = 0x089C7B64   # battle scene  (ctor 0x088696D0, battle module)
+_RP_SCENE_PTR = 0x089D7ADC    # -> the CURRENT scene object (not "the field")
+_RP_SCENE_VT_OFF = 4          # scene vtable pointer
+_RP_FIELD_ACTIVE_OFF = 0x68B4  # field scene: 1 = field logic is the top layer
+
+
+def _rp_battle_gate(r1, r2, out_label):
+    """Blob: branch to `out_label` unless a TRUE battle is running.
+
+    The popup ctors are GENERIC widget constructors -- every screen builds
+    its widgets through them (the save screen froze live 2026-08-28 when its
+    file-select and memstick-dialog widgets were born hidden), so the act
+    masking must apply ONLY to battle pool builds.
+
+    v294 REWRITE. The v284 gate read [[0x089D7ADC]+0x68B4] and trusted the
+    comment "1 on the field AND in menus, 0 only during an actual battle".
+    BOTH halves of that were wrong, measured live 2026-08-29:
+      * 0x089D7ADC is the CURRENT SCENE pointer, not a field-struct pointer.
+        Opening the pause menu repoints it at the PAUSE context (0x08D28240
+        that session), whose +0x68B4 is an unrelated byte that happens to
+        read 0 -> the gate said "battle" for the whole pause menu.
+      * the field scene's OWN +0x68B4 also drops 1 -> 0 the moment a menu
+        opens, so the byte means "field logic is the active layer", never
+        "no battle is running".
+    Consequence (the Formation bug): the v292 flatten cave ran on the pause
+    screen with a0 = ctx+0x450, and its row-2 weapon-layer offset 0x96F
+    landed on ctx+0xDBF -- the enable byte of pause widget record 10, which
+    IS the Formation row-selector cursor that 0x088C1A74 turns on at entry.
+    Cleared every frame, the cursor vanished and Formation looked frozen
+    (swaps still worked blind). Row 1 held would likewise have eaten record
+    9, the swap marker; row 0 is never held, which is the only reason the
+    main list's hand cursor (record 8) survived.
+
+    The gate now identifies the scene CLASS by its vtable, which is fixed
+    rodata rather than a mutable state byte, and accepts a battle two ways
+    so it stays correct whether or not a battle pushes its own scene:
+      * current scene is one of the battle module's scene classes, or
+      * current scene is the FIELD scene AND field logic is not the active
+        layer (the old test, but now only ever applied to the field scene
+        -- a menu scene can no longer impersonate it).
+    Every other scene (pause, shop, save, title) is rejected outright. This
+    is strictly narrower than v284 except for the added battle-vtable arm,
+    so it can only stop the caves firing where they never should have.
+
+    A null scene pointer (early boot) counts as not-a-battle. Clobbers
+    r1/r2 only -- the scene pointer is re-loaded rather than held, so the
+    whole gate still fits the two scratch registers every call site has."""
+    return [
+        A.lui(r1, (_RP_SCENE_PTR >> 16) & 0xFFFF),
+        A.lw(r1, _RP_SCENE_PTR & 0xFFFF, r1),
+        ("beq", r1, "zero", out_label), A.nop(),
+        A.lw(r1, _RP_SCENE_VT_OFF, r1),           # r1 = scene vtable
+        A.lui(r2, (_RP_VT_BATTLE1 >> 16) & 0xFFFF),
+        A.ori(r2, r2, _RP_VT_BATTLE1 & 0xFFFF),
+        ("beq", r1, r2, "RPGATEOK"), A.nop(),
+        A.lui(r2, (_RP_VT_BATTLE2 >> 16) & 0xFFFF),
+        A.ori(r2, r2, _RP_VT_BATTLE2 & 0xFFFF),
+        ("beq", r1, r2, "RPGATEOK"), A.nop(),
+        A.lui(r2, (_RP_VT_FIELD >> 16) & 0xFFFF),
+        A.ori(r2, r2, _RP_VT_FIELD & 0xFFFF),
+        ("bne", r1, r2, out_label), A.nop(),       # a menu scene: stand down
+        A.lui(r1, (_RP_SCENE_PTR >> 16) & 0xFFFF),
+        A.lw(r1, _RP_SCENE_PTR & 0xFFFF, r1),      # reload (r1 held the vt)
+        A.lbu(r2, _RP_FIELD_ACTIVE_OFF, r1),
+        ("bne", r2, "zero", out_label), A.nop(),   # field logic on top: no
+        ("label", "RPGATEOK"),
+    ]
+
+
+def _rp_mask_test(mb_vaddr, row_reg, scratch):
+    """Blob: scratch = (mask >> row_reg) & 1. Clobbers scratch only."""
+    return [
+        A.lui(scratch, (mb_vaddr >> 16) & 0xFFFF),
+        A.ori(scratch, scratch, mb_vaddr & 0xFFFF),
+        A.lbu(scratch, RP_MB_MASK_OFF, scratch),
+        A.srlv(scratch, scratch, row_reg),
+        A.andi(scratch, scratch, 1),
+    ]
+
+
+def _rp_battle_cave(mb, hook, skip, w0, row_reg):
+    """Battle status-window row skip. Entry: row in row_reg; v0 = row*8 (the
+    displaced addu consumes it -- keep intact); t2 dead at all three hooks."""
+    return A.asm_labels(
+        _rp_mask_test(mb, row_reg, "t2") + [
+        ("beq", "t2", "zero", "RPGO"), A.nop(),
+        A.j(skip), A.nop(),                       # held -> row increment
+        ("label", "RPGO"),
+        A.word(w0),                               # displaced addu
+        A.word(_RP_BROW_W1),                      # displaced sll
+        A.j(hook + 8), A.nop(),
+    ])
+
+
+def _rp_mtick_cave(mb, hook, step_dec):
+    """Magic-menu tick paging: bounded skip loop after the committed wrap.
+    v0/v1/at/a0/a1 dead at both join-point hooks; s0 = menu ctx."""
+    wrap = ([A.addiu("at", "zero", -1),           # dec: -1 -> 3
+             ("bne", "v0", "at", "RPST"), A.nop(),
+             A.addiu("v0", "zero", 3)]
+            if step_dec else
+            [A.addiu("at", "zero", 4),            # inc: 4 -> 0
+             ("bne", "v0", "at", "RPST"), A.nop(),
+             A.addu("v0", "zero", "zero")])
+    return A.asm_labels([
+        A.lui("a0", (mb >> 16) & 0xFFFF),
+        A.ori("a0", "a0", mb & 0xFFFF),
+        A.lbu("a0", RP_MB_MASK_OFF, "a0"),        # a0 = mask (dead reg)
+        A.addiu("a1", "zero", 4),                 # a1 = loop bound (dead reg)
+        ("label", "RPLOOP"),
+        A.lw("v0", 0x7090, "s0"),
+        A.srlv("v1", "a0", "v0"),
+        A.andi("v1", "v1", 1),
+        ("beq", "v1", "zero", "RPDONE"), A.nop(),
+        A.addiu("v0", "v0", -1 if step_dec else 1),
+    ] + wrap + [
+        ("label", "RPST"),
+        A.sw("v0", 0x7090, "s0"),
+        A.addiu("a1", "a1", -1),
+        ("bne", "a1", "zero", "RPLOOP"), A.nop(),
+        ("label", "RPDONE"),
+        A.word(_RP_MTICK_W0),                     # displaced li v0,0x64
+        A.word(_RP_MTICK_W1),                     # displaced sh v0,0x70B0(s0)
+        A.j(hook + 8), A.nop(),
+    ])
+
+
+def _rp_leaf_cave(mb, hook, step_dec):
+    """Status/Equipment shared paging leaf: compute the FINAL row in v1 with a
+    bounded skip loop; the native branch's delay-slot sw commits it. Leaf fn:
+    ra untouched, a0 preserved, t-regs dead across the call boundary."""
+    step = ([A.addiu("v1", "v1", -1),             # dec + wrap -1 -> 3
+             A.addiu("t2", "zero", -1),
+             ("bne", "v1", "t2", "RPCHK"), A.nop(),
+             A.addiu("v1", "zero", 3)]
+            if step_dec else
+            [A.addiu("v1", "v1", 1),              # inc + wrap 4 -> 0
+             A.addiu("t2", "zero", 4),
+             ("bne", "v1", "t2", "RPCHK"), A.nop(),
+             A.addu("v1", "zero", "zero")])
+    return A.asm_labels([
+        A.word(_RP_LEAF_W0),                      # displaced lw v1,0x7090(a0)
+        A.lui("t0", (mb >> 16) & 0xFFFF),
+        A.ori("t0", "t0", mb & 0xFFFF),
+        A.lbu("t0", RP_MB_MASK_OFF, "t0"),        # t0 = mask
+        A.addiu("t1", "zero", 4),                 # t1 = loop bound
+        ("label", "RPSTEP"),
+    ] + step + [
+        ("label", "RPCHK"),
+        A.srlv("t2", "t0", "v1"),
+        A.andi("t2", "t2", 1),
+        ("beq", "t2", "zero", "RPOUT"), A.nop(),  # un-held row found
+        A.addiu("t1", "t1", -1),
+        ("bne", "t1", "zero", "RPSTEP"), A.nop(),
+        ("label", "RPOUT"),
+        A.j(hook + 8), A.nop(),                   # native branch commits v1
+    ])
+
+
+# TEMPORARY save-screen-freeze bisect (2026-08-28): hooks named here are NOT
+# installed. Remove once the culprit cave is found.
+_RP_BISECT_DISABLE = frozenset()  # bisect complete 2026-08-28: strips were the freezer, now call-site hooked
+
+
+def apply_reduced_party(elf: bytearray, feats=None):
+    """Install the held-row hiding caves + RPMK mailbox (see block comment)."""
+    for hook, w0, w1 in _RP_SITES:
+        got = (_read_word(elf, hook), _read_word(elf, hook + 4))
+        if got != (w0, w1):
+            raise ValueError(f"unexpected reduced_party site @{hook:#x}: "
+                             f"{got[0]:#010x} {got[1]:#010x}")
+    mb = E.add_segment_cave(elf, _RP_MB_MAGIC + b"\x00" * (_RP_MB_LEN - 4))
+    # (1) pause-panel prologue: held row -> return before the frame is pushed.
+    # On the skip path the row's SELECTION records are also disabled (enable
+    # byte ctx+0x870+row*0x7C+0x77 and its (row+4)*0x7C twin): the native head
+    # block that authors them is skipped along with the draw, and a stale
+    # enabled record left the invisible row cursor-selectable (live
+    # 2026-08-28: Magic/Status/Equipment opened on a hidden member). A row
+    # that un-helds is re-authored by the native head block next frame.
+    panel = A.asm_labels([
+        A.andi("v0", "a1", 0xFF)] +               # v0 = row (v0/v1/at dead)
+        _rp_mask_test(mb, "v0", "at") + [
+        ("beq", "at", "zero", "RPGO"), A.nop(),
+        A.sll("v1", "v0", 7),                     # row*0x80
+        A.sll("at", "v0", 2),                     # row*4
+        A.subu("v1", "v1", "at"),                 # row*0x7C
+        A.addu("v1", "a0", "v1"),
+        A.sb("zero", 0x8E7, "v1"),                # 0x870+0x77: enable off
+        A.sb("zero", 0xAD7, "v1"),                # (row+4)*0x7C twin enable off
+        A.jr(), A.nop(),                          # held: skip the whole row
+        ("label", "RPGO"),
+        A.word(_RP_PANEL_W0),                     # displaced addiu sp,sp,-0x50
+        A.word(_RP_PANEL_W1),                     # displaced sw ra,0x2C(sp)
+        A.j(_RP_PANEL_HOOK + 8), A.nop(),
+    ])
+    E.install_detour(elf, _RP_PANEL_HOOK, E.add_segment_cave(elf, panel))
+    # (2) battle status window rows
+    for hook, skip, w0, row_reg in (
+            (_RP_BHP_HOOK, _RP_BHP_SKIP, _RP_BROW_W0, "v1"),
+            (_RP_BMP_HOOK, _RP_BMP_SKIP, _RP_BROW_W0, "v1"),
+            (_RP_BNAME_HOOK, _RP_BNAME_SKIP, _RP_BNAME_W0, "s1")):
+        cave = _rp_battle_cave(mb, hook, skip, w0, row_reg)
+        E.install_detour(elf, hook, E.add_segment_cave(elf, cave))
+    # (3) spell-use paging: OR the held bit into the vanilla status skip test.
+    # Guard: an all-held mask would spin the vanilla re-step loop forever, so
+    # the cave stands down (leaves v0 = status only) on mask 0xF.
+    for hook in (_RP_MUSE_DEC_HOOK, _RP_MUSE_INC_HOOK):
+        cave = A.asm_labels([
+            A.word(_RP_MUSE_W0),                  # displaced lbu v0,0x1F(v0)
+            A.word(_RP_MUSE_W1),                  # displaced andi v0,v0,0x3
+            ("bne", "v0", "zero", "RPOUT"), A.nop(),   # status already skips
+            A.lui("v1", (mb >> 16) & 0xFFFF),
+            A.ori("v1", "v1", mb & 0xFFFF),
+            A.lbu("v1", RP_MB_MASK_OFF, "v1"),
+            A.addiu("at", "zero", 0xF),
+            ("beq", "v1", "at", "RPOUT"), A.nop(),     # all-held: stand down
+            A.srlv("v1", "v1", "a0"),             # a0 = candidate row
+            A.andi("v1", "v1", 1),
+            A.or_("v0", "v0", "v1"),              # held reads as "skip me"
+            ("label", "RPOUT"),
+            A.j(hook + 8), A.nop(),
+        ])
+        E.install_detour(elf, hook, E.add_segment_cave(elf, cave))
+    # (4) magic-menu tick paging
+    E.install_detour(elf, _RP_MTICK_DEC_HOOK, E.add_segment_cave(
+        elf, _rp_mtick_cave(mb, _RP_MTICK_DEC_HOOK, True)))
+    E.install_detour(elf, _RP_MTICK_INC_HOOK, E.add_segment_cave(
+        elf, _rp_mtick_cave(mb, _RP_MTICK_INC_HOOK, False)))
+    # (5) Status/Equipment shared paging leaf
+    E.install_detour(elf, _RP_LEAF_DEC_HOOK, E.add_segment_cave(
+        elf, _rp_leaf_cave(mb, _RP_LEAF_DEC_HOOK, True)))
+    E.install_detour(elf, _RP_LEAF_INC_HOOK, E.add_segment_cave(
+        elf, _rp_leaf_cave(mb, _RP_LEAF_INC_HOOK, False)))
+    # (6) shared char-pick commit: jal-style hook (cave returns via jr ra into
+    # the untouched native KO test at hook+8 when the picked row is not held).
+    # t0-t2 are dead in the whole tick fn; a2/a1 re-created as displaced.
+    pick = A.asm_labels([
+        A.word(_RP_PICK_W0),                      # displaced lw a2,0x718C(s0)
+        A.word(_RP_PICK_W1),                      # displaced lw a1,0x7098(s0)
+        A.lbu("t0", 1, "a2")] +                   # picked display row
+        _rp_mask_test(mb, "t0", "t1") + [
+        ("beq", "t1", "zero", "RPOK"), A.nop(),
+        A.addiu("t2", "zero", 0x66),              # bonk, exactly the native
+        A.sh("t2", _RP_SND_OFF, "s0"),            # Magic-KO reject outcome
+        A.j(_RP_PICK_BONK), A.nop(),
+        ("label", "RPOK"),
+        A.jr(), A.nop(),                          # ra = hook+8 (jal-style)
+    ])
+    cv = E.add_segment_cave(elf, pick)
+    E.apply_patches(elf, [(_RP_PICK_HOOK, A.jal(cv) + A.nop())])
+    # (7) formation picks: bonk instead of latching a held row (either pick).
+    fp1 = A.asm_labels([
+        A.lw("t0", 0x718C, "s0"),
+        A.lbu("t0", 1, "t0")] +                   # first-pick row
+        _rp_mask_test(mb, "t0", "t1") + [
+        ("beq", "t1", "zero", "RPGO"), A.nop(),
+        A.addiu("t2", "zero", 0x66),
+        A.sh("t2", _RP_SND_OFF, "s0"),
+        A.j(_RP_FPICK_EXIT), A.nop(),
+        ("label", "RPGO"),
+        A.word(_RP_FPICK1_W0),                    # displaced sw a0,0x7088(s0)
+        A.word(_RP_FPICK1_W1),                    # displaced lw a0,0x718C(s0)
+        A.j(_RP_FPICK1_HOOK + 8), A.nop(),
+    ])
+    E.install_detour(elf, _RP_FPICK1_HOOK, E.add_segment_cave(elf, fp1))
+    fp2 = A.asm_labels(                           # a0 = second-pick row here
+        _rp_mask_test(mb, "a0", "t1") + [
+        ("beq", "t1", "zero", "RPGO"), A.nop(),
+        A.addiu("t2", "zero", 0x66),
+        A.sh("t2", _RP_SND_OFF, "s0"),
+        A.j(_RP_FPICK_EXIT), A.nop(),
+        ("label", "RPGO"),
+        A.word(_RP_FPICK2_W0),                    # displaced sw a1,0x7088(s0)
+        A.word(_RP_FPICK2_W1),                    # displaced li v1,0x65
+        A.j(_RP_FPICK2_HOOK + 8), A.nop(),
+    ])
+    E.install_detour(elf, _RP_FPICK2_HOOK, E.add_segment_cave(elf, fp2))
+    # (8) popup ctor: act=0 at build time for held party layers (v0 = slot
+    # index survives to the displaced addiu; v1/at scratch, both dead).
+    ctor = A.asm_labels([
+        A.word(_RP_CTOR_W0)] +                    # displaced lbu v0,0x67B6(s5)
+        _rp_battle_gate("v1", "at", "RPOUT") + [  # menus/field: never mask
+        A.sltiu("at", "v0", 12),                  # party layers = slots 0..11
+        ("beq", "at", "zero", "RPOUT"), A.nop(),
+        A.andi("v1", "v0", 3)] +                  # row = slot & 3
+        _rp_mask_test(mb, "v1", "at") + [
+        ("beq", "at", "zero", "RPOUT"), A.nop(),
+        A.sb("zero", _RP_ACT_OFF, "s0"),          # hide over the earlier act=1
+        ("label", "RPOUT"),
+        A.word(_RP_CTOR_W1),                      # displaced addiu v1,v0,1
+        A.j(_RP_CTOR_RESUME), A.nop(),
+    ])
+    E.install_detour(elf, _RP_CTOR_HOOK, E.add_segment_cave(elf, ctor))
+    # (10) sibling act=1 sites (see the constants block): the flash survived
+    # the main-ctor hook, so the party layers come -- at least sometimes --
+    # from these variants. Leaf ctor: slot re-read from the cursor (a0 = pool
+    # base, cursor bumps only at the jr); v1==1 and a1 are LIVE downstream,
+    # t0/t1/at are dead scratch.
+    ctor2 = A.asm_labels(
+        _rp_battle_gate("t0", "t1", "RPGO") + [   # menus/field: never mask
+        A.lbu("t0", 0x67B6, "a0"),                # slot (pre-increment)
+        A.sltiu("at", "t0", 12),
+        ("beq", "at", "zero", "RPGO"), A.nop(),
+        A.andi("t0", "t0", 3)] +                  # row
+        _rp_mask_test(mb, "t0", "t1") + [
+        ("beq", "t1", "zero", "RPGO"), A.nop(),
+        A.sb("zero", 0x497, "a2"),                # held: act = 0
+        A.sb("zero", 0x498, "a2"),
+        A.j(_RP_CTOR2_RESUME), A.nop(),
+        ("label", "RPGO"),
+        A.word(_RP_CTOR2_W0),                     # displaced sb v1,0x497(a2)
+        A.word(_RP_CTOR2_W1),                     # displaced sb zero,0x498(a2)
+        A.j(_RP_CTOR2_RESUME), A.nop(),
+    ])
+    E.install_detour(elf, _RP_CTOR2_HOOK, E.add_segment_cave(elf, ctor2))
+    # Re-init-by-index ctor: at the hook a0 STILL holds the pool base (the
+    # displaced addiu is what overwrites it) and a2 = base + slot*124, so
+    # slot = (a2-a0)/124. a1 live downstream; t0/t1/at dead scratch.
+    ctor3 = A.asm_labels(
+        _rp_battle_gate("t0", "t1", "RPGO") + [   # menus/field: never mask
+        A.subu("t0", "a2", "a0"),                 # slot*124
+        A.sltiu("at", "t0", 12 * 124),
+        ("beq", "at", "zero", "RPGO"), A.nop(),
+        A.addiu("t1", "zero", 124),
+        A.divu("t0", "t1"),
+        A.mflo("t0"),                             # slot
+        A.andi("t0", "t0", 3)] +                  # row
+        _rp_mask_test(mb, "t0", "t1") + [
+        ("beq", "t1", "zero", "RPGO"), A.nop(),
+        A.word(_RP_CTOR3_W0),                     # displaced addiu a0,zero,1
+        A.sb("zero", 0x497, "a2"),                # held: act = 0
+        A.j(_RP_CTOR3_RESUME), A.nop(),
+        ("label", "RPGO"),
+        A.word(_RP_CTOR3_W0),                     # displaced addiu a0,zero,1
+        A.word(_RP_CTOR3_W1),                     # displaced sb a0,0x497(a2)
+        A.j(_RP_CTOR3_RESUME), A.nop(),
+    ])
+    E.install_detour(elf, _RP_CTOR3_HOOK, E.add_segment_cave(elf, ctor3))
+    # (11) save/load file-select preview, v289 two-hook design (constants
+    # block has the full story: the old whole-body skip left virgin-slot
+    # atlas cells unauthored -> engine bounds trap on save). The body now
+    # runs natively through the portrait authoring; these hooks only blank
+    # the held char's name, stat texts and portrait visibility.
+    # A: name prim call-site retarget. v0 scratch ONLY -- the delay slot
+    # arms t0 = sp+0x60 (the prim's style-struct arg) before cave entry.
+    spname = A.asm_labels([
+        A.lhu("v0", 0x28, "s4"),                  # previewed char's HP
+        ("bne", "v0", "zero", "RPGO"), A.nop(),
+        A.lbu("v0", 0x1F, "s4"),                  # ...and status byte
+        A.andi("v0", "v0", 1),
+        ("bne", "v0", "zero", "RPGO"), A.nop(),   # legit KO: draw normally
+        A.jr(), A.nop(),                          # held: no name prim
+        ("label", "RPGO"),
+        A.j(_RP_SPNAME_FN), A.nop(),              # tail-call the real prim
+    ])
+    if "saveprv" not in _RP_BISECT_DISABLE:
+        cv = E.add_segment_cave(elf, spname)
+        E.apply_patches(elf, [(_RP_SPNAME_CALL, A.jal(cv))])
+    # B: post-submit detour. t0/t1/t3 scratch (the text prims below the hook
+    # re-arm every t-reg before use). Held -> engine's own hide idiom on the
+    # two portrait rows, then the loop advance (skips only the text prims).
+    sptext = A.asm_labels([
+        A.word(_RP_SPTEXT_W0),                    # displaced seh s6,s3
+        A.word(_RP_SPTEXT_W1),                    # displaced addiu s7,s6,4
+        A.lhu("t0", 0x28, "s4"),
+        ("bne", "t0", "zero", "RPGO"), A.nop(),
+        A.lbu("t0", 0x1F, "s4"),
+        A.andi("t0", "t0", 1),
+        ("bne", "t0", "zero", "RPGO"), A.nop(),
+        A.lw("t3", 4, "s5"),                      # retained-widget table
+        A.lbu("t0", 0x10, "s5"),
+        A.addu("t0", "t0", "s2"),                 # portrait row for char s2
+        A.sll("t1", "t0", 5),
+        A.subu("t1", "t1", "t0"),
+        A.sll("t1", "t1", 2),                     # idx * 0x7C
+        A.addu("t1", "t3", "t1"),
+        A.sb("zero", _RP_WIDGET_VIS_OFF, "t1"),   # engine's own hide idiom
+        A.lbu("t0", 0x11, "s5"),
+        A.addu("t0", "t0", "s2"),                 # twin row
+        A.sll("t1", "t0", 5),
+        A.subu("t1", "t1", "t0"),
+        A.sll("t1", "t1", 2),
+        A.addu("t1", "t3", "t1"),
+        A.sb("zero", _RP_WIDGET_VIS_OFF, "t1"),
+        A.j(_RP_SAVEPRV_ADVANCE), A.nop(),        # skip Lv/HP/MP text prims
+        ("label", "RPGO"),
+        A.j(_RP_SPTEXT_RESUME), A.nop(),
+    ])
+    if "saveprv" not in _RP_BISECT_DISABLE:
+        E.install_detour(elf, _RP_SPTEXT_HOOK, E.add_segment_cave(elf, sptext))
+    # (12) item-use validity: single-target items aimed at a held row take
+    # the native invalid-target exit (s0 == 0 at 0x088C5428). The displaced
+    # prologue stores run first, so every s-reg the exit's epilogue restores
+    # is already on the stack. t0/t1 scratch (no t-reg use in the fn).
+    ival = A.asm_labels([
+        A.word(_RP_IVAL_W0),                      # displaced sw s1,8(sp)
+        A.word(_RP_IVAL_W1)] +                    # displaced sw s0,4(sp)
+        _rp_mask_test(mb, "a2", "t0") + [         # a2 = target display row
+        ("beq", "t0", "zero", "RPGO"), A.nop(),
+        A.lui("t1", 0x0895),
+        A.addiu("t1", "t1", 0x38F3),
+        A.addu("t1", "t1", "a1"),                 # a1 = item id*16 here
+        A.lbu("t1", 0, "t1"),
+        A.andi("t1", "t1", 0x10),
+        ("beq", "t1", "zero", "RPGO"), A.nop(),   # party-wide: native path
+        A.addu("s0", "zero", "zero"),             # verdict = invalid target
+        A.j(_RP_IVAL_REJECT), A.nop(),
+        ("label", "RPGO"),
+        A.j(_RP_IVAL_RESUME), A.nop(),
+    ])
+    if "ival" not in _RP_BISECT_DISABLE:
+        E.install_detour(elf, _RP_IVAL_HOOK, E.add_segment_cave(elf, ival))
+    # (13) shop member strips, CALL-SITE jal retargets (see constants block:
+    # the v281 entry detours fired on the save screen via unseen indirect
+    # callers and froze it). Held row -> jr ra (ra = the loop's return, row
+    # draws nothing); else tail-call the untouched helper. v289 hardening:
+    # a row outside 0..3 tail-calls vanilla unconditionally -- srlv masks
+    # the row to its low 5 bits, so a garbage reg from some other caller of
+    # the SAME loop fn could otherwise read a held bit and skip work a
+    # non-shop screen depends on.
+    for call, fn, row_reg in ((_RP_ESTRIP_CALL, _RP_ESTRIP_FN, "t2"),
+                              (_RP_SSTRIP_CALL, _RP_SSTRIP_FN, "t1")):
+        strip = A.asm_labels([
+            A.sltiu("at", row_reg, 4),
+            ("beq", "at", "zero", "RPGO"), A.nop()] +
+            _rp_mask_test(mb, row_reg, "v0") + [
+            ("beq", "v0", "zero", "RPGO"), A.nop(),
+            A.jr(), A.nop(),                      # held: skip this row's draw
+            ("label", "RPGO"),
+            A.j(fn), A.nop(),                     # tail-call the real helper
+        ])
+        cv = E.add_segment_cave(elf, strip)
+        E.apply_patches(elf, [(call, A.jal(cv))])
+    # (14) virtual battle KO at the per-unit state classifier (constants
+    # block has the mechanism + audit). Held party rows classify as
+    # out-of-action every sweep tick with NO BU record write -- this is
+    # what lets the client's whole in-battle branch (stamp + fast-poll +
+    # sprite pokes) be deleted (v290).
+    # (v292: back to the pure virtual bit -- the flatten pre-pass below
+    # owns ALL battle sprite hiding per frame, including the intro frames
+    # this classifier never covers.)
+    wipe = A.asm_labels([
+        A.word(_RP_WIPE_W0)] +                    # displaced lhu v1 = BU_STATUS
+        _rp_mask_test(mb, "a1", "v0") + [         # v0 = held bit for row a1
+        A.or_("v1", "v1", "v0"),                  # virtual KO
+        A.word(_RP_WIPE_W1),                      # displaced andi v0,v1,1
+        A.j(_RP_WIPE_RESUME), A.nop(),
+    ])
+    E.install_detour(elf, _RP_WIPE_HOOK, E.add_segment_cave(elf, wipe))
+    # (15) per-frame held-layer act clear at the popup flatten (constants
+    # block: why the classifier can't cover the intro). Battle-gated --
+    # the pool is screen-generic (v284 lesson).
+    flat = A.asm_labels(
+        _rp_battle_gate("a1", "a2", "RPGO") + [
+        A.lui("a1", (mb >> 16) & 0xFFFF),
+        A.ori("a1", "a1", mb & 0xFFFF),
+        A.lbu("a1", RP_MB_MASK_OFF, "a1"),        # a1 = held mask
+        ("beq", "a1", "zero", "RPGO"), A.nop(),
+        A.andi("a2", "a1", 1),
+        ("beq", "a2", "zero", "RPR1"), A.nop(),
+        A.sb("zero", 0x497, "a0"),                # row 0: body/shadow/weapon
+        A.sb("zero", 0x687, "a0"),
+        A.sb("zero", 0x877, "a0"),
+        ("label", "RPR1"),
+        A.andi("a2", "a1", 2),
+        ("beq", "a2", "zero", "RPR2"), A.nop(),
+        A.sb("zero", 0x513, "a0"),                # row 1 (+0x7C each)
+        A.sb("zero", 0x703, "a0"),
+        A.sb("zero", 0x8F3, "a0"),
+        ("label", "RPR2"),
+        A.andi("a2", "a1", 4),
+        ("beq", "a2", "zero", "RPR3"), A.nop(),
+        A.sb("zero", 0x58F, "a0"),                # row 2
+        A.sb("zero", 0x77F, "a0"),
+        A.sb("zero", 0x96F, "a0"),
+        ("label", "RPR3"),
+        A.andi("a2", "a1", 8),
+        ("beq", "a2", "zero", "RPGO"), A.nop(),
+        A.sb("zero", 0x60B, "a0"),                # row 3
+        A.sb("zero", 0x7FB, "a0"),
+        A.sb("zero", 0x9EB, "a0"),
+        ("label", "RPGO"),
+        A.word(_RP_FLAT_W0),                      # displaced lbu a1,0x67b4(a0)
+        A.word(_RP_FLAT_W1),                      # displaced lbu a2,0x67b5(a0)
+        A.j(_RP_FLAT_RESUME), A.nop(),
+    ])
+    E.install_detour(elf, _RP_FLAT_HOOK, E.add_segment_cave(elf, flat))
+    # (16) inn-sleep cutscene: a held row's sleeper still spawns and still
+    # runs the whole walk-to-bed script, it just stops being drawn.
+    inn = A.asm_labels([
+        A.word(_RP_INN_W0),                       # displaced lhu v1,0xb4(v0)
+        A.word(_RP_INN_W1),                       # displaced ori v1,v1,0x8018
+        A.lbu("t0", _RP_INN_ROW_OFF, "s0")] +     # display row (script byte 2)
+        _rp_mask_test(mb, "t0", "t1") + [
+        ("beq", "t1", "zero", "RPGO"), A.nop(),
+        A.andi("v1", "v1", 0xFFFF & ~_RP_INN_DRAW_BIT),   # held: don't draw
+        ("label", "RPGO"),
+        A.j(_RP_INN_RESUME), A.nop(),             # vanilla sh v1,0xb4(v0)
+    ])
+    E.install_detour(elf, _RP_INN_HOOK, E.add_segment_cave(elf, inn))
+    # (9) spell-shop learn-target: confirm on a held row forces the class
+    # check's "cannot learn" verdict (v0=0 -> native msg 0x11 + bonk 0x66;
+    # the commit re-reads the same row, so it can never fire). Single-word
+    # jal retarget; delay slot (move a0,s0) runs first, so a0 = shop ctx.
+    # t0/t1 dead (the real callee clobbers them); a0-a3 preserved.
+    slearn = A.asm_labels([
+        A.lw("t0", _RP_LEARN_ROW_OFF, "a0")] +    # learn-target row
+        _rp_mask_test(mb, "t0", "t1") + [
+        ("beq", "t1", "zero", "RPGO"), A.nop(),
+        A.addiu("v0", "zero", 0),                 # held: ineligible
+        A.jr(), A.nop(),
+        ("label", "RPGO"),
+        A.j(_RP_SLEARN_FN), A.nop(),              # tail-call the real check
+    ])
+    E.apply_patches(elf, [(_RP_SLEARN_HOOK,
+                           A.jal(E.add_segment_cave(elf, slearn)))])
+    # ...and its target cursor skips held rows (bounded, mask 0xF safe).
+    for hook, resume, dec in ((_RP_SCUR_INC_HOOK, _RP_SCUR_INC_RESUME, False),
+                              (_RP_SCUR_DEC_HOOK, _RP_SCUR_DEC_RESUME, True)):
+        wrap = ([A.addiu("at", "zero", -1),
+                 ("bne", "v0", "at", "RPCHK"), A.nop(),
+                 A.addiu("v0", "zero", 3)]
+                if dec else
+                [A.addiu("at", "zero", 4),
+                 ("bne", "v0", "at", "RPCHK"), A.nop(),
+                 A.addu("v0", "zero", "zero")])
+        cave = A.asm_labels([
+            A.word(_RP_SCUR_W0),                  # displaced lw v0,0x7078(s0)
+            A.lui("v1", (mb >> 16) & 0xFFFF),
+            A.ori("v1", "v1", mb & 0xFFFF),
+            A.lbu("v1", RP_MB_MASK_OFF, "v1"),
+            A.addiu("a0", "zero", 4),             # bound (a0 dead: re-set
+            ("label", "RPSTEP"),                  # before any later read)
+            A.addiu("v0", "v0", -1 if dec else 1),
+        ] + wrap + [
+            ("label", "RPCHK"),
+            A.srlv("at", "v1", "v0"),
+            A.andi("at", "at", 1),
+            ("beq", "at", "zero", "RPDONE"), A.nop(),
+            A.addiu("a0", "a0", -1),
+            ("bne", "a0", "zero", "RPSTEP"), A.nop(),
+            ("label", "RPDONE"),
+            A.sw("v0", 0x7078, "s0"),             # our store; originals skipped
+            A.j(resume), A.nop(),
+        ])
+        E.install_detour(elf, hook, E.add_segment_cave(elf, cave))
+
+
+# --- trap round zero (Archipelago traps as real monster abilities) ------------
+# An AP trap must resolve as a REAL ability -- the engine's own targeting,
+# animation, battle message and status apply -- BEFORE the party acts. Poking
+# status bits from the client was invisible, and for Silence did not even work.
+#
+# The round machine (0x0886B0FC, phase byte bb+0xCD4E, jump table 0x0894B784)
+# runs phase 1 = sort + party command reset, then falls into the leg that stores
+# phase 2 and opens the command menu. We detour that leg. On an armed round the
+# cave commits a living enemy's action into its own unit record, parks that row
+# at order[12] with the turn cursor on it, and hands the engine 4 instead of 2.
+# Phase 4 pops exactly one actor, the vanilla type-10 handler plays the whole
+# ability, cursor 13 ends the round, and phase 1 re-sorts and opens the menu --
+# so the party loses NOTHING. Live-proven 2026-08-30, all four traps.
+#
+# WHY v1: install_detour displaces two words, and here they are `lui v0,1` and
+# `addiu v1,zero,2` -- the phase value on its way to the store at 0x0886B2F4
+# (`sb v1,-0x2e52(v0)`). The cave replays the first and emits 4 instead of 2 for
+# the second, so the ENGINE stores our phase. We never touch the phase byte.
+#
+# bb = s1 + 0x460, proven three ways: the sort call takes s1+0x5424 with a
+# +0x7ff8 DELAY SLOT = s1+0xD41C = bb+0xCFBC; the phase store lands at
+# s1+0x10000-0x2e52 = s1+0xD1AE = bb+0xCD4E; and the phase 4 handler itself
+# passes `addiu a0,s1,0x460` as battle_base (0x0886B370). An earlier RE pass got
+# this wrong by reading the sort call and missing its delay slot -- hence three.
+#
+# PHASE 2 IS SKIPPED and that is safe: its handler (0x0886B308) only polls the
+# command-input UI and falls through into the chooser. It sets no state phase 4
+# needs. The chooser therefore does not run on a stolen round, leaving the other
+# enemies with stale commands -- harmless, because cursor 12 means no other row
+# is ever popped.
+#
+# AMBUSH: on an ambushed battle phase 1 branches at 0x0886B2DC straight to
+# phase 3, so this leg never runs and the trap lands on round 2 instead. That is
+# CORRECT and deliberate -- in an ambush the party does not act in round 1
+# either, so the trap still resolves before the player touches a command. Do not
+# "fix" it by hooking the ambush leg too.
+_TRP_MB_MAGIC = b"TRP1"
+_TRP_MB_ARMED_OFF = 4         # u8  1 = fire on the next hooked round (client)
+_TRP_MB_TARGET_OFF = 5        # u8  value for unit+0x41; 0xFF = no per-row
+                              #     selector (target modes 0x01 / 0x08)
+_TRP_MB_EFFECT_OFF = 6        # u16 magic_info effect id for unit+0x44
+_TRP_MB_FIRED_OFF = 8         # u8  cave bumps on every fire; the client reads
+                              #     it back as confirmation (wraps, that is ok)
+_TRP_MB_ROW_OFF = 9           # u8  caster row the cave chose (diagnostic)
+_TRP_MB_LEN = 12
+
+_TRP_HOOK = 0x0886B2E4        # phase 1 -> 2 leg, after the sort AND after the
+                              # party command reset (which re-idles the msg VM)
+_TRP_HOOK_W0 = 0x3C020001     # lui   v0, 1
+_TRP_HOOK_W1 = 0x24030002     # addiu v1, zero, 2      (the phase value)
+_TRP_BB_OFF = 0x460           # bb = s1 + this
+_TRP_ENEMY0_OFF = 0xC8C4      # bb + this = unit row 4 = enemy row 0
+_TRP_BTYPE_OFF = 0x6809       # bb + this = u8 battle type: 0 normal, 1 preemptive
+                              # (enemies muted, party gets a free round), 2 ambush
+                              # (party muted). Fits a signed 16-bit immediate, so
+                              # it needs no li+addu the way the 0xC8C4/0xCFxx
+                              # offsets do.
+_TRP_HANDLE_OFF = 0xCFBC      # bb + this = u32 reading back bb itself; this is
+                              # the round machine's actmgr, and order/cursor are
+                              # its +0x08/+0x15 (advance 0x08880BE8/0x08880C04)
+_TRP_ORDER_OFF = 0xCFC4       # bb + this = u8[13] turn order; the cursor is the
+                              # very next byte, i.e. &order[0] + 13
+_TRP_UNIT_STRIDE = 0x6C
+_TRP_ROWS = 13                # 4 party + 9 enemy
+_TRP_CANT_ACT = 0x33          # status bits the advance's can-act gate rejects
+_TRP_CMD_CAST = 0x0A
+
+
+def _trap_cave(mb_vaddr):
+    """Detour body for the phase 1 -> 2 leg. Unarmed, or with no enemy able to
+    act, it is a byte-exact replay of the two displaced words -- which is also
+    how the spec's "hold the trap for the next battle" is implemented.
+
+    Clobbers t0-t7 only, and every one is dead here: a jal to the party command
+    reset returned two instructions ago, so nothing caller-saved is live. s1
+    (the scene object) and v0 are left alone; v1 is ours by construction."""
+    resume = _TRP_HOOK + 8
+    return A.asm_labels([
+        A.word(_TRP_HOOK_W0),                       # displaced lui v0,1 -- both
+                                                    # paths need it for the store
+        A.li("t0", mb_vaddr),
+        A.lbu("t1", _TRP_MB_ARMED_OFF, "t0"),
+        ("beq", "t1", "zero", "VANILLA"), A.nop(),  # idle -> untouched round
+        A.lhu("t3", _TRP_MB_EFFECT_OFF, "t0"),
+        ("beq", "t3", "zero", "VANILLA"), A.nop(),  # armed with no effect id:
+                                                    # never cast garbage
+        A.addiu("t2", "s1", _TRP_BB_OFF),           # t2 = battle_base
+        # Self-validating handle: the u32 at bb+0xCFBC reads back bb (the round
+        # machine's own "actmgr" object starts with it, and the advance at
+        # 0x08880C0C loads bb from exactly there). Belt and braces -- the hook
+        # only executes inside the battle round machine, so s1 IS the battle
+        # scene by construction -- but it costs 4 instructions and it means a
+        # future engine state we have not seen falls through to vanilla instead
+        # of writing into whatever happens to be at s1+0x460.
+        A.li("t6", _TRP_HANDLE_OFF),
+        A.addu("t6", "t6", "t2"),
+        A.lw("t6", 0, "t6"),
+        ("bne", "t6", "t2", "VANILLA"), A.nop(),
+        # NEVER EAT A PREEMPTIVE ROUND (live 2026-08-30). On a preemptive strike
+        # the party IS enqueued -- which is why this leg runs at all -- but
+        # cursor=12 ends the round after our one actor, so the party's queued
+        # free strike never executes and the player loses the first strike they
+        # earned. Decline on any non-normal battle type and let the trap take
+        # the NEXT round instead: the byte clears after round 1, so it fires on
+        # round 2 with the free round intact. This is the same "wait a round"
+        # shape ambush already has (ambush never reaches here at all, since
+        # phase 1 branches to phase 3 at 0x0886B2DC when nothing is enqueued).
+        A.lbu("t6", _TRP_BTYPE_OFF, "t2"),
+        ("bne", "t6", "zero", "VANILLA"), A.nop(),
+        A.li("t5", _TRP_ENEMY0_OFF),
+        A.addu("t5", "t5", "t2"),                   # t5 = &unit[row 4]
+        A.addiu("t4", "zero", 4),                   # t4 = row
+        # Find an enemy that will survive the advance's can-act gate
+        # (0x08871958: hp != 0 and status & 0x33 == 0). Choosing one that fails
+        # it would burn the trap on a row the engine then silently skips.
+        ("label", "SCAN"),
+        A.lbu("t6", 0x49, "t5"),                    # species; 0xFF = empty slot
+        A.addiu("t7", "zero", 0xFF),
+        ("beq", "t6", "t7", "NEXT"), A.nop(),
+        A.lhu("t6", 0x08, "t5"),                    # hp
+        ("beq", "t6", "zero", "NEXT"), A.nop(),
+        A.lhu("t6", 0x00, "t5"),                    # status
+        A.andi("t6", "t6", _TRP_CANT_ACT),
+        ("beq", "t6", "zero", "FOUND"), A.nop(),
+        ("label", "NEXT"),
+        A.addiu("t4", "t4", 1),
+        A.addiu("t5", "t5", _TRP_UNIT_STRIDE),
+        A.addiu("t7", "zero", _TRP_ROWS),
+        ("bne", "t4", "t7", "SCAN"), A.nop(),
+        ("beq", "zero", "zero", "VANILLA"), A.nop(),  # nobody can cast -> hold
+        ("label", "FOUND"),
+        # Commit the action exactly as the vanilla picker would have.
+        A.sb("t4", 0x40, "t5"),                     # +0x40 own row
+        A.lbu("t6", _TRP_MB_TARGET_OFF, "t0"),
+        A.sb("t6", 0x41, "t5"),                     # +0x41 target selector: the
+                                                    # CLIENT resolved this from
+                                                    # the effect's target mode
+        A.addiu("t6", "zero", _TRP_CMD_CAST),
+        A.sh("t6", 0x42, "t5"),                     # +0x42 command = cast
+        A.sh("t3", 0x44, "t5"),                     # +0x44 effect id
+        # Park it at the tail of the turn order with the cursor on it, so the
+        # advance pops this row and then immediately runs off the end (13).
+        A.li("t7", _TRP_ORDER_OFF),
+        A.addu("t7", "t7", "t2"),                   # t7 = &order[0]
+        A.sb("t4", 12, "t7"),                       # order[12] = caster row
+        A.addiu("t6", "zero", 12),
+        A.sb("t6", 13, "t7"),                       # cursor (&order[0] + 13)
+        # Consume the arming and confirm back to the client.
+        A.sb("zero", _TRP_MB_ARMED_OFF, "t0"),
+        A.lbu("t6", _TRP_MB_FIRED_OFF, "t0"),
+        A.addiu("t6", "t6", 1),
+        A.sb("t6", _TRP_MB_FIRED_OFF, "t0"),
+        A.sb("t4", _TRP_MB_ROW_OFF, "t0"),
+        A.addiu("v1", "zero", 4),                   # <- phase 4, not 2
+        A.j(resume), A.nop(),
+        ("label", "VANILLA"),
+        A.word(_TRP_HOOK_W1),                       # displaced addiu v1,zero,2
+        A.j(resume), A.nop(),
+    ])
+
+
+def apply_trap_round_zero(elf: bytearray, feats=None):
+    """Install the round-zero trap detour + its TRP1 mailbox (see _trap_cave).
+
+    ON_DISC_ALWAYS: an unarmed mailbox makes the cave a byte-exact replay of the
+    vanilla words, so baking it unconditionally costs a trapless seed nothing
+    and spares us a yaml option that could only ever be set wrong."""
+    got = (_read_word(elf, _TRP_HOOK), _read_word(elf, _TRP_HOOK + 4))
+    if got != (_TRP_HOOK_W0, _TRP_HOOK_W1):
+        raise ValueError(f"unexpected phase 1->2 leg @{_TRP_HOOK:#x}: "
+                         f"{got[0]:#010x} {got[1]:#010x} "
+                         f"(want {_TRP_HOOK_W0:#010x} {_TRP_HOOK_W1:#010x})")
+    mb = _TRP_MB_MAGIC + bytes(_TRP_MB_LEN - 4)
+    assert len(mb) == _TRP_MB_LEN, len(mb)
+    mb_vaddr = E.add_segment_cave(elf, mb)
+    E.install_detour(elf, _TRP_HOOK,
+                     E.add_segment_cave(elf, _trap_cave(mb_vaddr)))
+
+
 FEATURES = {
     # Super Dash: hold-the-button speed boost on every surface, always baked
     # (options.ON_DISC_ALWAYS). Gated at RUNTIME on the Config Dash bit + dash
@@ -8401,6 +9472,9 @@ FEATURES = {
     # (client _bonus_dyn_loop polls the BDC1 ring; exec bps are dead in player
     # sessions -- FastMemoryAccess=True).
     "bonus_dyn_chests": apply_bonus_dyn_chests,
+    # Round-zero trap cave: an armed AP trap resolves as a real monster
+    # ability before the party acts (client _trap_loop arms TRP1).
+    "trap_round_zero": apply_trap_round_zero,
     # Giant's Cave choke point: moves the Giant onto (12,13). The paired boulder
     # at (11,13) is baked post-build by map_bake (dpk-side, LOAD-BEARING).
     "giant_cave_gate": apply_giant_cave_gate,
@@ -8469,6 +9543,9 @@ FEATURES = {
     # before this loop) -- that fn mints the shared mailbox and carries the
     # type-3 to-hit leg, which has no hookable window of its own.
     "magic_power_scaling": apply_magic_power_scaling,
+    # starting_party_members Phase 3: held-row hiding in the pause panel +
+    # battle status window, char-select paging skips, RPMK mask mailbox.
+    "reduced_party": apply_reduced_party,
     # MUST STAY LAST: reserves the cave segment's bss tail; add_segment_cave
     # refuses to append after it (see eboot_patch.cave_bss_tail).
     "spell_tomes": apply_spell_tomes,
@@ -8602,11 +9679,21 @@ _SC_FLAG_SPRITE = 0x10                                   # a2 bit -> sprite (MIS
 # 0x11-0x1D = the 13 battle-unit anchors, and the battle MENU UI lives low too
 # (base 0x0d-era spawns ate party sprites / slid Back/circle/arrow onto the
 # thief, live 2026-07-23). Slot PLACEMENT comes from the allocator bb+0x67B6
-# (bump cursor inside the object constructors) -- live: icons land at 0x25..
-# regardless of the 0x3C written below. 0x68C3/0x68CA/0x68CB are a free-batch
-# descriptor, not allocation state (see _steal_spawn_cave v259 note).
-_SC_SLOT_BASE, _SC_SLOT_COUNT_OFF, _SC_SLOT_BASE_OFF = 0x3C, 0x68ca, 0x68c3
+# (bump cursor inside the record constructor 0x8886E54). The spawner ALSO
+# stamps act/coords and z-links party-target pieces at record index
+# [0x68C3]+[0x68CA] -- vanilla keeps that equal to the slot the constructor
+# just filled, so the cave must too (v274; the old literal 0x3C base stamped
+# act=1 on a stale NULL-buffer record whose per-frame submit dropped every
+# sprite drawn after it = the whole party, live-proven 2026-08-21).
+# 0x68C3/0x68CA/0x68CB are a free-batch descriptor consumed by free_range,
+# not allocation state (see _steal_spawn_cave v259 note).
+_SC_SLOT_COUNT_OFF, _SC_SLOT_BASE_OFF = 0x68ca, 0x68c3
+_SC_ALLOC_OFF = 0x67b6                                   # live bump cursor (u8)
 _SC_SLOT_COUNT_MAX = 8                                   # one call costs 5 of ~33 slots
+# Spawn only while cursor+5 stays inside the 128-record arena; the mailbox
+# stays armed, so a full pool just delays the cue a frame (free_range drains
+# the cursor when vanilla batches close).
+_SC_ALLOC_HEADROOM = 0x77
 # Steal-cue sound: SE_Play(u16 id) @0x88d8338 (`andi a1,a0 / j 0x88f74c8` thunk;
 # a0 = global sound mgr loaded inside, so the caller passes only the id). Found
 # statically 2026-07-24 (re_only/dis_sfxscan.py); ids captured live via the
@@ -8631,9 +9718,26 @@ def _steal_spawn_cave(sprb):
     any stray closer (unpaired free at 0x887E794) ran free_range(ctx, 0, 5) and
     freed slots 0..4 = the party sprite layers -> characters vanished mid-fight
     (Prime live 2026-08-10). Restoring both bytes right after the jal makes the
-    descriptor (0, 0) again, so a stray free is a no-op; slot placement is
-    unaffected (the allocator, not this pair, picks the slots -- live: icons at
-    0x25.. with base written 0x3C)."""
+    descriptor (0, 0) again, so a stray free is a no-op.
+
+    v274: base = LIVE ALLOCATOR CURSOR (0x67B6), count zeroed for the call.
+    The spawner uses [0x68C3]+[0x68CA] as the RECORD INDEX for its per-piece
+    side effects: act=1 + coords stamped there (then act=0 for pieces 1-4),
+    and party-target pieces are z-chain-linked to the unit's anchor via
+    0x8887838(ctx, [0x68C7]+unit, idx, 1). The constructor (0x8886E54)
+    meanwhile fills the record AT THE CURSOR -- vanilla's invariant is
+    base+count == cursor, which the old literal-0x3C base broke: every cue
+    stamped act=1 on stale record 0x3C, and when that record was virgin zeros
+    (NULL display-buffer pointers -- typically the first battles at a fresh
+    bb), its per-frame submit made the sprite-list builder drop everything
+    drawn after it. The party draws LAST (z-chain head), so the whole party
+    went invisible for the rest of the battle while enemies kept drawing
+    (Prime 2026-08-11, Philip live-proven 2026-08-21: act=0 on record 0x3C
+    brought the party back mid-battle). With base=cursor and count=0 the
+    stamps and anchor links land on the icon records the constructor
+    actually fills -- exactly the vanilla invariant; the fade then clears
+    those same records by kind. Both bytes are still restored after the jal
+    (the v259 guarantee is unchanged)."""
     return A.asm_labels([
         A.addiu("sp", "sp", -0x20),
         A.sw("ra", 0x1c, "sp"), A.sw("a0", 0x18, "sp"),
@@ -8644,18 +9748,26 @@ def _steal_spawn_cave(sprb):
         A.addiu("t2", "zero", _SC_SLOT_COUNT_MAX),
         A.slt("t1", "t1", "t2"),
         ("beq", "t1", "zero", "DONE"), A.nop(),          # pool busy -> wait a frame
+        A.lbu("t1", _SC_ALLOC_OFF, "a0"),                # allocator bump cursor
+        A.addiu("t2", "zero", _SC_ALLOC_HEADROOM),
+        A.slt("t1", "t1", "t2"),
+        ("beq", "t1", "zero", "DONE"), A.nop(),          # arena nearly full -> wait
         A.lbu("t1", _SC_COUNT, "t0"),
         A.addiu("t1", "t1", -1), A.sb("t1", _SC_COUNT, "t0"),   # one-shot
         A.addiu("t1", "zero", 1), A.sb("t1", _SC_ACTIVE, "t0"), # kind-override on
         # save the batch descriptor the spawner mutates (restored after the SE)
         A.lbu("t1", _SC_SLOT_BASE_OFF, "a0"), A.sb("t1", 0x10, "sp"),
         A.lbu("t1", _SC_SLOT_COUNT_OFF, "a0"), A.sb("t1", 0x14, "sp"),
-        A.addiu("t1", "zero", _SC_SLOT_BASE), A.sb("t1", _SC_SLOT_BASE_OFF, "a0"),
+        # base = cursor, count = 0: the spawner's stamp/link index base+count
+        # must equal the record the constructor fills (see v274 note above)
+        A.lbu("t1", _SC_ALLOC_OFF, "a0"), A.sb("t1", _SC_SLOT_BASE_OFF, "a0"),
+        A.sb("zero", _SC_SLOT_COUNT_OFF, "a0"),
         A.lbu("a1", _SC_UNIT, "t0"),                     # target battle unit id
         A.addiu("a2", "zero", _SC_FLAG_SPRITE),          # sprite path
         A.jal(_SC_SPAWNER), A.addu("a3", "zero", "zero"),
         # objects exist + are active now; put the descriptor back BEFORE anything
-        # else can observe the (first=0, count=5) poison state
+        # else can observe the mid-call (base=cursor, count=5) state (a stray
+        # free_range against it would wipe the 5 icon records -- v259 lesson)
         A.lw("a0", 0x18, "sp"),
         A.lbu("t1", 0x10, "sp"), A.sb("t1", _SC_SLOT_BASE_OFF, "a0"),
         A.lbu("t1", 0x14, "sp"), A.sb("t1", _SC_SLOT_COUNT_OFF, "a0"),
@@ -8918,11 +10030,103 @@ def apply_popup_colors(elf: bytearray, feats=None):
                        (_SC_SPAWN_HOOK, _steal_spawn_cave(sprb))):
         E.install_detour(elf, hook, E.add_segment_cave(elf, cave))
 
+# --- battle sprite null-holder guard (always on) ----------------------------
+# The party-sprite initializer 0x088fb814 ends by calling through the object's
+# holder with NO null check:
+#
+#   088fba10  lw   v0, 0x0(v0)      -> the holder pointer
+#   088fba14  lw   a0, 0x0(v0)      -> 0 when the object was never built
+#   088fba18  lw   t9, 0x8(a0)      -> reads 0
+#   088fba1c  lw   t9, 0x30(t9)     -> reads 0
+#   088fba20  jalr t9               -> "CPU Jump to 00000000", RA 0x088fba28
+#
+# An object whose asset never resolved is STILLBORN -- measured in the live
+# freeze 2026-08-31: dims 0x0 (siblings 0x100 x 0x20), asset pointer 0, entry
+# count 0, holder pointing at the static empty fallback 0x089E8868, and its tail
+# still carrying the allocator's 0xffffffff fill. 18 sibling sprites in the same
+# battle were built correctly; exactly one was not, and it is s1 in the crash
+# registers. This is NOT holder-pool exhaustion: 110 holder nodes were free.
+#
+# This guard does not fix whatever failed to resolve the asset -- it converts a
+# hard freeze into one missing sprite, so a session survives to produce the
+# evidence. The client's holder census keeps logging every starved object, so
+# the bug can never hide behind the guard.
+#
+# Hook site scanned clean against the retail ELF: neither displaced word is a
+# branch or jump target, neither appears as a data word, and 0x088fba10 is a
+# plain `lw`, so the hook is not sitting in a branch-delay slot (see the
+# hook-site-scan-must-check-delay-slots memory).
+_SNG_HOOK = 0x088FBA14      # lw a0, 0(v0)   -- 2 words displaced
+_SNG_RET  = 0x088FBA1C      # hook + 8: lw t9, 0x30(t9)
+_SNG_SKIP = 0x088FBA28      # past the jalr and its delay slot
+SNG_MAGIC = b"SNGD"         # mailbox magic; u32 fire counter at +4
+
+
+def apply_sprite_null_guard(elf: bytearray, feats=None):
+    """Skip the holder call when the holder is null, and COUNT every skip.
+
+    Unconditional: it costs two instructions and it is the difference between a
+    dead session and a missing sprite. The counter is what makes the guard
+    honest -- without it a session that silently swallowed a null holder looks
+    exactly like a session that never had one, and the bug would hide behind
+    its own mitigation. The client reads it by scanning for SNG_MAGIC.
+
+    at/t9 are the only registers touched on the skip path, and both are dead
+    there: the vanilla code loads t9 twice and calls through it, and 0x088FBA28
+    immediately rewrites a0/a1. Nothing downstream can observe either."""
+    try:
+        from . import mips_asm as A
+        from . import eboot_patch as E
+    except ImportError:
+        import mips_asm as A
+        import eboot_patch as E
+    # the mailbox goes in FIRST so the code cave can address it absolutely
+    mb = E.add_segment_cave(elf, SNG_MAGIC + bytes(4))
+    body = [
+        A.lw("a0", 0x00, "v0"),                  # displaced 1
+        ("beq", "a0", "zero", "SKIP"), A.nop(),  # null holder -> skip the call
+        A.lw("t9", 0x08, "a0"),                  # displaced 2
+        A.j(_SNG_RET), A.nop(),
+        ("label", "SKIP"),
+        A.li("at", mb + 4), A.lw("t9", 0x00, "at"),
+        A.addiu("t9", "t9", 1), A.sw("t9", 0x00, "at"),
+        A.j(_SNG_SKIP), A.nop(),
+    ]
+    if os.environ.get("FF1PSP_FORCE_NULL_HOLDER"):
+        # SELF-TEST (opt-in, never on in a normal bake). A null holder cannot be
+        # produced on demand -- it needs an asset lookup to fail -- so the guard
+        # would otherwise ship unexercised. This takes the skip path for the
+        # FIRST construction after boot only, which is exactly the shape of the
+        # real bug: one stillborn sprite in one battle, everything else normal.
+        # Forcing EVERY construction would prove nothing useful, because a whole
+        # battle with no sprite objects is not a state the engine ever reaches.
+        # at/t9 are clobbered on the normal path here too; harmless, since t9 is
+        # immediately reloaded by displaced 2 and at is the assembler scratch.
+        body[1:1] = [
+            A.li("at", mb + 4), A.lw("t9", 0x00, "at"),
+            ("beq", "t9", "zero", "SKIP"), A.nop(),
+        ]
+    E.install_detour(elf, _SNG_HOOK, E.add_segment_cave(elf, A.asm_labels(body)))
+
+
 # Bump whenever ANY feature's patch bytes change. Part of the launcher's
 # patched-ISO cache key: without it, a fixed/retuned feature would silently keep
 # reusing a stale cached ISO built by the OLD code (iso size+mtime+feature names
 # all unchanged).
-PATCHER_VERSION = 273 # v273: release script test // v272: DABBLER MAGIC PACE SLOWED (user spec 2026-08-18). The Monk/Thief/Master magiclv schedule moves 5/12/20/29/39/49 -> 10/18/25/33/45, so spell levels 2..6 unlock at char levels 10/18/25/33/45 and the old 6th tick (49), which the RedMage cap-6 handler ate, is gone. _SM_DAB_ANCHORS is re-gated to match: every spell level takes its FIRST charge exactly ON its own unlock (the v203-era 'gate at 20, first slot at 24' gap is closed), while the L90 endpoint 6/5/4/3/2/1 (21 slots total) is the unchanged balance contract -- only the intermediate anchors moved (L25 3/2/1/1, L45 4/3/2/2/1/1, L60 5/4/3/2/1/1). _SM_DAB_PHASE re-solved on the same 0.30..0.70 grid under the standing HARD rule: max gain == 1 slot on every level-up 1..99, and value(anchor) == anchor exactly. Ninja keeps the elementwise best-of merge (a promotion can never slow slot growth) and its own vanilla magiclv gates. Both the growth-table bit7 bytes and the slot threshold table change, hence the bump. // v271: SLOT_MAGIC ITEM DESCS ARE REWRAPPED. The Soma/Ether replacement descriptions (slot_magic_item_descs) were encoded raw, so the 29-glyph "Restores 1 of each spell slot" spilled off the right edge of the NARROW target-select description box while the wide item-menu box drew it fine (live 2026-08-17). Spell tomes never showed it -- their entries already go through tome_names._rewrap_desc. Both encode sites now do: build_extended_banks (on disc) and items_desc_bank (the client shop-desc baseline, which doubles as the RAM locate signature and MUST stay byte-identical to the disc bank). Bank bytes change, hence the bump. // v270: GRAND MASTER AND CRIMSON WIZARD MUST SURVIVE THE HIT. Same defect, both scrolls, all four legs (Master MSTCHK/RWMMST, CW RWCHK/RWMHIT): the killing blow still paid out. Every one of them now requires dmg < curHP as well as curHP != 0, so a fatal hit grants the Master no attack and the Crimson Wizard no MP/slot refund, and neither draws its number. The CW slot_magic branch had no life test at all before this. Both Master legs (physical combat-calc epilogue MSTCHK, magic-executor epilogue RWMMST) paid out on the blow that KO'd the Monk/Master: they read BU_HP as an "alive?" test, but both hooks run BEFORE the engine applies the result entries (the same ordering that let the v190-era caves append entries for the engine to pay out), so BU_HP there is the PRE-damage HP and a lethal hit still read as alive. Both legs now also require dmg < curHP, so a fatal hit grants no attack, no yellow attack-gain number and no green capped-heal number. Client side (_scroll_battle_loop, which owns the max-HP + heal writes) adds curHP > 0 next to the KO-status test, so a tick landing between the HP write and the status write cannot heal a corpse. // v269: DYN CHEST BOX GAP. The two runtime-authored bonus-chest name slots (tome_names.dyn_slot_payload) padded their fixed 30-glyph body with the SPACE glyph. Every renderer here draws off[i+1]-off[i] bytes and ignores the TERM, so a short name drew its full 30-glyph width and the USEVMCMN "{NAME}!" chest template put the "!" ~20 blanks after the item ("your Staff          !", Whisperwind Cove live 2026-08-15). Baked remote entries are exact-length and never showed it. The fill is TERM (0x06) now, which draws nothing. Bank bytes change and the sentinel IS the client's DataPatch locate signature, so a stale cached ISO would leave both slots unlocatable -- hence the bump. // v268: SUPER DASH IS ALWAYS-ON. super_dash moves out of ON_DISC_OPTIONS (where it rode AutoDash) into ON_DISC_ALWAYS, so every seed bakes both caves and the player opts in from the IN-GAME Config Dash setting instead of the yaml. The runtime gate is unchanged and is what makes this safe: both caves require the Config Dash bit ([save+0x1170] bit0) AND the held dash button, so Config Dash off = byte-for-byte vanilla movement. The old shape gave AutoDash two jobs -- gate the bake AND seed the new-game Config default -- which meant an auto_dash-off player could never turn Super Dash on from the Config menu at all. AutoDash keeps the seeding job (ApClient._config_loop); ApClient's `feats.setdefault("super_dash", auto_dash)` derivation is DELETED because the ON_DISC_ALWAYS loop now asserts it on every seed, in-progress ones included. No cave bytes change, but the bump is still required: seeds whose slot_data said super_dash=False cached an ISO without the detours. // v267: SUPER DASH AIRSHIP -- cave A's vehicle halving floor drops 4 -> 2 (sltiu a3,5 -> sltiu a3,3), so a dashing airship goes 4 -> 2 frames-per-tile (double speed); ship/canoe 8->4 and foot behavior unchanged. // v266: SUPER DASH (auto_dash option). Two new detours in the step-record init caller: A @0x08836D04 halves the frames-per-tile a3 for vehicles (floor 4: ship 8->4, canoe 8->4, airship 4 stays) and for overworld foot (16->8), B @0x08836DB8 turns the engine's own dash halving into >>2 for interiors (16->4) and a no-op on the overworld, both only while the Config Dash bit ([save+0x1170] bit0 via s0) AND the dash button (0x08B10D7E bit 0x2) are held. Button up / Config Dash off = byte-for-byte vanilla behavior at runtime. Speed table 0x08941870 itself is untouched. New feature key super_dash rides the existing auto_dash yaml option via ON_DISC_OPTIONS. // v265: BLOOD KNIGHT LIFESTEAL 10% -> 15%. KNIGHT_LIFESTEAL_DIV (a reciprocal divisor) is replaced by KNIGHT_LIFESTEAL_PCT = 15, since 15% is not expressible as dealt//N; the lifesteal cave now does multu by PCT then divu by 100. dealt is engine-capped at 99999 so the product cannot overflow. KNIGHT_LIFESTEAL_CAP (500/attack) and the min-1 floor are unchanged, and the defense-pierce leg stays 10% -- the two legs are deliberately no longer matched. Cave bytes change, so seeds must re-bake. // v264: NORMALLY-EMPTY CHESTS ARE ONE OPTION -- the ten alias-duplicate chest records (Citadel 19->24, Marsh Cave 127->131 / 129->132,133 / 134->138,141, Mount Gulg 176->185 and 180->188,189,191) now all ride LootInNormallyEmptyChests via the new feature key loot_in_normally_empty_chests. Seven of them were ON_DISC_ALWAYS "chest_dedup" and only the Gulg B5 three were yaml-controlled, which meant the game's other seven permanently-empty chests could never be played vanilla. chest_dedup is OUT of ON_DISC_ALWAYS; both legacy feature keys (chest_dedup, loot_in_gulg_b5_chests) stay in FEATURES and in the signature table so an ALREADY-GENERATED seed -- whose slot_data still names them -- bakes byte-for-byte what it baked before, and logic.removed_normally_empty_idx reads both dialects for the client scout. // v263: LEVISTONE SHARDS DESCRIPTION -- the borrowed id-36 slot kept the native "A robot's power source." (live 2026-08-12). KEY_EXP entry 36 is now authored to "Collect enough to raise the desert Airship." in levistone_shard_gate seeds, parallel to the lute_block_gate sentence. 43 glyphs = exactly the vanilla ceiling (kid 1), single line, so the row survives being highlighted while the game genuinely owns the Energy Chip -- the 2026-08-07 rune freeze was an over-long desc on exactly that kind of borrowed row. MEASURED against the real ISO, not counted: 4 authored entries recompress to 12276/12320, and the user's original 61-glyph wording also fit (12282) but was rejected on the freeze rule. levistone_shard_gate is BAKE CONTEXT ONLY -- no ELF feature by that name (the FEATURES loop ignores unknown keys), no cave; it also folds N into bake_hash32 so changing the shard count re-bakes. // v262: LEVISTONE SHARDS MENU LINE -- pad_key_ids gains id 36 "Energy Chip" (SHARD_MENU_SLOT_KEY_ID), the borrowed Key Items entry for the "Levi Shards N of M" progress line (levistone_shards yaml), disc-padded to KEY_NAME_GLYPHS beside the id-35 rune slot and the entry-0 Lute slot; all three pad together whenever ANY piece feature is on, keeping the entry-0-width-25 locator fingerprint unchanged. No code caves -- the line is runtime-authored by the client's _keyratio_loop (borrow owned = shadow story flag 54, released in Whisperwind Cove and permanently at assembly). // v261: SCROLL BALANCE -- Blood Knight lifesteal capped at KNIGHT_LIFESTEAL_CAP (500) HP per attack (was uncapped 10% of dealt damage), clamped in the lifesteal cave after the divide so the HP write and the green number agree. Grand Master MASTER_HP_CAPPED_PCT 50 -> 35: a fully-stacked (attack-capped or max-HP-ceilinged) Master heals 35% of damage taken. ApClient imports the const, so the client write and the cave's green number stay in lockstep. // v260: TITAN GATE SPLIT (titan_gate_split, rides bikke_ship_split's getStoryFlag wrapper). Star Ruby accept/fed are story flags 13/14 (0x1151D b5/b6) -- the SAME globals a Whisperwind Cove dwarf/Titan gimmick sets, so a native bonus ruby getting stripped cleared them and HARD-softlocked the REAL Titan's Tunnel (Prime live 2026-08-09). Live-RE'd 2026-08-11 (map 0x22): the real Titan's gate reads 14 then 13 ONLY through getStoryFlag, zero direct byte readers, bonus_mapid 0x28 (<0x87) at his floor. FIX: the getStoryFlag wrapper answers shadow flag 73 (NPC_GATE_SPLIT_FLAG_BASE 64 + Star Ruby key id 9 -> 0x11525 b1, zero disc refs) for a0 in {13,14} when FIELD_MAP_ID==0x22 AND bonus_mapid<0x87 -- so the REAL tunnel gates on flag 73 (set by the AP grant alone) while a bonus floor (mapid>=0x87) keeps reading vanilla 13/14 and its native puzzle is untouched. SETs stay vanilla (reads-only redirect; the real feed cutscene never runs for an AP player). Client: grant_key_item + the func-reassert loop maintain shadow flag 73 for key 9 beside the vanilla 0x60 (GATE_SPLIT_SHADOW_BITS); the vanilla bit is still written for old-ISO fallback (real Titan reads 13/14 there). The 2026-08-09 in-bonus-dungeon strip hold is KEPT (belt+suspenders; bonus Titan puzzle un-RE'd). RAM-rehearsed end to end live 2026-08-11: 13/14 set -> redirect checks to (clear) 73 -> Titan re-blocks; set 73 -> passable. // v259: STEAL-CUE SPAWN PRESERVES THE FREE-BATCH DESCRIPTOR -- the spawn cave now saves 0x68C3 (base) + 0x68CA (count) around the popup-spawner jal and restores them the instant the icon objects exist. The pair (with first 0x68CB) is a free_range(0x888703C) descriptor -- count slots from first get their active byte cleared and the REAL allocator 0x67B6 dropped -- not allocation state; our spawn used to leave (first=0, count=5), a shape vanilla never produces, so any stray closer (unpaired free at 0x887E794) freed slots 0..4 = the party sprite layers and the characters vanished mid-battle (Prime live 2026-08-10; earlier 2026-08-06 wedge was the client fade's count decrement, removed same day). Slot placement is allocator-driven, so the icon still lands at 0x25.. and nothing else changes. // v258: SAGE SAILING LIFT -- his give latches flag 18 CLEAR at map load too (v257 proved it live: possession prearmed clear at the gate, lich lift on disc, sailing set -> refused). sage_lich_lift now lies about BOTH story flags map-scoped in Crescent Lake while flag 81 is down: 17 reads 1, 18 reads 0. Sailing is never actually cleared near town -- the doorstep net reaches the lake river and a save-byte clear would strand a mid-river player, which is why the wrapper lie (zero save writes, map-guarded) is the only safe shape. Possession is not a story flag, so it stays client-held (doorstep prearm + in-town hold). // v257: SAGE LICH LIFT + BOTH-BITS HOLD. (a) sage_lich_lift rides the getStoryFlag wrapper (apply_bikke_ship_split): asked flag 17 with fine map == Crescent Lake 0x43 and sage handover flag 81 clear -> answer 1, so his item unlocks pre-Lich per rando spec. Map-scoped lie, zero save writes; a client-side flag-17 hold was rejected -- flag 17 is a black-orb crystal bit for crystals_needed, a leaked hold = free crystal, and restore-on-exit cannot distinguish our hold from a genuine pre-sage kill. Releases itself when flag 81 rises; Chaos Shrine reads untouched (map 0x4E). Accepted cosmetics in-town pre-Lich: one Well-done congratulation + post-Lich sage lines. (b) client: his gate is BOTH canoe bits (live matrix, Lich dead throughout, reload before each talk: clear+clear gives, any set bit refuses -- four cells), so the sage stage holds possession AND sailing clear inside Crescent Lake until flag 81, restoring both outside; key 17 left OWNED_FUNCTION_REASSERT (a reassert fights the hold, the Levistone lesson; the sage stage owns the sailing restore now). Fixed the comments that called the canoe repoint self-sufficient: v255 made his handover WRITE a clean flag, but his OFFER still read both canoe bits and Lich, which is why a won canoe still muted him. // v256: MAP OBTAIN BOXES -- the NPC handover path joins the one-page world. Two independent defects, both live 2026-08-10 (Elf Prince handed over an "Experience Bag (Small)" and the box read "E?perience bag ?Small?"). (1) evm_bake's bundle matcher was 2-hex-only, which took 25 of the 103 USEVM records: map bundles are also per-ROOM (USEVM0200 = map 02 room 00, where "You obtain the mystic key." actually lives) and the bonus dungeons use USEVMEX/NEW forms. That bundle was therefore never authored on disc and never got the v225 donor font, so only the RAM _mapmsg_loop touched it -- authoring through the map's own 0x2d-glyph atlas, where 'x' and the parentheses have no glyph and fall to the '?' wildcard. Both regexes now take any USEVM/J2EVM/EVM body (every USEVM record has same-named twins, so the donor pool generalises identically); USEVMCMN is excluded BY NAME because it is the CHEST box template and its control codes are relative to its own 53-glyph count. ms2_bake is unaffected -- its donor pool is FM_* only. 13 -> 15 bundles authored. (2) _tokenize returned None on any glyph no char names, which vetoed the WHOLE bundle's donor swap; four maps (02-00, 0A-00, 08, 18) each carry an EM-DASH orphan in unrelated vanilla dialogue, so they kept their sparse atlas and the lookalike ladder. Orphans now decode to '-' and are COUNTED and LOGGED per bundle. The donor face has no em-dash of its own (its single orphan 0x46 is an 18 px blank), so the cost is 8 em-dashes across those 4 maps rendering as hyphens; the gain is that all 15 obtain boxes render AP names in full ASCII, on disc AND in the RAM re-author (the resident bundle now carries the donor atlas, so _mapmsg_encode reads a full remap and stops wildcarding). // v255: CRESCENT LAKE SAGE JOINS THE GATE SPLIT -- his check is a story flag now, not a dialog latch. Story flag 18 is the Canoe's SAILING function bit AND his handover set it, the same collision as the Elf Prince, so the client had to prove the talk some other way: it watched a live pointer to the box it had authored. That pointer is live ONLY while the box is on screen and _npc_loop samples every 2.0s, so a player who pressed through the box was never sampled and the check silently never sent (live 2026-08-10, the Blue Curtain report; third recurrence, twice previously misattributed to DIALOG_STATE_ADDR moving -- it does move, but the self-locating scan already absorbed that). _NGS_SITES gains (0x089AB14C, set, 18 -> 81): the ONLY `2d 04 12 00` on the whole disc, sitting immediately before the canoe give `30 08 01 0c / e2 1f` (object 0x1FE2), so it is positively the handover. Flag 81 = 64 + canoe key id 17 -> 0x11526 b1, verified zero refs on disc. Flag 18 then belongs to the AP grant alone (key 17 is already in OWNED_FUNCTION_REASSERT). The three surviving flag-18 checks are deliberately untouched: they ask "does the player have a canoe", which AP-canoe == flag 18 answers exactly right, and 0x089A7584's body gives object 0x1394, not the canoe -- repointing a check whose body was not positively identified is the v248 mistake. Client: the whole latch subsystem is DELETED (_sage_watch_loop, _sage_talked, _sage_box_ptr_live, _DLG_WINDOW, _dlg_txt_addr, _sage_boxaddrs, the rising-edge machinery, SAGE_WATCH_S) and replaced by a flag-81 rise in _npc_loop, mirroring prince-quest. The sage was the last non-bit-based NPC handover. // v254: SPELLS HIT LOW HP ENEMIES (spells_hit_low_hp_enemies). A status/death spell's to-hit score is ramped LINEARLY from x1.0 at 85% of the target MONSTER's max HP to x1.5 at 15% (flat outside that band), emitted inside the popup_colours roll caves so it lands after magic_power_scaling's shrink (the ramp multiplies the REAL power-scaled odds) and before the colour classify (the odds shown are the odds rolled). Bosses included; party targets excluded via the MPWR BOUNDARY. v253 shipped this as a hard 15% threshold; superseded same day.
+PATCHER_VERSION = 303 # v303: public v0.2.0 release? // v302: FORCE A FRESH BAKE PAST A COLLIDING CACHE TAG (2026-08-31). The v301 art fix shipped, the client pinned the new pixels, and the launcher REUSED a cached ISO whose manifest already read patcher_version 301 (baked 19:55:50Z; its JOB01.GIM palette is still the pre-fix layout -- transparent on index 1, custom colours from slot 32). New pixels through the old palette is what drew the scrambled Stealth Thief in battle and on the load screen. The root cause is structural, not the number: the shipped sprite BLOBS were never part of bake_hash32, so art could change under an unchanged cache key. bake_hash32 now folds every shipped job sheet's palette+pixels in, and this bump guarantees a fresh tag against the ISOs already on disk. // v301: CUSTOM SPRITE TRANSPARENCY BACK ON PALETTE INDEX 0 (2026-08-31). A KO'd party member wearing custom art drew a solid BLACK RECTANGLE behind the sprite. merge_palette matched colours by RAW BYTES, and vanilla index 0 carries leftover RGB (82,89,102,0) while the artist path writes (0,0,0,0) -- so the match missed and all ~17k transparent texels of both shipped sheets (job01, job07) were remapped to a NEW slot, index 1. Alpha-correct draw paths were unaffected (battle and the pause menu always looked right), but the paths that colour-key on INDEX 0 drew index 1 as opaque RGB (0,0,0), which is the black box. Transparent entries now compare equal (the _visual rule already used elsewhere in the tool), so custom transparency lands on vanilla's own slot 0; re-merged art measures 49 (job07) / 72 (job01) newly-opaque pixels instead of 17685 / 17208. Baked palettes and shipped pixels both change, hence the bump. // v300: NULL-HOLDER GUARD COUNTS ITS SKIPS (2026-08-31). The v299 guard is silent, so a session that swallowed a null holder is indistinguishable from one that never saw one -- the bug would hide behind its own mitigation. The cave now bumps a u32 in a new SNGD mailbox on every skip and the client logs the count, so "the guard fired" is a number rather than an assumption. Only at/t9 are touched on that path and both are already dead there (vanilla loads t9 twice and calls through it; 0x088FBA28 rewrites a0/a1). Cave bytes change, hence the bump. // v299: BATTLE SPRITE NULL-HOLDER GUARD (2026-08-31). A party-sprite object whose asset never resolved is left STILLBORN and the initializer's epilogue calls through its holder with no null check -- "CPU Jump to 00000000", RA 0x088fba28, at battle intro. Measured in the live freeze: of 19 objects of that class in the battle, 18 had real holders, assets and dims 0x100x0x20 while exactly one had holder = the static empty fallback 0x089E8868, asset 0, dims 0x0 and count 0 -- and that object is s1 in the crash registers. Not pool exhaustion: 110 holder nodes were free. New cave at 0x088FBA14 (hook site scanned clean: neither displaced word is a branch/jump target or a data word, and 0x088FBA10 is a plain lw so the hook is not a delay slot) reads the holder, skips straight past the jalr when it is null, and is a byte-exact replay of the two displaced lw otherwise. This does not fix the unresolved asset -- the client's holder census still logs every starved object -- it just stops one from killing the session. Cave bytes are new, hence the bump. // v298: JOB SPRITE PACKS REPORT EVERY DONOR THEY TOUCH (2026-08-31). A new game crashed with "Bad Execution Address, CPU Jump to 00000000", RA 0x088fba28. Measured on the shipped ISO: 57 OVERLAPPING dpk records (vanilla has 0). job_sprite_bake's _Space.coalesce merges adjacent free extents and kept only the FIRST donor name (prev[2] = prev[2] or ext[2]); the FM_*J1/J2 donors are adjacent on disc, so one merged run covered several donor records and donors_used named only one of them. ms2_bake then handed the unreported records out: JOB_NORMAL.PCK landed across FM_DBG_CAMPJ1/J2 + FM_CAMPJ1/J2 with MS2_07B.PCK written on top of it, M_JOB_NORMAL.PCK across FM_GARELLY_LGJ1/J2 under MS2_102.PCK. The class-sprite load at new game then decompressed a boss pack and jumped through a null object -- the dpk-dead-space-ownership signature, reached from the other side. _Space now records the donor segments as handed in and reports every donor an allocation INTERSECTS, so ms2_bake reserves the whole merged run. Bake output changes, hence the bump. // v297: CLASS SPRITE PALETTES BAKED ON DISC (2026-08-30). Custom party sprites were a pure RAM pin (pixels + palette over every resident JOBxx.GIM) and rendered "golden"/blotchy in battle, on the load screen and after a steal. Measured cause: a resident sheet is NOT the only place a class palette lives -- while a party member is on screen the engine also holds standalone 0x400 palette records in a separate heap (3 copies of the vanilla Thief palette at 0x08da4380/0x08da4810/0x08dadd80, none near any GIM), built at load time from the DISC record, and several draw paths CLUT from those; the resident pixels themselves measured byte-identical to our art, so this was never a torn write, a write-ordering bug or PPSSPP lazy texture caching (all three tested and cleared). job_sprite_bake now splices each shipped class MERGED palette into all five packs that carry its sheet (JOB_NORMAL/M_JOB_NORMAL/JOB_CHANGE/M_JOB_CHANGE/JOB_ALL). The merged palette is a SUPERSET -- every index the vanilla pixels use keeps its exact vanilla colour, custom colours go in the ~225 slots vanilla never references -- so the bake is unconditional and seed-independent, vanilla art is pixel-identical, and the scroll gate stays entirely in the client PIXEL pin (_jobsprite_loop no longer writes palettes at all, and its per-tick palette hunt + battle-edge rescan are gone). A patched pack grows ~112-238 bytes (wp16 greedy is already optimal), so packs relocate: best-fit over their own freed runs plus donor extents, and the donors consumed are handed to ms2_bake as extra_reserved (one region, one owner). // v296: ROUND-ZERO TRAP CAVE DECLINES A PREEMPTIVE ROUND (2026-08-30). Live: an Ink trap fired on a preemptive-strike battle and ATE the player's free round. On preemptive (bb+0x6809 == 1) the enemies are muted but the PARTY is still enqueued, so phase 1 falls through to the hooked leg -- and the cave's cursor=12 then ends the round after its one actor, so the party's queued free strike never runs. The cave now reads bb+0x6809 and takes the vanilla path on any non-zero battle type, so the trap waits for round 2 (the byte clears after round 1) and the first strike survives. Ambush never reached this leg anyway. Cave bytes change, hence the bump. // v295: ROUND-ZERO TRAP CAVE (2026-08-30). AP traps now resolve as REAL monster abilities -- the engine's own targeting, animation, battle message and status apply -- before the party acts. New detour at the phase 1 -> 2 leg 0x0886B2E4 (hook site scanned clean: not a branch/jump target, not a delay slot, not referenced as a data word). On an armed TRP1 mailbox the cave picks a living enemy that passes the advance's can-act gate, commits +0x40/+0x41/+0x42=0x0A/+0x44 into its unit record, parks it at order[12] with cursor 12, and emits phase 4 instead of 2 by handing the ENGINE's own store (0x0886B2F4 `sb v1,-0x2e52(v0)`) a 4 in v1 -- the cave never writes the phase byte itself. Unarmed, it is a byte-exact replay of the two displaced words, which is also how "hold the trap for the next battle" is implemented. bb = s1 + 0x460, proven three ways (an earlier RE pass got this wrong by reading the sort call and missing its +0x7ff8 delay slot). Retires the old client-side status poke, which was invisible and, for Silence, never worked at all. Cave bytes are new, hence the bump. // v294: SCENE-CLASS BATTLE GATE (2026-08-29). _rp_battle_gate trusted [[0x089D7ADC]+0x68B4] as "field struct, 1 outside battle"; live measurement proved 0x089D7ADC is the CURRENT SCENE pointer (the pause menu repoints it at its own context, whose +0x68B4 reads 0) and that the field scene's own +0x68B4 drops to 0 for ANY menu, not just battle. So the gate said "battle" for the whole pause menu and the v292 flatten cave ran there with a0 = ctx+0x450: its row-2 weapon offset 0x96F hit ctx+0xDBF = pause widget record 10 = the FORMATION row-selector cursor, cleared every frame -> the cursor vanished and Formation looked frozen (swaps still worked, blind). The gate now identifies the scene CLASS by its vtable at +4 (fixed rodata): battle-module scene classes pass, the field scene passes only when field logic is not the top layer, every other scene (pause/shop/save/title) is rejected. Fixes the ctor/ctor2/ctor3/flat caves at once. Cave bytes change, hence the bump. // v293: INN-SLEEP SLEEPERS HONOUR THE HELD MASK (2026-08-29). The field event VM's spawn-party-member-actor opcode 0x12 (handler 0x08844414) ran four times regardless of who was present, so held rows walked to inn beds like everyone else -- the last cosmetic hole in reduced_party. New cave on the flag OR that follows the spawn call: the actor is still built and still runs its whole walk script, but a held row gets draw bit 0x2 of the actor's +0xB4 flags cleared, which is exactly what native opcode 0x68 does to the leader's cutscene actor. One write at spawn holds for the entire scene (live-proven). Cave bytes change, hence the bump. // v292: PER-FRAME HELD-LAYER CLEAR AT THE POPUP FLATTEN (2026-08-29). v291's classifier clears only start once the sweep ticks (~0.5s in), so the battle WALK-IN's shadow arming showed held shadows through the intro. New battle-gated cave at flatten entry 0x08887A28 (a0 = bb, runs from the first intro frame, single jal caller) clears act on all held rows' body/shadow/weapon layers (bb+row*124+0x497/0x687/0x877) every frame; the classifier cave reverts to the pure virtual-KO bit. Cave bytes change, hence the bump.
+                      # v291: CLASSIFIER CAVE ALSO CLEARS HELD LAYER ACT BYTES (2026-08-29). The dead-state dispatch the virtual KO triggers re-arms the row's popup layers with the collapsed pose -- a third activation site the v280 ctor hooks (pool builds only) never covered; the deleted client act pokes had been papering over it, so v290 showed held members lying KO'd in the grass. The wipe cave's held branch now clears act on layers row/row+4/row+8 (ctx+layer*124+0x497) every classify tick. Cave bytes change, hence the bump.
+                      # v290: VIRTUAL BATTLE KO (2026-08-29). The client's per-battle enforcement (BU_STATUS stamp + BU_HP zero + 50ms fast-poll pinned through the copy window + popup act pokes + steal-loop exemption) is DELETED; one cave at the per-unit state classifier 0x08871A6C ORs the RPMK held bit into the loaded BU_STATUS for party rows, so held units classify out-of-action every sweep tick (wipe check satisfied) while soft-dead HP 0 natively covers turns/targeting/XP and the v280 ctor hooks own the sprites. No BU write = no init race, no battle-end KO write-back, no kneel wart. Cave bytes change, hence the bump.
+                      # v289: SAVE-PREVIEW HIDE NO LONGER SKIPS THE BODY (2026-08-29). Saving into a VIRGIN file slot froze at the memstick dialog: the v281-288 preview cave skipped a held char's whole loop body, so the portrait rows' atlas cells were never authored by anyone (occupied slots survived on a previous full draw's cells -- the v285-287 bisect never covered a virgin slot), and the renderer measures cells even at act=0 -> bounds trap `b .` 0x08914990, thread FF1 parked (live-caught). The 0x08827634 hook is gone (canvas-counter replica now moot); the body runs natively through portrait authoring/submits, and two hooks blank the char instead: name-prim call-site retarget 0x08827668 (v0 scratch -- delay slot arms t0 = style arg) and post-submit detour 0x08827990 (clear +0x497 on both portrait rows, jump the Lv/HP/MP prims). Strip caves additionally tail-call vanilla for any row outside 0..3 (garbage-reg hardening). Cave bytes change, hence the bump.
+                      # v288: SHOP STRIPS MOVED TO CALL-SITE RETARGETS -- the save-screen freezer found by bisection: the v281 strip ENTRY detours were reachable by register-indirect callers a jal scan cannot see, firing with garbage t-regs on the save screen. Both strips now hook their audited shop-loop call sites only (0x0881FEA0, 0x08820D8C); all other caves re-enabled. v287: BISECT C. v286: BISECT B. v285: BISECT A. v284: POPUP CTOR MASKING IS BATTLE-ONLY (2026-08-28, the real v281-283 save-screen freeze). The popup ctors hooked in v279/v280 are GENERIC widget constructors -- every screen builds widgets through them at the same slot indexes -- so file-select/memstick-dialog widgets were being born hidden whenever slot&3 hit the held mask, and the save screen hung waiting on them (froze with EMPTY files, exonerating the v281 preview cave). All three ctor caves now gate on the field struct's on-field byte ([0x089D7ADC]+0x68B4: 1 on field/menus, 0 only in battle; null ptr = not battle), so only battle pool builds are masked. Cave bytes change, hence the bump.
+                      # v283: SAVE-PREVIEW SKIP AUTHORS A SAFE ATLAS CELL (2026-08-28). The file-select renderer MEASURES every retained widget row's atlas cell even when the row is invisible; a row my skip hid without ever authoring carried boot garbage in its cell field (62 of a 61-cell atlas) and hit the engine's own bounds trap (`b .` at 0x08914990 -- caught live with the paused debugger; the v281/v282 freezes). The skip path now writes cell 0 (+0x5C) and count 0 (+0x63) alongside the visibility clear. Cave bytes change, hence the bump.
+                      # v282: SAVE-PREVIEW SKIP KEEPS THE CANVAS BOOKKEEPING (2026-08-28). v281's file-select preview skip jumped a soft-dead character's whole loop body, INCLUDING the per-iteration canvas-counter reset ([canvas+0x146] cleared when [canvas+0x144] > 0) -- the file-select froze live on a reduced-party save. The skip path now replicates that block verbatim (displaced canvas loads + counter reset) and skips only the text/portrait draws. Cave bytes change, hence the bump.
+                      # v281: REDUCED PARTY LAST SURFACES (2026-08-28). Four new reduced_party caves: save/load FILE-SELECT preview skips characters whose FILE record reads soft-dead (per-file truth off the previewed bytes -- legit KO'd members still draw; hides via the engine's own +0x497 widget-visibility idiom, in-loop hook 0x08827634); field item-use validity (fn 0x088C4C94 prologue, 0x088C4CC4) forces the native invalid-target exit for single-target items (flag bit 0x10 @0x089538F3+id*16) aimed at a held row -- Golden Apple & friends now bonk; both shop member strips suppress held rows' sprite + delta indicator via entry detours on the per-member draw helpers (equip 0x0882000C row=t2, magic 0x08820E18 row=t1, prologues disjoint from shop_spell_level's interior rewrite). Cave bytes change, hence the bump.
+                      # v280: REDUCED PARTY FLASH, ALL CTOR VARIANTS (2026-08-28). The battle-start party flash survived v279 and recurred on the first battle after arena relocations -- the party layers are built (at least sometimes) by the popup ctor SIBLINGS, not the main ctor. Both remaining act=1 construction sites now honor the RPMK mask: the leaf ctor (0x08886F8C, slot re-read from the cursor) and the re-init-by-index ctor (0x08886FF8, slot = (a2-base)/124). Cave bytes change, hence the bump.
+                      # v279: REDUCED PARTY FRAME-PERFECT SPRITES + SPELL-SHOP GUARDS (2026-08-28). Popup ctor 0x08886E54 tail hook (0x08886F30): a held party layer (slots 0-11, row = slot & 3) is built with act=0, killing the last couple-frame party flash at battle start (client poll stays as backstop). Spell shop: the learn-target confirm's eligibility jal (0x088207DC) is retargeted so a held row reads "cannot learn" (native msg 0x11 + bonk; commit unreachable -- no more teaching spells to missing members), and the learn-target cursor (0x08820688/0x088206B8) pages past held rows. Cave bytes change, hence the bump.
+                      # v278: REDUCED PARTY PICK + FORMATION BLOCKS (2026-08-28). Three new caves in reduced_party: the shared pause char-pick commit (0x088C1C74, one X-press block serves Magic/Status/Equipment) rejects picking a HELD row with the native bonk (sound 0x66, no +0x7090 write, cursor-refresh continuation 0x088C1D20) before the native Magic-only KO test; and BOTH formation picks (case-5 handler, 0x088C1E9C first / 0x088C1ED4 second) bonk instead of latching a held row, so a hidden slot cannot be swapped at all (user call). Cave bytes change, hence the bump.
+                      # v277: REDUCED PARTY HELD ROWS ARE UNSELECTABLE (2026-08-28). The pause-panel skip path now also zeroes the held row's selection-enable bytes (ctx+0x870+row*0x7C+0x77 and the (row+4)*0x7C twin) -- the skipped native head block was what authored them, and a stale enabled record left the invisible row cursor-selectable (Magic/Status/Equipment opened on a hidden member, live 2026-08-28). Cave bytes change, hence the bump.
+                      # v276: REDUCED PARTY ROW HIDING (starting_party_members Phase 3, 2026-08-28). New feature reduced_party: 10 audited detours + the RPMK mask mailbox (bit N = display row N held, client re-arms every _member_loop tick). Pause-panel row fn 0x088CEAA0 prologue -> jr ra on a held row (one patch covers all ~7 shared screens: pause list, item target-select, ...); battle status-window HP/MP/name per-row loops skip held rows (layers pre-cleared -> blank lines); spell-use char paging ORs the held bit into the engine's own KO/stone re-step test; magic-tick + Status/Equipment paging get bounded (<=4 step) skip loops. Held rows un-hide the frame their member joins. New cave bytes on reduced-party seeds, hence the bump.
+                      # v275: BLOOD KNIGHT DOES NOT DRAIN THE UNDEAD (user spec 2026-08-22). The lifesteal cave now reads the TARGET unit record [s5+0x38] and skips the self-heal (and its green number) when the family byte +0x21 has bit 0x8 set -- the same byte the engine's own dia gate reads, copied from the on-disc monster record +0x13, set for all 27 undead ids (Skeleton, Bloodbones, Zombie/Ghoul/Ghast/Wight, Vampire and Vampire Lord, Dragon Zombie, Mummy/King Mummy, Lich 0x77/0x78, Scarmiglione, Phantom Train, Death Gaze, Pharaoh, Bonesnatch, Reaper, Skuldier, Revenant, Death Eye, Shadow, Minotaur Zombie, Wraith/Specter/Ghost) and clear for everything living. Damage and the 10% defense pierce are unchanged; only the drain is gated. [s5+0x38] is stored once at 0x088841f8 and never rewritten in the combat-calc fn, so it still names this attack's target at the 0x088846B0 epilogue. Cave bytes change, so seeds must re-bake. // v274: STEAL-CUE STALE-STAMP FIX (party vanish, live-proven 2026-08-21): the spawn cave now writes base 0x68C3 = live allocator cursor 0x67B6 and zeroes count 0x68CA for the call, so the spawner's act/coord stamps and party-anchor z-links (0x8887838) land on the records the constructor actually fills instead of stale record 0x3C+ -- whose NULL-buffer per-frame submit made the sprite-list builder drop every later sprite (the whole party, drawn last from the z-chain head) for the rest of the battle. Also gates the spawn on allocator headroom (cursor < 0x77). Repro needed a virgin-zero record 0x3C (first battles at a fresh bb) + a party-target cue; act=0 on record 0x3C restored Philip's party mid-battle (Scarmiglione cameo, rare steal). // v273: release script test // v272: DABBLER MAGIC PACE SLOWED (user spec 2026-08-18). The Monk/Thief/Master magiclv schedule moves 5/12/20/29/39/49 -> 10/18/25/33/45, so spell levels 2..6 unlock at char levels 10/18/25/33/45 and the old 6th tick (49), which the RedMage cap-6 handler ate, is gone. _SM_DAB_ANCHORS is re-gated to match: every spell level takes its FIRST charge exactly ON its own unlock (the v203-era 'gate at 20, first slot at 24' gap is closed), while the L90 endpoint 6/5/4/3/2/1 (21 slots total) is the unchanged balance contract -- only the intermediate anchors moved (L25 3/2/1/1, L45 4/3/2/2/1/1, L60 5/4/3/2/1/1). _SM_DAB_PHASE re-solved on the same 0.30..0.70 grid under the standing HARD rule: max gain == 1 slot on every level-up 1..99, and value(anchor) == anchor exactly. Ninja keeps the elementwise best-of merge (a promotion can never slow slot growth) and its own vanilla magiclv gates. Both the growth-table bit7 bytes and the slot threshold table change, hence the bump. // v271: SLOT_MAGIC ITEM DESCS ARE REWRAPPED. The Soma/Ether replacement descriptions (slot_magic_item_descs) were encoded raw, so the 29-glyph "Restores 1 of each spell slot" spilled off the right edge of the NARROW target-select description box while the wide item-menu box drew it fine (live 2026-08-17). Spell tomes never showed it -- their entries already go through tome_names._rewrap_desc. Both encode sites now do: build_extended_banks (on disc) and items_desc_bank (the client shop-desc baseline, which doubles as the RAM locate signature and MUST stay byte-identical to the disc bank). Bank bytes change, hence the bump. // v270: GRAND MASTER AND CRIMSON WIZARD MUST SURVIVE THE HIT. Same defect, both scrolls, all four legs (Master MSTCHK/RWMMST, CW RWCHK/RWMHIT): the killing blow still paid out. Every one of them now requires dmg < curHP as well as curHP != 0, so a fatal hit grants the Master no attack and the Crimson Wizard no MP/slot refund, and neither draws its number. The CW slot_magic branch had no life test at all before this. Both Master legs (physical combat-calc epilogue MSTCHK, magic-executor epilogue RWMMST) paid out on the blow that KO'd the Monk/Master: they read BU_HP as an "alive?" test, but both hooks run BEFORE the engine applies the result entries (the same ordering that let the v190-era caves append entries for the engine to pay out), so BU_HP there is the PRE-damage HP and a lethal hit still read as alive. Both legs now also require dmg < curHP, so a fatal hit grants no attack, no yellow attack-gain number and no green capped-heal number. Client side (_scroll_battle_loop, which owns the max-HP + heal writes) adds curHP > 0 next to the KO-status test, so a tick landing between the HP write and the status write cannot heal a corpse. // v269: DYN CHEST BOX GAP. The two runtime-authored bonus-chest name slots (tome_names.dyn_slot_payload) padded their fixed 30-glyph body with the SPACE glyph. Every renderer here draws off[i+1]-off[i] bytes and ignores the TERM, so a short name drew its full 30-glyph width and the USEVMCMN "{NAME}!" chest template put the "!" ~20 blanks after the item ("your Staff          !", Whisperwind Cove live 2026-08-15). Baked remote entries are exact-length and never showed it. The fill is TERM (0x06) now, which draws nothing. Bank bytes change and the sentinel IS the client's DataPatch locate signature, so a stale cached ISO would leave both slots unlocatable -- hence the bump. // v268: SUPER DASH IS ALWAYS-ON. super_dash moves out of ON_DISC_OPTIONS (where it rode AutoDash) into ON_DISC_ALWAYS, so every seed bakes both caves and the player opts in from the IN-GAME Config Dash setting instead of the yaml. The runtime gate is unchanged and is what makes this safe: both caves require the Config Dash bit ([save+0x1170] bit0) AND the held dash button, so Config Dash off = byte-for-byte vanilla movement. The old shape gave AutoDash two jobs -- gate the bake AND seed the new-game Config default -- which meant an auto_dash-off player could never turn Super Dash on from the Config menu at all. AutoDash keeps the seeding job (ApClient._config_loop); ApClient's `feats.setdefault("super_dash", auto_dash)` derivation is DELETED because the ON_DISC_ALWAYS loop now asserts it on every seed, in-progress ones included. No cave bytes change, but the bump is still required: seeds whose slot_data said super_dash=False cached an ISO without the detours. // v267: SUPER DASH AIRSHIP -- cave A's vehicle halving floor drops 4 -> 2 (sltiu a3,5 -> sltiu a3,3), so a dashing airship goes 4 -> 2 frames-per-tile (double speed); ship/canoe 8->4 and foot behavior unchanged. // v266: SUPER DASH (auto_dash option). Two new detours in the step-record init caller: A @0x08836D04 halves the frames-per-tile a3 for vehicles (floor 4: ship 8->4, canoe 8->4, airship 4 stays) and for overworld foot (16->8), B @0x08836DB8 turns the engine's own dash halving into >>2 for interiors (16->4) and a no-op on the overworld, both only while the Config Dash bit ([save+0x1170] bit0 via s0) AND the dash button (0x08B10D7E bit 0x2) are held. Button up / Config Dash off = byte-for-byte vanilla behavior at runtime. Speed table 0x08941870 itself is untouched. New feature key super_dash rides the existing auto_dash yaml option via ON_DISC_OPTIONS. // v265: BLOOD KNIGHT LIFESTEAL 10% -> 15%. KNIGHT_LIFESTEAL_DIV (a reciprocal divisor) is replaced by KNIGHT_LIFESTEAL_PCT = 15, since 15% is not expressible as dealt//N; the lifesteal cave now does multu by PCT then divu by 100. dealt is engine-capped at 99999 so the product cannot overflow. KNIGHT_LIFESTEAL_CAP (500/attack) and the min-1 floor are unchanged, and the defense-pierce leg stays 10% -- the two legs are deliberately no longer matched. Cave bytes change, so seeds must re-bake. // v264: NORMALLY-EMPTY CHESTS ARE ONE OPTION -- the ten alias-duplicate chest records (Citadel 19->24, Marsh Cave 127->131 / 129->132,133 / 134->138,141, Mount Gulg 176->185 and 180->188,189,191) now all ride LootInNormallyEmptyChests via the new feature key loot_in_normally_empty_chests. Seven of them were ON_DISC_ALWAYS "chest_dedup" and only the Gulg B5 three were yaml-controlled, which meant the game's other seven permanently-empty chests could never be played vanilla. chest_dedup is OUT of ON_DISC_ALWAYS; both legacy feature keys (chest_dedup, loot_in_gulg_b5_chests) stay in FEATURES and in the signature table so an ALREADY-GENERATED seed -- whose slot_data still names them -- bakes byte-for-byte what it baked before, and logic.removed_normally_empty_idx reads both dialects for the client scout. // v263: LEVISTONE SHARDS DESCRIPTION -- the borrowed id-36 slot kept the native "A robot's power source." (live 2026-08-12). KEY_EXP entry 36 is now authored to "Collect enough to raise the desert Airship." in levistone_shard_gate seeds, parallel to the lute_block_gate sentence. 43 glyphs = exactly the vanilla ceiling (kid 1), single line, so the row survives being highlighted while the game genuinely owns the Energy Chip -- the 2026-08-07 rune freeze was an over-long desc on exactly that kind of borrowed row. MEASURED against the real ISO, not counted: 4 authored entries recompress to 12276/12320, and the user's original 61-glyph wording also fit (12282) but was rejected on the freeze rule. levistone_shard_gate is BAKE CONTEXT ONLY -- no ELF feature by that name (the FEATURES loop ignores unknown keys), no cave; it also folds N into bake_hash32 so changing the shard count re-bakes. // v262: LEVISTONE SHARDS MENU LINE -- pad_key_ids gains id 36 "Energy Chip" (SHARD_MENU_SLOT_KEY_ID), the borrowed Key Items entry for the "Levi Shards N of M" progress line (levistone_shards yaml), disc-padded to KEY_NAME_GLYPHS beside the id-35 rune slot and the entry-0 Lute slot; all three pad together whenever ANY piece feature is on, keeping the entry-0-width-25 locator fingerprint unchanged. No code caves -- the line is runtime-authored by the client's _keyratio_loop (borrow owned = shadow story flag 54, released in Whisperwind Cove and permanently at assembly). // v261: SCROLL BALANCE -- Blood Knight lifesteal capped at KNIGHT_LIFESTEAL_CAP (500) HP per attack (was uncapped 10% of dealt damage), clamped in the lifesteal cave after the divide so the HP write and the green number agree. Grand Master MASTER_HP_CAPPED_PCT 50 -> 35: a fully-stacked (attack-capped or max-HP-ceilinged) Master heals 35% of damage taken. ApClient imports the const, so the client write and the cave's green number stay in lockstep. // v260: TITAN GATE SPLIT (titan_gate_split, rides bikke_ship_split's getStoryFlag wrapper). Star Ruby accept/fed are story flags 13/14 (0x1151D b5/b6) -- the SAME globals a Whisperwind Cove dwarf/Titan gimmick sets, so a native bonus ruby getting stripped cleared them and HARD-softlocked the REAL Titan's Tunnel (Prime live 2026-08-09). Live-RE'd 2026-08-11 (map 0x22): the real Titan's gate reads 14 then 13 ONLY through getStoryFlag, zero direct byte readers, bonus_mapid 0x28 (<0x87) at his floor. FIX: the getStoryFlag wrapper answers shadow flag 73 (NPC_GATE_SPLIT_FLAG_BASE 64 + Star Ruby key id 9 -> 0x11525 b1, zero disc refs) for a0 in {13,14} when FIELD_MAP_ID==0x22 AND bonus_mapid<0x87 -- so the REAL tunnel gates on flag 73 (set by the AP grant alone) while a bonus floor (mapid>=0x87) keeps reading vanilla 13/14 and its native puzzle is untouched. SETs stay vanilla (reads-only redirect; the real feed cutscene never runs for an AP player). Client: grant_key_item + the func-reassert loop maintain shadow flag 73 for key 9 beside the vanilla 0x60 (GATE_SPLIT_SHADOW_BITS); the vanilla bit is still written for old-ISO fallback (real Titan reads 13/14 there). The 2026-08-09 in-bonus-dungeon strip hold is KEPT (belt+suspenders; bonus Titan puzzle un-RE'd). RAM-rehearsed end to end live 2026-08-11: 13/14 set -> redirect checks to (clear) 73 -> Titan re-blocks; set 73 -> passable. // v259: STEAL-CUE SPAWN PRESERVES THE FREE-BATCH DESCRIPTOR -- the spawn cave now saves 0x68C3 (base) + 0x68CA (count) around the popup-spawner jal and restores them the instant the icon objects exist. The pair (with first 0x68CB) is a free_range(0x888703C) descriptor -- count slots from first get their active byte cleared and the REAL allocator 0x67B6 dropped -- not allocation state; our spawn used to leave (first=0, count=5), a shape vanilla never produces, so any stray closer (unpaired free at 0x887E794) freed slots 0..4 = the party sprite layers and the characters vanished mid-battle (Prime live 2026-08-10; earlier 2026-08-06 wedge was the client fade's count decrement, removed same day). Slot placement is allocator-driven, so the icon still lands at 0x25.. and nothing else changes. // v258: SAGE SAILING LIFT -- his give latches flag 18 CLEAR at map load too (v257 proved it live: possession prearmed clear at the gate, lich lift on disc, sailing set -> refused). sage_lich_lift now lies about BOTH story flags map-scoped in Crescent Lake while flag 81 is down: 17 reads 1, 18 reads 0. Sailing is never actually cleared near town -- the doorstep net reaches the lake river and a save-byte clear would strand a mid-river player, which is why the wrapper lie (zero save writes, map-guarded) is the only safe shape. Possession is not a story flag, so it stays client-held (doorstep prearm + in-town hold). // v257: SAGE LICH LIFT + BOTH-BITS HOLD. (a) sage_lich_lift rides the getStoryFlag wrapper (apply_bikke_ship_split): asked flag 17 with fine map == Crescent Lake 0x43 and sage handover flag 81 clear -> answer 1, so his item unlocks pre-Lich per rando spec. Map-scoped lie, zero save writes; a client-side flag-17 hold was rejected -- flag 17 is a black-orb crystal bit for crystals_needed, a leaked hold = free crystal, and restore-on-exit cannot distinguish our hold from a genuine pre-sage kill. Releases itself when flag 81 rises; Chaos Shrine reads untouched (map 0x4E). Accepted cosmetics in-town pre-Lich: one Well-done congratulation + post-Lich sage lines. (b) client: his gate is BOTH canoe bits (live matrix, Lich dead throughout, reload before each talk: clear+clear gives, any set bit refuses -- four cells), so the sage stage holds possession AND sailing clear inside Crescent Lake until flag 81, restoring both outside; key 17 left OWNED_FUNCTION_REASSERT (a reassert fights the hold, the Levistone lesson; the sage stage owns the sailing restore now). Fixed the comments that called the canoe repoint self-sufficient: v255 made his handover WRITE a clean flag, but his OFFER still read both canoe bits and Lich, which is why a won canoe still muted him. // v256: MAP OBTAIN BOXES -- the NPC handover path joins the one-page world. Two independent defects, both live 2026-08-10 (Elf Prince handed over an "Experience Bag (Small)" and the box read "E?perience bag ?Small?"). (1) evm_bake's bundle matcher was 2-hex-only, which took 25 of the 103 USEVM records: map bundles are also per-ROOM (USEVM0200 = map 02 room 00, where "You obtain the mystic key." actually lives) and the bonus dungeons use USEVMEX/NEW forms. That bundle was therefore never authored on disc and never got the v225 donor font, so only the RAM _mapmsg_loop touched it -- authoring through the map's own 0x2d-glyph atlas, where 'x' and the parentheses have no glyph and fall to the '?' wildcard. Both regexes now take any USEVM/J2EVM/EVM body (every USEVM record has same-named twins, so the donor pool generalises identically); USEVMCMN is excluded BY NAME because it is the CHEST box template and its control codes are relative to its own 53-glyph count. ms2_bake is unaffected -- its donor pool is FM_* only. 13 -> 15 bundles authored. (2) _tokenize returned None on any glyph no char names, which vetoed the WHOLE bundle's donor swap; four maps (02-00, 0A-00, 08, 18) each carry an EM-DASH orphan in unrelated vanilla dialogue, so they kept their sparse atlas and the lookalike ladder. Orphans now decode to '-' and are COUNTED and LOGGED per bundle. The donor face has no em-dash of its own (its single orphan 0x46 is an 18 px blank), so the cost is 8 em-dashes across those 4 maps rendering as hyphens; the gain is that all 15 obtain boxes render AP names in full ASCII, on disc AND in the RAM re-author (the resident bundle now carries the donor atlas, so _mapmsg_encode reads a full remap and stops wildcarding). // v255: CRESCENT LAKE SAGE JOINS THE GATE SPLIT -- his check is a story flag now, not a dialog latch. Story flag 18 is the Canoe's SAILING function bit AND his handover set it, the same collision as the Elf Prince, so the client had to prove the talk some other way: it watched a live pointer to the box it had authored. That pointer is live ONLY while the box is on screen and _npc_loop samples every 2.0s, so a player who pressed through the box was never sampled and the check silently never sent (live 2026-08-10, the Blue Curtain report; third recurrence, twice previously misattributed to DIALOG_STATE_ADDR moving -- it does move, but the self-locating scan already absorbed that). _NGS_SITES gains (0x089AB14C, set, 18 -> 81): the ONLY `2d 04 12 00` on the whole disc, sitting immediately before the canoe give `30 08 01 0c / e2 1f` (object 0x1FE2), so it is positively the handover. Flag 81 = 64 + canoe key id 17 -> 0x11526 b1, verified zero refs on disc. Flag 18 then belongs to the AP grant alone (key 17 is already in OWNED_FUNCTION_REASSERT). The three surviving flag-18 checks are deliberately untouched: they ask "does the player have a canoe", which AP-canoe == flag 18 answers exactly right, and 0x089A7584's body gives object 0x1394, not the canoe -- repointing a check whose body was not positively identified is the v248 mistake. Client: the whole latch subsystem is DELETED (_sage_watch_loop, _sage_talked, _sage_box_ptr_live, _DLG_WINDOW, _dlg_txt_addr, _sage_boxaddrs, the rising-edge machinery, SAGE_WATCH_S) and replaced by a flag-81 rise in _npc_loop, mirroring prince-quest. The sage was the last non-bit-based NPC handover. // v254: SPELLS HIT LOW HP ENEMIES (spells_hit_low_hp_enemies). A status/death spell's to-hit score is ramped LINEARLY from x1.0 at 85% of the target MONSTER's max HP to x1.5 at 15% (flat outside that band), emitted inside the popup_colours roll caves so it lands after magic_power_scaling's shrink (the ramp multiplies the REAL power-scaled odds) and before the colour classify (the odds shown are the odds rolled). Bosses included; party targets excluded via the MPWR BOUNDARY. v253 shipped this as a hard 15% threshold; superseded same day.
                       # A status/death spell's to-hit score is multiplied by 1.5 when the target MONSTER is under 15% of max HP, emitted inside the popup_colours roll caves so it lands after magic_power_scaling's shrink (the boost multiplies the REAL power-scaled odds) and before the colour classify (the odds shown are the odds rolled). Bosses included; party targets excluded via the MPWR BOUNDARY.
                       # v252: ONE GLYPH PAGE IN THE IMAGE -- v252: ONE GLYPH PAGE IN THE IMAGE -- the per-surface encoding of v246/v251 is DELETED. FM_EXTERN12US (12 px menu face) and FM_EXTERN18US (18 px face, used by the CHEST REWARD BOX and the KEY ITEMS menu) hold the same 107 glyphs in two id orders, and the runtime does not honour Square's per-bundle pairing: it serves the 12US banks to BOTH faces, so every X/U/Z/Q drawn in a box came out a digit ("DragoniteZ3OW" -> "Dragonite9OW" 2026-08-08; vanilla "Ultima Weapon" from a Cornelia chest -> "8ltima Weapon" 2026-08-10, while the item menu drew those same bytes correctly). Encoding per surface could never cover it -- the runtime-authored dyn slots are ONE DataPatch writing ONE byte string into every resident copy. So the bake now REPOINTS THE 18US FACE instead (extern_bake._unify_glyph_page): a .FIF is u16 magic, u16 glyph_count, a 276-byte char->glyph table, then glyph_count x {u32 strip_x, u16 advance}, and a bank byte INDEXES that metric array -- so permuting 14 metric records and relabelling the char table moves the ids without moving one pixel of the .GIM; the face keeps its size, metrics and kerning. That bundle's own box-page banks (ITEM/WEAPON/ARMOR/MAGIC_NAME + VALUE) are re-encoded to match and come out byte-identical to the 12US copies; its *_EXP desc banks and KEY_NAME were already menu page and are untouched. Result: ONE page in the whole image, every UI agrees, and tome_names/extern_bake author menu page everywhere again (KEY_MENU_ENC is MENU_ENC once more). This also fixes LOCAL item names in the reward box ("8ltima Weapon", "7-Potion"), which v251 documented as unfixable. Ordering matters: extern_bake runs before evm_bake, whose donor font IS this bundle, so the donor swap reads the repointed table and stays self-consistent. _repoint_fif RAISES on any shape surprise rather than skipping -- a half-converted image is worse than a failed bake. // v251: CHEST-BOX GLYPH PAGE, CORRECT AXIS (v246 translated the wrong copy). The page split is PER ENTRY RANGE, not per bundle: the game serves the MENU-page (FM_EXTERN12US) banks and the chest reward box draws THOSE with the box-page font. Proof: WEAPON_NAME is touched by no bake, yet a Cornelia chest holding a LOCAL Ultima Weapon read "8ltima Weapon" (player report 2026-08-10) -- the 12US copy stores that 'U' as 0x43, which IS the box page's '8', while the 18US copy stores 0x39, which the box would have drawn as 'U'. So both bundle copies get IDENTICAL banks again: vanilla + tome entries stay MENU page (the item menu reads them), the REMOTE and DYN blocks are written BOX page (only the reward box can reach them). KNOWN, UNFIXABLE BY ENCODING: a LOCAL item whose vanilla name holds X/U/Z/Q still draws a digit in the reward box ("8ltima Weapon", "7-Potion") because the item menu reads those same bytes and needs them menu-page. Retail behaviour, not a regression. // v250: MYSTIC KEY DOORS DECOUPLED FROM STORY FLAGS ENTIRELY -- the fix for the whole NPC-gate class, not just Elfheim. Vanilla opens each locked door from a `2d 08 09 02` check running `2e/36 04 <val>` at map init, and story flag 9 is ALSO the Elf Prince's "already gave it" gate; every attempt to split the quest off the key therefore broke either the doors or the prince (v247 repointed the Elven Castle check and killed its doors; v249 hand-split that one block and did not generalize). mystic_door_gate now drops the door RECORD instead, on POSSESSION of key id 5, for all 12 Mystic Key door records across all 6 maps that carry one (_MDG_DOORS; complete kind=4 scan of all 128 object lists for vals 0x1F4A / 0x23CD, both v199-proven). No cell is created, so no flag is consulted anywhere. LIVE-PROVEN 2026-08-10 (re_only/_mdg_all_probe.py): with story flag 9 forced CLEAR -- every door script believing the key unowned -- and the 12 records dropped in RAM, EVERY Mystic Key door in the game opened, Elven Castle and Cornelia included. prince_gate_split reverts to the clean v247 four-site operand repoint and the v249 block surgery is DELETED: with the records gone those door ops match nothing, so 0x089A6C34 is a pure quest gate again. This also retires the hazard for the rest of the template (Levistone next) -- a check that doubles as a door unlock stops mattering once doors do not come from checks. Object ordinals are undisturbed (ff1_data's *_NPC_ORDINAL are AP location numbers, not object-list indices). Event VM fully disassembled, see the apply_prince_gate_split header. // v249: ELVEN CASTLE MYSTIC KEY DOORS FIXED (live 2026-08-10: won Mystic Key, flag 9 set, every locked door in Elfheim castle still shut). v247's prince_gate_split repointed 0x089A6C34's check operand 9 -> 69 along with the three dialogue/set sites, but that block is not a pure gate -- its flag-9 TRUE body places the prince AND runs `2e 04 4a 1f` + `2e 04 cd 23`, the castle's two locked-door object ids (same pair Cornelia's map-init block opens on flag 9 at 0x089a5f34). Repointed, the doors waited on the quest flag a won key can never set. Scanned all 18 `2d 08 09 02` sites on disc: 0x089A6C34 is the ONLY door-op site among the four repoints, which is exactly why Cornelia / Marsh / Ice / Chaos Shrine were unaffected. apply_prince_gate_split now REWRITES that block in place (same 15 words, same end word at 0x089a6c70): `if flag 9 -> doors` / `if flag 69 -> prince awake, jump end` / `else -> flag 8 give-cutscene`. Fits exactly because vanilla's trailing jump at 0x089a6c68 targets the next word. SIGNATURES moved to the block's SECOND check (+0x12) since the first is flag 9 again by design. // v248: Blood Knight lifesteal retuned 20% -> 10% (KNIGHT_LIFESTEAL_DIV 5 -> 10), matching the 10% defense-pierce leg. Both scroll legs are now 10%. Patch bytes change (the cave's immediate), so seeds must re-bake.
                       # v247: PRINCE GATE SPLIT (apply_prince_gate_split). The Elf Prince quest chain (handover gate, completion set, healer+prince dialogue) repointed from story flag 9 (= Mystic Key function bit = every locked door) to shadow flag 69. Live-RE'd + RAM-rehearsed 2026-08-09; Mystic Key row leaves NPC_MAP_RESET, doors can never be held again.
@@ -9687,6 +10891,15 @@ SIGNATURES = {
     # opcode 100011). Opcode-only check so it holds wherever the cave lands
     # (cave vaddr shifts with which other features are enabled).
     "thief_extra_crit": (_CRIT_HOOK + 2, 0xFC00, 0x0800),
+    # Round-zero trap detour @_TRP_HOOK overwritten with `j cave`: top 6
+    # opcode bits are `j` (000010) only when patched (vanilla `lui v0,1`,
+    # opcode 001111 -> high u16 0x3C02). Opcode-only -> holds wherever the
+    # cave lands, which shifts with whichever other features are enabled.
+    "trap_round_zero": (_TRP_HOOK + 2, 0xFC00, 0x0800),
+    # Pause-panel prologue @_RP_PANEL_HOOK overwritten with `j cave`: top 6
+    # opcode bits are `j` (000010) only when patched (vanilla `addiu
+    # sp,sp,-0x50`, opcode 001001). Opcode-only -> holds wherever the cave lands.
+    "reduced_party": (_RP_PANEL_HOOK + 2, 0xFC00, 0x0800),
     # Chest item-grant jal @0x08843D74 overwritten with `j cave`: top 6 opcode
     # bits are `j` (000010) only when patched (vanilla `jal`, opcode 000011 ->
     # 0x0C00). Opcode-only -> holds wherever the cave lands.
@@ -9931,6 +11144,8 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
     apply_data_patches(elf, data_patches)
     _install_bake_tag(elf, bake_hash32)          # first cave = fixed tag addr
     apply_popup_colors(elf, feats)               # install always; feats gates
+    # always on: turns the null-holder battle freeze into a missing sprite
+    apply_sprite_null_guard(elf, feats)
                                                  # only the odds CLASSIFY step
     # Shared delayed-popup service (always on): install once, thread the mailbox
     # vaddr to the features that stagger numbers (job_scroll teal MP refund,
@@ -9985,20 +11200,35 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
     # plain.
     sub("battle damage-number colours…")
     popup_bake.bake_popup_colours(iso_out)
+    # When spell_tomes / key_names / blood_magic / remote_chest_names are ALL
+    # off, extern_bake never runs -- hand the dpk dead-space bakers the two J1
+    # EXTERN records they normally reserve (FM_EXTERN18J1 alone is the biggest
+    # donor on disc, 0x142a4). remote_chest_names now grows the same banks
+    # (decoupled from spell_tomes), so it must also reserve J1 or a pack would
+    # be parked there and overwritten (the PATCHER 68 collision class).
+    extern_active = bool(feats.get("spell_tomes") or key_names
+                         or feats.get("blood_magic")
+                         or ((remote_names or dyn_name_slots)
+                             and feats.get("remote_chest_names")))
+    # the caravan row may relocate FM_SHOPUS into FM_SHOPJ1 -- another J1-named
+    # donor. One region, one owner.
+    caravan_active = bool(caravan_offer and caravan_offer.get("name"))
+    # LOAD-BEARING -- custom class sprites: bake each shipped class's MERGED
+    # palette into the JOB_*.PCK sheets. The palette CANNOT be a runtime pin --
+    # the engine builds standalone per-actor palette copies from the disc record
+    # and several draw paths CLUT from those, which is what coloured our custom
+    # pixels with the vanilla palette (the "golden" Thief, live 2026-08-30).
+    # Unconditional and seed-independent: the merged palette keeps every
+    # vanilla-used slot's exact colour, so vanilla pixels are unchanged and the
+    # scroll gate still lives entirely in the client's PIXEL pin.
+    from . import job_sprite_bake
+    sub("class sprite palettes…")
+    _job_donors = job_sprite_bake.bake_job_palettes(
+        iso_out, extern_active=extern_active, caravan_active=caravan_active)
     # LOAD-BEARING -- boss_minions: rebuild MS2_<fid>.PCK sprite packs in the
     # copied ISO's dpk so every planned add monster has its GIM pair.
     if feats.get("boss_minions") and feats.get("boss_minions_plan"):
         from . import ms2_bake
-        # When spell_tomes / key_names / blood_magic / remote_chest_names are ALL
-        # off, extern_bake never runs -- hand ms2 the two J1 EXTERN records it
-        # normally reserves (FM_EXTERN18J1 alone is the biggest donor on disc,
-        # 0x142a4). remote_chest_names now grows the same banks (decoupled from
-        # spell_tomes), so it must also reserve J1 or ms2 would steal it out from
-        # under the remote bake (the PATCHER 68 collision class).
-        extern_active = bool(feats.get("spell_tomes") or key_names
-                             or feats.get("blood_magic")
-                             or ((remote_names or dyn_name_slots)
-                                 and feats.get("remote_chest_names")))
         # Donor-pool rule: any baker running AFTER this call that RELOCATES a
         # dpk record must be in ms2_bake.reserved_names, or ms2 may park a
         # grown pack in that donor's extent and the later baker overwrites it
@@ -10009,9 +11239,10 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
         ms2_bake.bake_minion_packs(
             iso_out, feats["boss_minions_plan"],
             extern_active=extern_active,
-            # the caravan row may relocate FM_SHOPUS into FM_SHOPJ1 -- another
-            # J1-named donor. One region, one owner.
-            caravan_active=bool(caravan_offer and caravan_offer.get("name")))
+            caravan_active=caravan_active,
+            # donor extents the job-sprite palette bake already took: it ran
+            # first, so those bytes are live and ms2 must not hand them out.
+            extra_reserved=_job_donors)
     # LOAD-BEARING -- giant_cave_gate: place the paired boulder at (11,13) in
     # MAP_06_00.PCK's grid. The ELF half already moved the Giant onto (12,13);
     # without the rock the choke point has a hole and the gate silently does

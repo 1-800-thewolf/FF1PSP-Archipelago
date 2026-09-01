@@ -929,6 +929,21 @@ def _rank_slots(picks):
     return list(picks[1:-1]) + [picks[0], picks[-1]]
 
 
+def overworld_zone_tables(seed, player, harder=False):
+    """(low, high) zones_overworld tables for one slot, off a DERIVED rng.
+
+    Same trick as the boss-minion plan: seeding a private Random from the slot
+    seed makes this reproducible from anywhere without consuming the main
+    shuffle stream, so set_rules can know the seed's real overworld encounters
+    before create_items has run the rest of the shuffles. The bestiary needs
+    exactly that -- its checks are gated on where a monster can actually be
+    hunted, and this table IS that answer (see logic.overworld_sources)."""
+    import random as _random
+    rng = _random.Random(f"{seed}-{player}-owzones")
+    return shuffle_zones_overworld(rng, RD.VANILLA["zones_overworld"],
+                                   harder=harder)
+
+
 def shuffle_zones_overworld(rng, block, harder=False):
     """Roll every zone's 8 slots and return (low, high) 512-byte tables.
 
@@ -1850,7 +1865,7 @@ def reserved_placeholder_map(counts, hint_caps=None, hint_target=0):
 def shuffle_shop_items(rng, block, tier=SHOP_TIER_OVERWORLD, ap_slots=False,
                        ap_blocked=None, block_mana_items=False,
                        ap_reserve=None, hint_reserve=None,
-                       extra_slots=_EXTRA_SLOTS_DEFAULT):
+                       extra_slots=_EXTRA_SLOTS_DEFAULT, force_item_ids=()):
     """Randomize weapon/armor/item store inventories (rows j=0..2). Port of the
     randomizeStores() fill for those categories. Magic stores (j=3..6) are NOT
     touched here -- see shuffle_magic_shops. `block` is the 0x600-byte region
@@ -1867,7 +1882,12 @@ def shuffle_shop_items(rng, block, tier=SHOP_TIER_OVERWORLD, ap_slots=False,
 
     `extra_slots` is the yaml `shop_max_extra_items` -- the most EXTRA normal
     stock rows a store may roll on top of its base width (see
-    plan_shop_widths)."""
+    plan_shop_widths).
+
+    `force_item_ids` are consumable ids that MUST end up on the Cornelia item
+    shop's shelf whatever the draw rolled (starting_party_members == 1 forces
+    ANTIDOTE_ID there -- a solo character has nobody to cure their Poison).
+    Unlike the _CURE_IDS guarantee below it is unconditional."""
     out = bytearray(block)
     vanilla_ids = _vanilla_shop_ids(block)      # BEFORE the relayout moves lists
     blocked_ids = (ap_blocked if ap_blocked is not None
@@ -2010,12 +2030,32 @@ def shuffle_shop_items(rng, block, tier=SHOP_TIER_OVERWORLD, ap_slots=False,
         out[spot] = _CURE_IDS[1]                         # Gold Needle
         used[2][_CURE_IDS[1]] = used[2].get(_CURE_IDS[1], 0) + 1
 
+    # Unconditionally forced Cornelia item-shop stock (`force_item_ids`). Runs
+    # BEFORE placeholders are picked, and placeholders are drawn from ids the
+    # shuffle left UNSTOCKED -- so a forced id can never also be a placeholder.
+    for fid in force_item_ids:
+        idx = _DEF_IDX[(0, 2)]                           # Cornelia item shop
+        list_off, size = plan[idx]
+        # Stock rows only: overwriting a reserved AP row would drop an offer.
+        stock = size - min(reserve.get(idx, 0), max(0, size - 1))
+        if any(out[list_off + k] == fid for k in range(stock)):
+            continue                                     # already on the shelf
+        # Prefer a row whose id is stocked more than once world-wide, so the
+        # force can never be what creates a duplicate (same rule as the cure
+        # guarantee above); row 0 otherwise.
+        spot = next((list_off + k for k in range(stock)
+                     if used[2].get(out[list_off + k], 0) > 1), list_off)
+        used[2][out[spot]] = max(0, used[2].get(out[spot], 1) - 1)
+        out[spot] = fid
+        used[2][fid] = used[2].get(fid, 0) + 1
+
     _fill_caravan(rng, out, tier, vanilla_ids, ap_slots, blocked_ids,
                   block_mana_items, used=used[2], plan=plan)
     return out
 
 
 _CURE_IDS = (0x0a, 0x0c)                 # Remedy, Gold Needle
+ANTIDOTE_ID = 0x0b                       # vanilla Cornelia item-shop stock
 
 
 def _stocked_item_ids(block, plan):
@@ -3507,7 +3547,8 @@ def build_shuffle_tables(rng, *, shop_tier=SHOP_TIER_UNSHUFFLED, magic_shops=Fal
                          restrict_priceless_equip=False,
                          block_mana_items=False,
                          shop_extra_slots=_EXTRA_SLOTS_DEFAULT,
-                         shared_tails=False):
+                         shared_tails=False, force_shop_item_ids=(),
+                         ow_tables=None):
     """Assemble the enabled Tier-A shuffles into per-physical-table patched bytes.
     Multiple features can touch the same table (e.g. equip_perms + item_prices
     both edit `weapons`); they are layered onto one bytearray so a single
@@ -3660,7 +3701,8 @@ def build_shuffle_tables(rng, *, shop_tier=SHOP_TIER_UNSHUFFLED, magic_shops=Fal
                                    ap_reserve=(shop_ap_offers
                                                if shop_ap_prices is not None else None),
                                    hint_reserve=hint_caps or None,
-                                   extra_slots=shop_extra_slots)
+                                   extra_slots=shop_extra_slots,
+                                   force_item_ids=force_shop_item_ids)
     if magic_shops:
         shops = shuffle_magic_shops(rng, shops)
         # Slot magic: a spell's LEVEL is its charge pool, so the costly list
@@ -3795,8 +3837,18 @@ def build_shuffle_tables(rng, *, shop_tier=SHOP_TIER_UNSHUFFLED, magic_shops=Fal
     # Caves stay vanilla unless dungeon_harder. The overworld branch also
     # touches the cave table, but solely to stamp the Onrac-region boss cameos
     # (Astos/Piscodemon), which physically live in cave map 0x28.
-    ow, ow_hi = shuffle_zones_overworld(rng, V["zones_overworld"],
-                                        harder=overworld_harder)
+    # ow_tables = the caller's precomputed (low, high) pair from
+    # overworld_zone_tables(). It is passed in rather than rolled here because
+    # the BESTIARY has to see the same table at set_rules time, long before this
+    # function runs -- and a draw off `rng` could not be reproduced there
+    # without replaying the whole stream. Falling back to a local roll keeps
+    # every other caller (parity harnesses, tests) working unchanged.
+    if ow_tables is not None:
+        ow, ow_hi = ow_tables
+        ow = bytearray(ow)
+    else:
+        ow, ow_hi = shuffle_zones_overworld(rng, V["zones_overworld"],
+                                            harder=overworld_harder)
     if overworld_harder:
         ow = _stamp_boss_slots(ow, _OVERWORLD_BOSS_SLOTS)
         # a curated cameo is a u8 id, so clear any high byte left in that slot

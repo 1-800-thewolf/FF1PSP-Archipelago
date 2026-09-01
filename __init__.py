@@ -32,7 +32,7 @@ from ._locinfo import LOC_INFO
 from .client import class_names as CN      # pure data (no client deps at gen time)
 from .client import ff1_data as FF1DATA     # pure data: WEAPONS/ARMOR gid->name maps
 from .options import (
-    FF1PSPOptions, OpenProgression, resolve_party_jobs,
+    CHOOSE_AT_GAME_START, FF1PSPOptions, OpenProgression, resolve_party_jobs,
 )
 
 GAME = "Final Fantasy 1 PSP"
@@ -60,14 +60,31 @@ for _nm, _shop, _reqs in LOGIC.SHOP_LOCATIONS:
     for _k in range(LOGIC.SHOP_MAX_OFFERS):
         LOCATION_NAME_TO_ID[LOGIC.shop_location_name(_nm, _k)] = \
             ID.shop_loc_id(_shop, _k)
-# Dynamic bonus-dungeon chest locations (Soul-of-Chaos procedural chests). ALL
-# possible ordinals per dungeon (up to its floor count) are registered so the
+# Dynamic bonus-dungeon chest locations (Soul-of-Chaos procedural chests). EVERY
+# ordinal a dungeon can ever be given -- the full ids.DYNCHEST_STRIDE block, which
+# is also the hard ceiling on every *_ap_locations Range -- is registered so the
 # datapackage stays stable regardless of the per-dungeon count yaml; only the
 # resolved cap is actually created (create_regions). See logic.BONUS_DUNGEONS.
+#
+# Registering only the canonical floor count (5/10/20/40) was the old behaviour and
+# it UNDER-registered: a cap above the floor count creates REAL locations -- they
+# generate, hold items and send -- whose ids no client can name, so hints render as
+# "Unknown location (ID: 17371384)". ApClient._register_dyn_chest_names repairs that
+# locally, but only inside OUR client: a foreign slot hinting an item parked in an
+# FF1 bonus dungeon still saw the bare number (live 2026-08-29, Meyrime's Storm
+# Badge at Whisperwind Cove ordinal 56). Registering the whole stride fixes it for
+# every client. Purely additive -- no id or name that already existed moves, so an
+# in-flight seed keeps resolving; the client-side repair stays for seeds rolled
+# before this change. `floors` is now display/curation metadata only.
 for _dg, _dname, _floors, _defcap, _tok, _attr in LOGIC.BONUS_DUNGEONS:
-    for _o in range(_floors):
+    for _o in range(ID.DYNCHEST_STRIDE):
         LOCATION_NAME_TO_ID[LOGIC.dyn_chest_location_name(_dname, _o)] = \
             ID.dyn_chest_loc_id(_dg, _o)
+# Bestiarysanity locations -- one per eligible bestiary monster (Chronodia's 8
+# script-only entries are never eligible). ALL 195 registered so the datapackage
+# stays stable; only the seed's sampled, guaranteed-huntable subset is created.
+for _mon, _bnm in LOGIC.BESTIARY_LOCATION_NAMES.items():
+    LOCATION_NAME_TO_ID[_bnm] = ID.bestiary_loc_id(_mon)
 
 # The Lute is a REAL game key item (cat 0, game id 1) that the client can grant via
 # its key-item bitfield. It is no longer an event token -- it goes in the pool and is
@@ -160,8 +177,9 @@ for _i, _gname in enumerate(LOGIC.GATE_ITEMS):
 # event's lineup-scene context -- see job-advancement-items memory). Promotion is
 # now the game's NATIVE Bahamut turn-in: the Rat's Tail is an AP item that, when
 # received, functionally promotes the whole party at Bahamut (client sets the
-# turn-in function bit; see ff1_data.KEY_ITEM_FUNCTION_BITS[13]). Bahamut is also
-# an AP location (logic.NPC_LOCATIONS, gated on AIRSHIP + Rat's Tail).
+# turn-in function bit; see ff1_data.KEY_ITEM_FUNCTION_BITS[13]). Bahamut is NOT
+# an AP location (removed 2026-08-27 -- native promotion is his only reward; the
+# client watches the class change itself for tail-spent tracking).
 
 # Job Scroll boosts (opt-out via JobScrollBoosts, default on; 2026-07-13): the
 # scroll id space (ids.job_item_id, keyed by BASE job 0..5) is reused for six
@@ -185,6 +203,24 @@ for _fj, (_base, _promo) in CN.CLASS_RENAME.items():
     # them reachable (and they may not be dumped into unreachable filler slots).
     ITEM_NAME_TO_CLASS[_sn] = ItemClassification.progression
     JOB_SCROLL_ITEM_NAMES[_fj] = _sn
+
+# Party-member items (starting_party_members yaml, 2026-08-27): when the party
+# starts with fewer than 4 members, the BOTTOM slots are "missing" (soft-dead,
+# fully hidden by the client) until the matching item is received. One item per
+# BASE job, named exactly like the vanilla job ("Warrior"); a party holding a
+# job twice simply gets two copies of that item. Registered unconditionally
+# (stable datapackage); progression: a body in the party gates combat
+# viability, so fill owes them reachability. The join level (10..30, low-
+# weighted) rides slot_data ("missing_party"), not the item id.
+PARTY_MEMBER_JOB_NAMES = ("Warrior", "Thief", "Monk",
+                          "Red Mage", "White Mage", "Black Mage")
+PARTY_MEMBER_ITEM_NAMES = {}
+for _fj, _jn in enumerate(PARTY_MEMBER_JOB_NAMES):
+    assert _jn not in ITEM_NAME_TO_ID, \
+        f"party-member item name collides with an existing item: {_jn}"
+    ITEM_NAME_TO_ID[_jn] = ID.party_member_item_id(_fj)
+    ITEM_NAME_TO_CLASS[_jn] = ItemClassification.progression
+    PARTY_MEMBER_ITEM_NAMES[_fj] = _jn
 
 # Spell Tomes (opt-out via SpellTomes, default on): one usable teach-item per
 # spell, swapped in for filler. Game item = consumable cat 1, game id 44 +
@@ -259,6 +295,47 @@ for _amt, _sz in EXP_BAG_AMOUNTS.items():
     ITEM_NAME_TO_CLASS.setdefault(_bn, ItemClassification.filler)
     EXP_BAG_ITEM_NAMES.append(_bn)
 FILLER_ITEM_NAMES = FILLER_ITEM_NAMES + EXP_BAG_ITEM_NAMES
+
+# Trap items: SYNTHETIC (no native game id) filler-replacing items that spring at
+# a random upcoming battle (0-2 battles after receipt; see ApClient._trap_loop).
+# Every surviving kind maps onto a REAL ability the engine already ships, cast by
+# a real monster with its own animation, message and targeting -- a trap the
+# player cannot see is the bug this roster was cut down to fix (2026-08-29). trap_percentage (yaml) rolls them in via
+# World._trap_roll; NOT in FILLER_ITEM_NAMES -- the roll happens up front so
+# a 0% seed contains none and the datapackage still names them for multiworlds
+# that do. kind ordinals are FROZEN (they are the AP item id, ID.trap_item_id).
+TRAP_ITEMS = {
+    0: "Death Trap",            # spell 54 "Death"   -- single target
+    2: "Ink Trap",              # skill 0x15 -> effect 0x56 -- party-wide. The box
+                                # prints "Ink"; "Blind" is the PLAYER spell (id 60),
+                                # so the old name pointed at the wrong ability.
+    3: "Silence Trap",          # spell 6 "Silence"  -- party-wide
+    4: "Poison Darts Trap",     # skill 0x16 -> effect 0x57 -- party-wide. The box
+                                # prints "Poison Darts" (Manticore's spray). If a
+                                # crowded shop bank trims this, name_banks cuts at the
+                                # LAST space first -> "Poison Darts", still exact.
+}
+# RETIRED kinds: the ordinal is the AP item id, so a retired kind leaves a
+# permanent GAP rather than being reused -- renumbering would make an in-flight
+# seed generated on an older apworld deliver the WRONG trap. The name is
+# deliberately NOT registered in ITEM_NAME_TO_ID (nothing may roll or plando it
+# any more); the client keeps a no-op branch keyed on the ordinal so an old
+# multiworld that still sends one is ignored instead of crashing.
+RETIRED_TRAP_KINDS = {
+    1: "Mana Sap Trap",         # removed 2026-08-29 (real-cast rework): the survivors
+                                # must each BE a real ability the engine already
+                                # animates, and an exhaustive dump of effects
+                                # 0x01-0x74 found no MP-drain effect anywhere in the
+                                # game -- there is nothing for it to borrow.
+    5: "Monster Magnet Trap",   # removed 2026-08-29 (user): encounter rate x4/90s
+    6: "Ogre's Toll Trap",      # removed 2026-08-29 (user): a stat modifier with no
+                                # ability analogue. It was FELT, never SEEN -- the
+                                # playtest complaint that started the rework.
+}
+for _kind, _name in TRAP_ITEMS.items():
+    ITEM_NAME_TO_ID.setdefault(_name, ID.trap_item_id(_kind))
+    ITEM_NAME_TO_CLASS.setdefault(_name, ItemClassification.trap)
+TRAP_ITEM_NAMES = sorted(TRAP_ITEMS.values())
 
 
 # (RETIRED 2026-07-27: ACTIVATABLE_ITEM_CODES, which existed only to let
@@ -467,6 +544,10 @@ def _build_item_name_groups():
             _group_add(g, "Experience Bags", name)
         elif ID.is_job_item(iid):
             _group_add(g, "Job Scrolls", name)
+        elif ID.is_party_member(iid):
+            _group_add(g, "Party Members", name)
+        elif ID.is_trap(iid):
+            _group_add(g, "Traps", name)
         elif ID.is_tablet(iid) or ID.is_shard(iid) or ID.is_rune(iid):
             # Lute Tablet / Levistone Shard / Equipment Rune: N copies that
             # assemble one thing at a yaml-set threshold.
@@ -507,6 +588,7 @@ def _build_item_name_groups():
 # dungeon a player would name in a hint. Ice Cave == Cavern of Ice (the Levistone
 # pair uses the short name). Every registered location must match one prefix.
 _AREA_PREFIXES = (
+    ("Bestiary - ", "Bestiary"),
     ("Castle Cornelia", "Castle Cornelia"),
     ("Cavern of Earth", "Cavern of Earth"),
     ("Cavern of Ice", "Cavern of Ice"),
@@ -558,6 +640,8 @@ def _build_location_name_groups():
             _group_add(g, "Bonus Dungeon Chests", name)
         elif ID.BASE + ID.NPC_OFF <= lid < ID.BASE + ID.NPC_OFF + 0x100:
             _group_add(g, "NPCs", name)
+        elif ID.is_bestiary_loc(lid):
+            _group_add(g, "Bestiary", name)
         else:
             _group_add(g, "Chests", name)
         for prefix, area in _AREA_PREFIXES_BY_LEN:
@@ -647,8 +731,21 @@ class FF1PSPWorld(World):
             self.options.loot_in_normally_empty_chests.value)
         return removed
 
+    def _trap_roll(self):
+        """One independent trap_percentage roll: a trap item name, or None.
+        The ONE place the roll lives, so the two callers (get_filler_item_name
+        for balance-slot fillers, create_items for the base pool's own filler
+        tokens) cannot drift. 0% consumes no RNG at all -- a trapless seed keeps
+        the pre-feature random stream."""
+        tp = self.options.trap_percentage.value
+        if tp and self.random.randrange(100) < tp:
+            return self.random.choice(TRAP_ITEM_NAMES)
+        return None
+
     def get_filler_item_name(self) -> str:
-        return self.random.choice(self._filler_names())
+        # trap_percentage: each filler slot independently becomes a random trap
+        # item (client fires it at a random upcoming battle). 0 = never.
+        return self._trap_roll() or self.random.choice(self._filler_names())
 
     def _filler_names(self):
         """FILLER_ITEM_NAMES minus anything whose only effect is the mana pool.
@@ -724,6 +821,94 @@ class FF1PSPWorld(World):
                 magics=bool(self.options.white_and_black_magics.value),
                 dabble=bool(self.options.monk_thief_dabble_in_magic.value))
         return self._party_jobs_cache
+
+    def _missing_members(self):
+        """Missing starting-party plan (cached): [row, base job 0..5,
+        join_level] per missing member -- the BOTTOM (4 - starting_party_members)
+        rows, top-to-bottom. Empty = full party (feature off). Join level is
+        rolled here via self.random -- 10..30 with lower levels more likely
+        (weight 31-L, linear falloff) -- so it consumes RNG; cached like
+        _resolved_party_jobs so create_items (which runs first) and
+        fill_slot_data see the same plan and RNG rolls exactly once.
+        generate_early already rejected choose_at_game_start on missing rows,
+        so every job here is a concrete 0..5."""
+        cache = getattr(self, "_missing_members_cache", None)
+        if cache is not None:
+            return cache
+        keep = int(self.options.starting_party_members.value)
+        if keep >= 4:
+            # Dormant (full party): bail BEFORE resolving party jobs, so the
+            # default path consumes self.random exactly where the pre-feature
+            # world did (the party-jobs roll stays at its old first trigger in
+            # _party_scroll_names/_learnable_tome_names/fill_slot_data) and
+            # same-seed outputs are unchanged when the feature is off.
+            self._missing_members_cache = []
+            return self._missing_members_cache
+        jobs = self._resolved_party_jobs()
+        levels = list(range(10, 31))
+        weights = [31 - lv for lv in levels]
+        plan = []
+        for row in range(keep, 4):
+            lvl = self.random.choices(levels, weights=weights)[0]
+            plan.append([row, int(jobs[row]), int(lvl)])
+        self._missing_members_cache = plan
+        return plan
+
+    def _plando_forced_members(self):
+        """Party-member item copies this slot's `plando_items` forces into a
+        NAMED location (any world -- a member seated in someone else's check is
+        just as forced). Blocks with no explicit location ("Everywhere", or the
+        key omitted) do not count: they place the item wherever fill likes, so
+        they cannot deadlock a party gate.
+
+        AP's PlandoItems.verify has already emptied the option when the host
+        disallows item plando, so reading it here respects host.yaml for free.
+        Read defensively (getattr / duck-typed items) so the offline test stubs
+        and older AP builds do not have to model the option."""
+        opt = getattr(self.options, "plando_items", None)
+        # PlandoItems is iterable itself; .value is the same list. The offline
+        # harnesses hand back a scalar stand-in for every unset option, so a
+        # non-sequence means "no plando" rather than a TypeError mid-generation.
+        blocks = getattr(opt, "value", opt)
+        if not isinstance(blocks, (list, tuple)):
+            blocks = list(blocks) if hasattr(blocks, "__iter__") else []
+        names = set(PARTY_MEMBER_ITEM_NAMES.values())
+        total = 0
+        for b in blocks:
+            locs = getattr(b, "locations", None) or []
+            if isinstance(locs, str):
+                locs = [locs]
+            if not [l for l in locs if l and l != "Everywhere"]:
+                continue
+            items = getattr(b, "items", None) or []
+            if isinstance(items, str):
+                items = {items: 1}
+            if isinstance(items, dict):
+                for nm, cnt in items.items():
+                    if nm in names:
+                        # values are counts, but `true` is legal yaml for "one"
+                        total += 1 if cnt is True else max(1, int(cnt or 1))
+            else:
+                total += sum(1 for nm in items if nm in names)
+        return total
+
+    def _party_gate_cap(self):
+        """Highest party-size gate (logic.PARTY_GATE_*) this seed enforces; 0 =
+        none. 4 - forced members, so plandoing 1 member into a location lifts the
+        4-gate, 2 lifts the 3-gates as well and 3 lifts every gate -- a player who
+        wants a deliberate long reduced-party run is never told their seed is
+        unfillable. Always 0 on a full 4-member start, where the gates are
+        vacuous anyway (party size is 4 from the first frame)."""
+        cap = getattr(self, "_party_gate_cap_cache", None)
+        if cap is None:
+            # StartingPartyMembers is a Range(1, 4), so anything outside 1..3 is
+            # a full party (or an offline harness reading unset options as 0) --
+            # either way there is nothing for a party gate to bind on.
+            keep = int(self.options.starting_party_members.value)
+            cap = (max(0, 4 - self._plando_forced_members())
+                   if 1 <= keep <= 3 else 0)
+            self._party_gate_cap_cache = cap
+        return cap
 
     def _gear_pool(self):
         """Exotic/priceless loot draw (cached). Returns (selected_names,
@@ -885,10 +1070,19 @@ class FF1PSPWorld(World):
                     shop_ap_prices[shop] = prices
             shuffle_tables = RANDO.build_shuffle_tables(
                 self.random,
+                # the pair set_rules already gated the bestiary on
+                ow_tables=self._overworld_zone_tables(),
                 shop_tier=int(self.options.shop_item_pool.value),
                 # Extra NORMAL stock rows per store (yaml shop_max_extra_items).
                 # A per-store roll of 0..this, on top of the AP/hint reserve.
                 shop_extra_slots=int(self.options.shop_max_extra_items.value),
+                # starting_party_members == 1: a solo character has nobody to
+                # cure their Poison, so Antidote is forced onto the Cornelia
+                # item shop's shelf whatever the shop shuffle rolled.
+                force_shop_item_ids=(
+                    (RANDO.ANTIDOTE_ID,)
+                    if int(self.options.starting_party_members.value) == 1
+                    else ()),
                 magic_shops=bool(self.options.shuffle_magic_shops.value),
                 item_prices=bool(self.options.randomize_prices.value),
                 # slot_magic replaces the MP pool with per-level spell slots --
@@ -1177,6 +1371,11 @@ class FF1PSPWorld(World):
         # the note at the top-level copy in the return dict below.
         on_disc["chaos_floor_encounters"] = bool(
             self.options.chaos_floor_encounters.value)
+        # starting_party_members: the Phase-3 menu/battle row-hiding caves
+        # (pause-panel row skip, battle status-window row skip, char-select
+        # paging skips) + the held-mask mailbox. MUST ride on_disc -- the
+        # bake reads slot_data["on_disc"] only (live lesson 2026-08-04).
+        on_disc["reduced_party"] = bool(self._missing_members())
         # Shop AP stock for the client, in two shapes.
         #
         # shop_ap_rows (authoritative): [shop, category, base_width,
@@ -1261,7 +1460,31 @@ class FF1PSPWorld(World):
             from . import boss_minions as BM
             _rng = _random.Random(f"{self.multiworld.seed}-{self.player}-bossminions")
             minion_plan = BM.roll_plan(self.options.boss_minions.value, _rng)
+        # Bestiarysanity: the sampled monster ids + the option context the client
+        # needs to rebuild "where found" + logic-side eligibility (the client has
+        # bestiary_data + logic in the apworld; monsters alone would do, but the
+        # opts snapshot guards against option-derivation drift client-side).
+        b_chosen, _b_rules = self._bestiary_setup()
+        _sop = self.options.open_progression.value
+        bestiary_slot = None
+        if self.options.bestiarysanity_percent.value:
+            bestiary_slot = {
+                "monsters": list(b_chosen),
+                "progression": bool(self.options.bestiary_progression.value),
+                "opts": {
+                    "harder_ow": bool(self.options.harder_overworld_encounters.value),
+                    "harder_dungeons": bool(self.options.harder_dungeon_encounters.value),
+                    "forests": bool(self.options.dangerous_forests.value),
+                    "ocean": bool(self.options.regional_ocean_encounters.value),
+                    "river": bool(self.options.northern_river_encounters.value),
+                    "bonus_excluded": bool(self.options.exclude_bonus_dungeons.value),
+                    "early": _sop >= OpenProgression.option_early,
+                    "extended": _sop >= OpenProgression.option_extended,
+                    "northern_docks": bool(self.options.northern_docks.value),
+                },
+            }
         return {
+            "bestiary": bestiary_slot,
             "boss_minions_plan": minion_plan,
             "encounter_rate": self.options.encounter_rate.value / 100.0,
             "xp_boost": self.options.xp_boost_percentage.value / 100.0,
@@ -1272,6 +1495,19 @@ class FF1PSPWorld(World):
             "boss_difficulty": self.options.boss_difficulty_percentage.value / 100.0,
             "monster_power": self.options.monster_power_percentage.value / 100.0,
             "party_jobs": party_jobs,
+            # starting_party_members: the missing-member plan. [row, base job
+            # 0..5, join_level] per missing BOTTOM party row (0-based, top to
+            # bottom); [] = full party. The client soft-deads these rows at new
+            # game, keeps them fully hidden, and revives a row when the received
+            # count of its job-named item (ids.party_member_item_id) covers it
+            # -- duplicate jobs revive top-most missing row first. join_level
+            # lands as an EXP floor at revive; the engine grants the levels at
+            # the member's next battle victory.
+            "missing_party": self._missing_members(),
+            # Highest party-size gate this seed enforces (0 = none). The tracker
+            # mirrors set_rules off this one number, so a plando-lifted gate
+            # reads the same in-game as it did at generation.
+            "party_logic_cap": self._party_gate_cap(),
             "naked_monks": bool(self.options.naked_monks.value),
             # Quality of life: in-game Config menu defaults the client writes
             # ONCE at new game and then leaves to the player (see
@@ -1343,6 +1579,9 @@ class FF1PSPWorld(World):
             # severity = how many LIVING party members a received death kills.
             "death_link": bool(self.options.death_link.value),
             "death_link_severity": int(self.options.death_link_severity.value),
+            # trap_percentage: client-side visibility only (the traps themselves
+            # arrive as received items); lets the client log that traps are live.
+            "trap_percentage": int(self.options.trap_percentage.value),
             "shop_ap": shop_ap,
             "shop_ap_rows": shop_ap_rows,
             # v2 marker: tail gids are the RESERVED_SHOP_PLACEHOLDERS constants
@@ -1367,6 +1606,21 @@ class FF1PSPWorld(World):
                 "'exclude_bonus_dungeons' removes those dungeons entirely (no "
                 "superbosses to beat, so the seed is unwinnable). Enable at most "
                 "one of them.")
+        keep = int(self.options.starting_party_members.value)
+        if keep < 4:
+            starting = (self.options.starting_job_1.value,
+                        self.options.starting_job_2.value,
+                        self.options.starting_job_3.value,
+                        self.options.starting_job_4.value)
+            bad = [i + 1 for i in range(keep, 4)
+                   if starting[i] == CHOOSE_AT_GAME_START]
+            if bad:
+                raise OptionError(
+                    "Final Fantasy 1 PSP: 'starting_party_members' makes party "
+                    f"member(s) {bad} missing until their job-named item is "
+                    "found, so generation must know their job -- but their "
+                    "'starting_job' is 'choose_at_game_start'. Give those slots "
+                    "a fixed job or 'random_job'.")
 
     def create_regions(self) -> None:
         menu = Region("Menu", self.player, self.multiworld)
@@ -1466,6 +1720,21 @@ class FF1PSPWorld(World):
                 menu.locations.append(loc)
                 self._dyn_locs.append((loc, dg, gate_tok))
 
+        # Bestiarysanity locations: one per sampled monster. Detected at runtime
+        # via kill-count deltas against the client's first-connect baseline
+        # (save+0x1198 u16[203], indexed by monster id). With the progression
+        # sub-option off, fill may only park non-advancement items here.
+        self._bestiary_locs = []
+        b_chosen, _b_rules = self._bestiary_setup()
+        allow_prog = bool(self.options.bestiary_progression.value)
+        for mon in b_chosen:
+            loc = FF1PSPLocation(self.player, LOGIC.BESTIARY_LOCATION_NAMES[mon],
+                                 ID.bestiary_loc_id(mon), menu)
+            if not allow_prog:
+                loc.item_rule = lambda item: not item.advancement
+            menu.locations.append(loc)
+            self._bestiary_locs.append((loc, mon))
+
         # lute_tablets: locked "Lute Assembled" event holds the Lute itself, gated
         # (set_rules) on holding lute_tablets_required tablets. Every existing
         # LUTE-gated rule (Black Orb) then works unchanged -- the Lute is simply
@@ -1496,6 +1765,80 @@ class FF1PSPWorld(World):
         self._chaos.place_locked_item(self.create_item(VICTORY_ITEM))
         menu.locations.append(self._chaos)
 
+    def _overworld_zone_tables(self):
+        """This seed's (zones_overworld, companion high bytes), cached.
+
+        Rolled off a DERIVED rng (rando.overworld_zone_tables), NOT the main
+        shuffle stream: the bestiary has to know the seed's real overworld
+        encounters during create_regions/set_rules, and _seed_shuffle cannot run
+        that early -- it draws hint products, which need the location list that
+        create_regions is still building. The same pair is handed to
+        build_shuffle_tables later, so what logic gated on is byte-for-byte what
+        the player's game runs."""
+        if getattr(self, "_ow_tables_cache", None) is None:
+            self._ow_tables_cache = RANDO.overworld_zone_tables(
+                self.multiworld.seed, self.player,
+                harder=bool(self.options.harder_overworld_encounters.value))
+        return self._ow_tables_cache
+
+    def _bestiary_ow_sources(self):
+        """mon -> {('ow', (tier, class))} for THIS seed's rolled overworld."""
+        ow, ow_hi = self._overworld_zone_tables()
+        return LOGIC.overworld_sources(
+            ow, ow_hi if self.options.harder_overworld_encounters.value else None)
+
+    def _bestiary_setup(self):
+        """(chosen monster ids, mon -> OR-of-AND access alts) for bestiarysanity;
+        ([], {}) when off. Cached -- create_regions, create_items, set_rules and
+        fill_slot_data must all see the same sample. Eligibility = at least one
+        GUARANTEED source under this seed's options (logic.bestiary_rule_alts;
+        drawn pools never qualify); the sample is bestiarysanity_percent of
+        those."""
+        cached = getattr(self, "_bestiary_cache", None)
+        if cached is not None:
+            return cached
+        pct = int(self.options.bestiarysanity_percent.value)
+        if pct <= 0:                      # 0 = feature off entirely
+            self._bestiary_cache = ([], {})
+            return self._bestiary_cache
+        _op = self.options.open_progression.value
+        opts = {
+            "harder_ow": bool(self.options.harder_overworld_encounters.value),
+            "harder_dungeons": bool(self.options.harder_dungeon_encounters.value),
+            "forests": bool(self.options.dangerous_forests.value),
+            "ocean": bool(self.options.regional_ocean_encounters.value),
+            "river": bool(self.options.northern_river_encounters.value),
+            "bonus_excluded": bool(self.options.exclude_bonus_dungeons.value),
+            # Open-world toggles. The overworld access classes are built from
+            # logic.access_nodes, the same nodes the chest rules use, so these
+            # decide (for one) whether the Mirage-desert monsters are
+            # airship-only or Ship+Canal via the northern pier.
+            "early": _op >= OpenProgression.option_early,
+            "extended": _op >= OpenProgression.option_extended,
+            "northern_docks": bool(self.options.northern_docks.value),
+        }
+        minion_rules = {}
+        if self.options.boss_minions.value:
+            import random as _random
+            from . import boss_minions as BM
+            # Same derived stream as fill_slot_data's plan roll -> identical plan.
+            _rng = _random.Random(
+                f"{self.multiworld.seed}-{self.player}-bossminions")
+            plan = BM.roll_plan(self.options.boss_minions.value, _rng)
+            minion_rules = LOGIC.bestiary_minion_monsters(
+                plan, opts["bonus_excluded"])
+        ow_sources = self._bestiary_ow_sources()
+        rules = {}
+        for mon in LOGIC.BESTIARY_ELIGIBLE:
+            alts = LOGIC.bestiary_rule_alts(mon, opts, minion_rules, ow_sources)
+            if alts:
+                rules[mon] = alts
+        hunt = sorted(rules)
+        k = max(1, round(len(hunt) * pct / 100))
+        chosen = sorted(self.random.sample(hunt, min(k, len(hunt))))
+        self._bestiary_cache = (chosen, rules)
+        return self._bestiary_cache
+
     def create_items(self) -> None:
         # one item token per real chest = the vanilla contents multiset (a shuffle).
         # DATA.LOCATIONS and DATA.ITEM_POOL are parallel (gen_apdata emits them in
@@ -1515,7 +1858,21 @@ class FF1PSPWorld(World):
         # `vanilla` (job decided at char-creation, unknown at gen), we can't know, so
         # add all 6 scrolls. Fixed/random picks contribute their concrete job.
         swap_in = []
-        # Lute Tablets FIRST (progression -- must never be starved out of the
+        # Missing party members FIRST -- ahead even of tablets/shards: they
+        # are the only swap-in progression whose loss generation cannot
+        # detect (no logic rule counts them; a dropped tablet fails the
+        # beatability check, a dropped member just never exists), so they must
+        # never lose a starved filler race -- an extreme tablets yaml alone
+        # can overrun the ~250 filler slots, and the swap loop below silently
+        # ignores the overflow. At most 3 items; the landed-assert at the
+        # `fillers` list hard-fails if even those can't fit. One job-named
+        # item per missing BOTTOM row; the member is save state, not a
+        # location, so there is no net-new location to balance -- plain
+        # filler swaps. Duplicate jobs -> duplicate copies.
+        _party_items = [PARTY_MEMBER_ITEM_NAMES[_job]
+                        for _row, _job, _lvl in self._missing_members()]
+        swap_in += _party_items
+        # Lute Tablets next (progression -- must never be starved out of the
         # filler slots by tomes/scrolls). The tablet count is n_tab: one copy
         # balances the Princess NPC location below (seat of the removed Lute),
         # the other n_tab-1 swap in for filler here.
@@ -1579,9 +1936,32 @@ class FF1PSPWorld(World):
         if self.options.spell_tomes.value:
             swap_in += self._learnable_tome_names()
         fillers = [i for i, (_n, cls) in enumerate(kept) if cls == 'filler']
+        # Party-member items are swap_in[0:len(_party_items)]; nothing
+        # downstream detects their loss (no logic gate), so a shortfall is a
+        # hard failure, never a silent drop.
+        assert len(fillers) >= len(_party_items), \
+            f"party-member items don't fit the {len(fillers)} filler slots"
         for k, ji in enumerate(swap_in):
             if k < len(fillers):
                 pool[fillers[k]] = ji
+
+        # trap_percentage over the BASE POOL's own filler tokens (v276). Before
+        # this, only balance-slot fillers -- shop rows, dyn chests, bestiary,
+        # the demotions and the Excalibur seat -- ever rolled, so a 10% yaml
+        # actually trapped ~3% of the pool and the option's own text was wrong.
+        # Every filler is eligible now; the default was cut 10 -> 4 to hold the
+        # resulting trap count where it already was. Rolled AFTER the swap loop
+        # so the indices it consumed (party members, tablets, shards, gear,
+        # runes, scrolls, tomes) are no longer filler and cannot be trapped, and
+        # a slot the demote loop already turned into a trap is left alone rather
+        # than rolled twice.
+        _traps = set(TRAP_ITEM_NAMES)
+        for _i in fillers[len(swap_in):]:
+            if pool[_i] in _traps:
+                continue
+            _tr = self._trap_roll()
+            if _tr:
+                pool[_i] = _tr
 
         for name in pool:
             self.multiworld.itempool.append(self.create_item(name))
@@ -1643,13 +2023,10 @@ class FF1PSPWorld(World):
         # draw picked it (swapped in above), exactly like Masamune/Ultima/Ribbon.
         self.multiworld.itempool.append(self.create_item(self.get_filler_item_name()))
 
-        # Bahamut class-change turn-in (2026-07-08): NET-NEW randomized NPC location
-        # (logic.NPC_LOCATIONS ordinal 15), gated on AIRSHIP + Rat's Tail. Rat's Tail
-        # is already in the base `pool` (vanilla treasure idx 28) and Bahamut's native
-        # reward is the promotion itself (no item), so this location needs exactly ONE
-        # balancing filler item -- like a shop AP slot. The multiworld fill decides what
-        # actually lands at Bahamut.
-        self.multiworld.itempool.append(self.create_item(self.get_filler_item_name()))
+        # Bahamut (2026-08-27): NO LONGER an AP location (former NPC ordinal 15
+        # removed -- native promotion is his only reward), so its old balancing
+        # filler append is gone with it. Rat's Tail stays in the base `pool`
+        # (vanilla treasure idx 28) and still enables the native turn-in.
 
         # Shop AP stock adds one location per offer row -> as many more filler
         # items for balance (drawn from the filler consumable pool: Apples, Plus
@@ -1657,6 +2034,12 @@ class FF1PSPWorld(World):
         # were actually created, so a shop that was granted fewer rows than the
         # option asked for can never leave the pool unbalanced.
         for _ in range(len(self._shop_locs)):
+            self.multiworld.itempool.append(
+                self.create_item(self.get_filler_item_name()))
+
+        # Bestiarysanity: each sampled monster is a NET-NEW fillable location,
+        # balanced by one filler apiece (same mechanism as shop/dyn slots).
+        for _ in range(len(self._bestiary_locs)):
             self.multiworld.itempool.append(
                 self.create_item(self.get_filler_item_name()))
 
@@ -1718,6 +2101,33 @@ class FF1PSPWorld(World):
         def dungeon_gate(crystal):
             return LOGIC.FIEND_TOKEN[crystal] if bonus_cry else crystal
 
+        # starting_party_members: minimum LOGICAL PARTY SIZE gates (see
+        # logic.PARTY_GATE_*). Logical party = the members kept at game start
+        # plus every job-named party-member item held -- duplicate jobs are
+        # duplicate copies of ONE item name, so this counts copies, not names.
+        # party_gate(n) returns None when the gate cannot bind (full party, a
+        # threshold at or below the starting size, or lifted by the plando cap),
+        # and set_rules then leaves that location's rule untouched.
+        from worlds.generic.Rules import add_rule
+        _party_cap = self._party_gate_cap()
+        _party_keep = int(self.options.starting_party_members.value)
+        _party_names = tuple(PARTY_MEMBER_ITEM_NAMES.values())
+
+        def party_gate(n):
+            if n > _party_cap or n <= _party_keep:
+                return None
+            need = n - _party_keep
+
+            def rule(state, _need=need):
+                return sum(state.count(nm, player)
+                           for nm in _party_names) >= _need
+            return rule
+
+        def gate_party(loc, n):
+            r = party_gate(n)
+            if r is not None:
+                add_rule(loc, r)
+
         # chests: region rule (+ unmapped fallback) AND per-chest token
         dlc_gate = {d: tok for (d, _n, _f, _c, tok, _o) in LOGIC.BONUS_DUNGEONS}
         for loc, idx in self._chest_locs:
@@ -1733,6 +2143,7 @@ class FF1PSPWorld(World):
                 else:
                     alts = []
                 set_rule(loc, make_rule(alts, extra))
+                gate_party(loc, LOGIC.PARTY_GATE_STATIC_DG[sdg])
                 continue
             region, chest_token = LOC_INFO.get(idx, (None, None))
             region_rule = (LOGIC.UNMAPPED_RULE if region is None
@@ -1743,6 +2154,14 @@ class FF1PSPWorld(World):
             elif chest_token == "TitanFed":
                 extra.append(LOGIC.TITAN_FED)
             set_rule(loc, make_rule(region_rule, extra))
+
+        # Bestiarysanity: each monster's rule = OR over its guaranteed spawn
+        # sources under this seed's options (logic.bestiary_rule_alts).
+        _b_chosen, _b_rules = self._bestiary_setup()
+        for loc, mon in self._bestiary_locs:
+            set_rule(loc, make_rule(_b_rules[mon]))
+            if mon in LOGIC.PARTY_GATE_MONSTER:
+                gate_party(loc, LOGIC.PARTY_GATE_MONSTER[mon])
 
         # events / NPC locations: region rule AND event-specific extra requirements
         # crystals_needed < 4: the Black Orb event drops the crystal tokens from
@@ -1764,6 +2183,8 @@ class FF1PSPWorld(World):
                 set_rule(loc, orb_rule)
                 continue
             set_rule(loc, make_rule(region_rules.get(region, []), extra))
+            if loc.name in LOGIC.PARTY_GATE_EVENT:
+                gate_party(loc, LOGIC.PARTY_GATE_EVENT[loc.name])
         # NPCs: region rule AND the NPC's own tokens, OR any NPC_ALT_RULES bypass
         # (Sarda is also reachable by a plain airship landing) -- npc_rule_alts folds
         # both into one OR-of-ANDs so extra is already baked in.
@@ -1802,6 +2223,8 @@ class FF1PSPWorld(World):
             else:
                 alts = []
             set_rule(loc, make_rule(alts, extra))
+            if dg in LOGIC.PARTY_GATE_CLEAR_DG:
+                gate_party(loc, LOGIC.PARTY_GATE_CLEAR_DG[dg])
 
         # (RETIRED 2026-07-27: the late_activatable_equipment placement gate stood
         # here -- an add_item_rule forbidding spell-on-use gear at our pre-airship
@@ -1869,11 +2292,31 @@ class FF1PSPWorld(World):
         # Chest 11" (idx 127) is physically on map 90 = Marsh Cave, so it is now
         # "Marsh Cave Chest #1" and correctly drops OUT of Nerrick's same-map rule.
         SAME_MAP_TURNIN = {
-            "Crown":        "Western Keep ",    # Astos
-            "Nitro Powder": "Mount Duergar ",   # Nerrick
-            "Adamantite":   "Mount Duergar ",   # Dwarf Smith (same map as Nerrick)
+            "Crown":        ("Western Keep ",),    # Astos
+            "Nitro Powder": ("Mount Duergar ",),   # Nerrick
+            "Adamantite":   ("Mount Duergar ",),   # Dwarf Smith (same map as Nerrick)
+            # The Lute is played on the plate in the REVISITED shrine (past); a Lute
+            # (or final tablet, which derives it) granted anywhere in that map is
+            # inert until the room reloads (live report 2026-08-27). Plaza + basement
+            # are both the revisited map; F1 chests are the present-day shrine and
+            # stay allowed.
+            "Lute":         ("Chaos Shrine Plaza ", "Chaos Shrine Basement "),
+            "Lute Tablet":  ("Chaos Shrine Plaza ", "Chaos Shrine Basement "),
+            # The Earth Rod opens the mud gate inside the Cavern of Earth itself;
+            # same-map grant is inert until re-entry. Lower chests already sit
+            # behind the Rod (fill never places it there), so Upper is the gap.
+            "Earth Rod":    ("Cavern of Earth Upper ",),
+            # Matoya consumes the Crystal Eye in her own cave; her NPC location
+            # already self-blocks it ([CRYSTAL_EYE] extra req) but the three cave
+            # chests were uncovered.
+            "Crystal Eye":  ("Matoya's Cave ",),
+            # The Elf Prince consumes the Jolt Tonic in the castle map that also
+            # holds the treasury chests. Single-world fill self-prevents (chests
+            # need the Mystic Key, the Key needs the Tonic) but a multiworld Key
+            # from another sphere reopens the hole.
+            "Jolt Tonic":   ("Elven Castle ",),
         }
-        for item_name, loc_prefix in SAME_MAP_TURNIN.items():
+        for item_name, loc_prefixes in SAME_MAP_TURNIN.items():
             code = ITEM_NAME_TO_ID[item_name]
 
             def _forbid(item, _code=code):
@@ -1881,7 +2324,7 @@ class FF1PSPWorld(World):
             for loc in ([l for l, _i in self._chest_locs]
                         + [l for l, _r, _e in (self._event_locs + self._npc_locs)]
                         + [l for l, _s, _r in self._shop_locs]):
-                if loc.name.startswith(loc_prefix):
+                if loc.name.startswith(loc_prefixes):
                     add_item_rule(loc, _forbid)
 
         # lute_tablets: a tablet must never land behind the Lute itself. Any location
@@ -1890,7 +2333,8 @@ class FF1PSPWorld(World):
         # which the count rule cannot see through (the Lute is an EVENT item at the
         # locked "Lute Assembled" location, so fill's own progression logic still lets
         # a tablet sit behind a LUTE-gated door). The 3F plaza is only CRYSTALS_PLACED
-        # gated -- tablets there are fine and stay allowed.
+        # gated -- logically fine for tablets, but SAME_MAP_TURNIN above bans them
+        # there anyway (same-map grant is inert until the room reloads).
         if self._lute_evt is not None:
             def _requires_lute(region_rule, extra=()):
                 if LOGIC.LUTE in set(extra):
@@ -2026,6 +2470,7 @@ class FF1PSPWorld(World):
                      lambda state: state.has(LOGIC.LEVISTONE_SHARD, player, sneed))
 
         set_rule(self._chaos, make_rule([LOGIC.BLACK_ORB_DESTROYED]))
+        gate_party(self._chaos, LOGIC.PARTY_GATE_GOAL)
         self.multiworld.completion_condition[player] = \
             lambda state: state.has(VICTORY_ITEM, player)
 

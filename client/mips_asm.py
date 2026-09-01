@@ -44,6 +44,7 @@ def sb(rt, off, base):  return _i(0x28, base, rt, off)
 def sh(rt, off, base):  return _i(0x29, base, rt, off)
 
 def srl(rd, rt, sh):    return word((_r(rt)<<16)|(_r(rd)<<11)|((sh&31)<<6)|0x02)
+def srlv(rd, rt, rs):   return word((_r(rs)<<21)|(_r(rt)<<16)|(_r(rd)<<11)|0x06)  # rd = rt >> rs
 def sra(rd, rt, sh):    return word((_r(rt)<<16)|(_r(rd)<<11)|((sh&31)<<6)|0x03)
 def sll(rd, rt, sh):    return word((_r(rt)<<16)|(_r(rd)<<11)|((sh&31)<<6)|0x00)
 def addu(rd, rs, rt):   return word((_r(rs)<<21)|(_r(rt)<<16)|(_r(rd)<<11)|0x21)

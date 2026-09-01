@@ -119,7 +119,7 @@ BOSS_POOL_SETS = [
         ((0x52, "Pyrolisk"),        (0x43, "Red Dragon")),
         ((0x5D, "Hydra"),           (0x5E, "Fire Hydra"))]),
     ("Scarmiglione", (0x104, 0x105), [
-        ((0xAA, "Bonesnatch"),      (0xBD, "Reaper")),
+        ((0x2A, "Ghost"),           (0xAA, "Bonesnatch")),
         ((0xC2, "Revenant"),        (0x2D, "Ghast")),
         ((0x24, "Minotaur Zombie"), (0xBF, "Skuldier")),
         ((0x16, "Bloodbones"),      (0x44, "Dragon Zombie"))]),

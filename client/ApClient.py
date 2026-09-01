@@ -18,6 +18,7 @@ Chaos goal detection is automatic (flags loop polls the Chaos-defeated bit
 
 import asyncio
 import atexit
+import base64
 import contextlib
 import logging
 import os
@@ -41,6 +42,8 @@ from . import grant_policy as GP
 from . import name_banks as NB
 from . import tome_names as TN
 from . import iso_patcher as IP
+from . import trap_fuse as TF
+from . import trap_store as TS
 # Imported EAGERLY on purpose: the watcher's whole job is to survive the zip
 # being swapped, so it must already be in memory before that can happen.
 from . import apworld_watch as APWATCH
@@ -249,6 +252,23 @@ class _ByteSnapshot:
 
 
 class FF1PSPCommandProcessor(ClientCommandProcessor):
+    # Renamed commands whose old name still dispatches. They stay in
+    # self.commands (so typing them works) but are dropped from /help,
+    # which is how a rename gets learned instead of merely announced.
+    DEPRECATED_ALIASES = ("ff1psp_logs",)
+
+    def get_help_text(self) -> str:
+        """Upstream listing minus DEPRECATED_ALIASES."""
+        # Shadow the class-level dict on the instance for the duration of
+        # the call: CommandProcessor reads self.commands, and mutating the
+        # class attribute would hide the alias from dispatch too.
+        self.commands = {k: v for k, v in type(self).commands.items()
+                         if k not in self.DEPRECATED_ALIASES}
+        try:
+            return super().get_help_text()
+        finally:
+            del self.commands
+
     def _cmd_goal(self):
         """Report the goal (Chaos defeated) to the server. Manual fallback --
         the flags loop now auto-detects Chaos-defeated (0x11520 b6) and reports."""
@@ -347,7 +367,8 @@ class FF1PSPCommandProcessor(ClientCommandProcessor):
         use, so you do not have to find or type a path; pass one to test a
         different file. Run this whenever you see PATCH FAILED."""
         import os
-        from .launcher import load_cfg, find_iso
+        from .launcher import (load_cfg, find_iso, iso_disc_id, iso_region,
+                               iso_verdict)
         from . import eboot_patch as E
         from .cso_decompress import image_kind
 
@@ -365,6 +386,15 @@ class FF1PSPCommandProcessor(ClientCommandProcessor):
                         "and pick your ISO again.")
             return
         self.output(f"size: {os.path.getsize(iso) / (1 << 20):.0f} MB")
+        # The disc id answers "is this even the right game / region" before any
+        # BOOT.BIN work, and it is the one line a player can quote back.
+        disc = iso_disc_id(iso)
+        if disc:
+            where = iso_region(disc)
+            self.output(f"disc id: {disc}" + (f" ({where})" if where else ""))
+        else:
+            self.output("disc id: not visible in the header "
+                        "(normal for a compressed image)")
 
         kind = image_kind(iso)
         if kind not in ("iso", "unknown"):
@@ -380,6 +410,16 @@ class FF1PSPCommandProcessor(ClientCommandProcessor):
                             "Convert it to a plain .iso (PPSSPP: Game "
                             "settings > Tools, or maxcso), then run "
                             "/purge_ff1psp_setup confirm and pick the .iso.")
+            return
+
+        ok, why = iso_verdict(iso)
+        if not ok and disc:
+            # Wrong game or wrong region: the BOOT.BIN report below would only
+            # say "not a plaintext ELF" and send them chasing their dump.
+            self.output(f"VERDICT: unusable -- {why}")
+            self.output("Once you have a good file: /purge_ff1psp_setup "
+                        "confirm, then restart the client and pick it at the "
+                        "prompt.")
             return
 
         try:
@@ -468,7 +508,7 @@ class FF1PSPCommandProcessor(ClientCommandProcessor):
             for sp in grp["spells"]:
                 self.output(f"  {grp['title']}: {sp['name']}  {sp['price']}g")
 
-    def _cmd_ff1psp_logs(self):
+    def _cmd_logs(self):
         """Save and export debug files: logs, seed's options, the game's patch
         state and a read-only snapshot of the running game. Run this whenever
         something looks wrong, then send the zip file it makes with whomever
@@ -493,15 +533,28 @@ class FF1PSPCommandProcessor(ClientCommandProcessor):
         async def go():
             # The RAM read must happen on the asyncio thread that owns the
             # bridge; the zip write is blocking I/O, so it goes to an executor.
-            ram = None
+            ram = wedge = None
             if ctx is not None and ctx.psp is not None:
                 try:
                     ram = await asyncio.wait_for(DB.snapshot_ram(ctx), 20)
                 except Exception as e:
                     ram = {"error": repr(e)}
+                # Is the emulated CPU actually advancing? Memory I/O rides
+                # direct process memory, so a frozen game answers every poll
+                # and the log looks healthy -- without this a "hard freeze"
+                # report has no game-side evidence at all. Read-only. 30s:
+                # against a HUNG PPSSPP the debugger rpcs ride their timeouts
+                # (snapshot_wedge stops probing after one dead sample, but that
+                # sample plus the churn sweep still needs room) -- and losing
+                # this to the outer timeout would discard the churn verdict,
+                # the one signal that works on a hung process.
+                try:
+                    wedge = await asyncio.wait_for(DB.snapshot_wedge(ctx), 30)
+                except Exception as e:
+                    wedge = {"error": repr(e)}
             try:
                 path = await asyncio.get_event_loop().run_in_executor(
-                    None, functools.partial(DB.build_bundle, ctx, ram))
+                    None, functools.partial(DB.build_bundle, ctx, ram, wedge))
             except Exception as e:      # build_bundle is defensive, but the
                 finish(None, e)         # disk can still be full / read-only
                 return
@@ -514,6 +567,11 @@ class FF1PSPCommandProcessor(ClientCommandProcessor):
                 finish(None, e)
             return
         ctx.run_async(go())
+
+    def _cmd_ff1psp_logs(self):
+        """Old name for /logs. Kept so anything that still tells players
+        to type it keeps working; /help lists the short name only."""
+        self._cmd_logs()
 
     def _cmd_purge_ff1psp_setup(self, confirm: str = ""):
         """Forget this machine's FF1 PSP setup so the next connect behaves like a
@@ -675,7 +733,11 @@ class FF1PSPContext(CommonContext):
                                           # the White Cleric dia INT accumulator
         self._bdc_mb = None               # cached BDC1 mailbox addr (bonus dyn chests)
         self._buy_mb = None               # cached BUYB mailbox addr (shop purchases)
+        self._rp_mb = None                # cached RPMK mailbox addr (reduced party
+                                          # held-row mask; armed by _member_loop)
         self._steal_icon_mb = None        # cached SPRB mailbox addr (steal-cue icon)
+        self._sng_mb = None               # cached SNGD mailbox addr (null-holder
+                                          # guard skip counter, u32 at +4)
         self._steal_icon_restore = None   # (entry addr, saved bytes) of borrowed def 19
         self._steal_icon_task = None      # pending fade-out task for the loot cue
         self._steal_arm_task = None       # pending DELAYED-arm task for the loot cue
@@ -684,6 +746,12 @@ class FF1PSPContext(CommonContext):
         self.bonus_dungeon_crystals = False   # bonus_dungeon_crystals yaml: crystals
                                           # activate by beating a Soul-of-Chaos
                                           # superboss (see _bonus_crystal_loop)
+        self._crystals_beaten = None      # crystals ACTUALLY earned in-game (Fiend
+                                          # story flags / bonus shadow bits), last
+                                          # value read by _crystal_count_loop. None
+                                          # until the first successful read; the
+                                          # tracker then falls back to its fixpoint
+                                          # count. Display only, never drives logic.
         self.lute_tablets_required = 0    # lute_tablets yaml: tablets to assemble the
                                           # Lute (0 = off, Lute is a normal AP item)
         self._tablet_hw = 0               # STICKY high-water of Lute Tablet copies seen
@@ -708,8 +776,56 @@ class FF1PSPContext(CommonContext):
                                           # _ap_item_to_game returns (None, None, 0) for
                                           # it and the cat-is-None branch only logs when
                                           # qty > 0, so nothing ever printed per pickup
+        self.missing_party = []           # starting_party_members plan from slot_data:
+                                          # [row, base job, join_level] per missing
+                                          # BOTTOM row ([] = full party). Drives
+                                          # _member_loop / _member_missing_rows.
+        self._member_hw = {}              # STICKY per-job high-water of party-member
+                                          # item copies seen in items_received (dup
+                                          # jobs share one id, so _ever_won can't
+                                          # count them; a joined member must never
+                                          # un-join on the disconnect blip)
+        self._member_hold_rows = None     # rows the member loop currently OWNS
+                                          # (unjoined plan characters at their
+                                          # CURRENT formation positions), refreshed
+                                          # every _member_loop tick; None = loop
+                                          # hasn't ticked (consumers fall back to
+                                          # the plan's creation slots)
+        self._member_key = None           # (seed_name, slot) the sticky member
+                                          # counters belong to; a connect to a
+                                          # DIFFERENT slot resets them
+        # Last TrackerState.tokens (items + derived event gates). The Bestiary
+        # strip paints its in-logic / shine states off this, exactly as the
+        # Tracker strip does -- refresh_tracker is the only writer.
+        self._tracker_tokens = None
+        self._tracker_section_logic = None
+        self.bestiary = None              # slot_data "bestiary" dict (bestiarysanity):
+                                          # {"monsters": [mon ids], "progression": b,
+                                          # "opts": {...}}; None = option off/old seed
+        self._bestiary_baseline = None    # list[203] kill counts at first connect of
+                                          # this seed (server DataStorage; new kills
+                                          # only -- NG+ carryover never auto-checks)
+        self._bestiary_base_known = False  # True once Retrieved/SetReply answered
+                                          # (baseline may legitimately be None until
+                                          # the first stable snapshot is stored)
+        self._bestiary_snap = None        # last raw counts read (tab display +
+                                          # snapshot stability gate)
         self.death_link_on = False        # yaml death_link: DeathLink tag + wipe loop
         self.death_link_severity = 3      # yaml: living members killed per received death
+        self._trap_queue = []             # received trap items awaiting their battle:
+                                          # dicts {"kind", "idx"} (see _trap_loop)
+        self._trap_seen_idx = set()       # items_received indices this session has
+                                          # already enqueued (still pending OR long
+                                          # since fired). The DataStorage restore
+                                          # dedups against this -- see trap_store
+        self._trap_armed = None           # the trap whose TRP1 arming is live
+        self._trap_gap = 0                # battles to wait before arming the
+                                          # next trap (backlog spacing only)
+        self._trap_mb = None              # TRP1 mailbox address (located once)
+        self._trap_fired_seen = None      # last cave fire-counter we observed
+                                          # (waiting for valid unit records)
+        self._trap_restored = False       # the stored queue has been merged in once
+        self._trap_stored = None          # last list we wrote to DataStorage (dedup)
         self._dl_pending = False          # a received DeathLink awaits application
         self._dl_guard = False            # suppress sending a death WE caused (received
                                           # link killed the whole party); clears when
@@ -777,6 +893,9 @@ class FF1PSPContext(CommonContext):
         self._float_rescan = False        # force a floating-bank rescan (save load /
                                           # town toggle can spawn a NEW bank copy)
         self._bonus_latch = False         # in a Soul-of-Chaos bonus dungeon (latched)
+        self._veh_loan = set()            # D.BONUS_VEHICLE_LOAN rows this client
+                                          # set on a bonus floor, owed back on the
+                                          # overworld (see _bonus_vehicle_loan)
         self._rune_zone = None            # latched answer for _rune_borrow_zone:
                                           # None = unknown (make no borrow writes),
                                           # True = release the id-35 borrow, False = hold
@@ -797,6 +916,11 @@ class FF1PSPContext(CommonContext):
         self._patches = []
         self._bridge_started = False
         self._tasks = []
+        # The new-game one-shot loops, by registry name -> their live task. They
+        # RETURN once applied, so a SECOND New Game in the same client session
+        # would find nobody home; _rearm_newgame_oneshots re-spawns whichever of
+        # them have finished. See _NEWGAME_ONESHOTS.
+        self._oneshot_tasks = {}
         # The 0x08D1xxxx save block is heap-allocated and MOVES between
         # sessions (deltas 0/+0x1000/+0x4000 observed). save_delta is the
         # session's offset vs the canonical layout, resolved from the game's
@@ -974,6 +1098,57 @@ class FF1PSPContext(CommonContext):
             return False
         return secs <= D.NEW_GAME_PLAY_TIME_MAX and not any(bf)
 
+    # Registry names of the loops that apply this seed's NEW-GAME state and then
+    # RETURN forever. They are one-shot per SAVE BLOCK, but nothing re-spawned
+    # them, so they were one-shot per CLIENT SESSION: a player who started a
+    # game, died before saving and began a second New Game got a vanilla party,
+    # vanilla starting gil, unstripped Monks and vanilla config defaults
+    # (reported live 2026-08-29 -- "I started with a Red Mage, died, started a
+    # new game, and got the Warrior"). The GATE was never the problem: the save
+    # block's init marker is genuinely absent again after new-game init, so
+    # _init_needed re-latches True correctly -- there was simply no loop left
+    # alive to hear it.
+    _NEWGAME_ONESHOTS = ("party", "starting_gil", "naked_monks", "movement")
+
+    def _rearm_newgame_oneshots(self):
+        """Re-spawn whichever new-game one-shots have already finished.
+
+        Called ONLY on the latch edge that means "this save block is a genuinely
+        fresh new game" (_init_needed None -> True) -- marker absent AND party
+        records fresh. Never on a save LOAD: re-running these there is the
+        2026-08-17 wrong-class / double-paid-purse bug, and "loaded" is exactly
+        what _init_needed already separates out.
+
+        A loop still RUNNING is left strictly alone. On the FIRST latch of a
+        session all four are alive and waiting for precisely this state, so
+        re-spawning them would double-apply; only a done() task is replaced.
+        That also covers the case a naive "is this the 2nd new game?" counter
+        misses -- a client attached to a game already underway, whose one-shots
+        all returned "game underway" long before the player quit to the title
+        and started their first New Game of the session."""
+        dead = []
+        for name in self._NEWGAME_ONESHOTS:
+            t = self._oneshot_tasks.get(name)
+            if t is not None and t.done():
+                dead.append(name)
+        if not dead:
+            return
+        # _naked_monks_loop waits on both of these before stripping, so the
+        # strip payout rides on top of the yaml purse instead of under it. They
+        # are still True from the previous game; clear them for the new one.
+        # (Both are only ever set True immediately before their loop returns, so
+        # a still-running loop always has its flag False -- clearing is a no-op
+        # for any one-shot not in `dead`.)
+        self._party_applied = False
+        self._starting_gil_applied = False
+        for name in dead:
+            fn = getattr(self, f"_{name}_loop")
+            t = asyncio.create_task(self._guard(fn, name))
+            self._oneshot_tasks[name] = t
+            self._tasks.append(t)       # so shutdown() still cancels them
+        logger.info("  [newgame] another New Game on this session -> re-armed "
+                    f"{', '.join(dead)}")
+
     async def _init_marker_tick(self):
         """Maintain the init marker and the one-shot latch. One call per
         save-delta tick, and the only place either is written."""
@@ -992,6 +1167,32 @@ class FF1PSPContext(CommonContext):
             except Exception:
                 pass
             return
+        # SAME-BLOCK NEW GAME. _init_needed is dropped back to None only by
+        # _save_delta_loop, on a delta CHANGE -- and a death before the first
+        # save takes the player to the title and into a second New Game without
+        # the save struct necessarily moving. Meanwhile the stamp at the bottom
+        # of this function re-asserts the marker on every tick once a verdict is
+        # latched, so the game's new-game init zeroing our region gets papered
+        # over within a second and game #2 looks like a continuation of game #1.
+        # That is the 2026-08-29 report: Red Mage party, died before saving, New
+        # Game, party came back as the vanilla Warrior.
+        #
+        # So treat an ABSENT marker over a FRESH party as a new game whatever the
+        # latched verdict says: drop to undecided and return WITHOUT stamping, so
+        # the next tick runs the ordinary path and re-latches (and re-arms). Both
+        # halves are required -- marker-absent alone is also how a LEGACY
+        # pre-marker save file reads, and stamping that one is the migration, so
+        # a legacy save mid-game (party not fresh) must fall through to the stamp.
+        # Self-limiting to ONE re-latch: the tick that re-latches also stamps.
+        if self._init_needed is not None:
+            try:
+                absent = ((await self.psp.read(self.sa(D.AP_INIT_MARKER_SA), 1))[0]
+                          != D.AP_INIT_MARKER_VALUE)
+            except Exception:
+                absent = False
+            if absent and await self._party_records_fresh():
+                self._init_needed = None
+                return
         if self._init_needed is None:
             if not await self._party_records_fresh():
                 self._init_needed = False
@@ -1003,10 +1204,15 @@ class FF1PSPContext(CommonContext):
                 "  [newgame] party reads Lv1/EXP0, but this save block has "
                 "already been through client init -> LOADED SAVE: jobs, starting "
                 "gil, monk strip and config defaults all stand down")
+            if self._init_needed:
+                # A second (or later) New Game this session: the one-shot loops
+                # applied game #1 and returned. Bring back the finished ones.
+                self._rearm_newgame_oneshots()
         # Keep it stamped once decided, in BOTH directions: a new game needs the
         # stamp to ride into its first save, and a legacy file that got here on the
         # play-time leg needs it so the next load lands on the marker instead.
-        # Re-asserting because _reset_slotmagic_state zeroes 0x80C..0x83B on NG+.
+        # (_reset_slotmagic_state used to zero this byte along with 0x80C..0x83B;
+        # it now preserves it, so the marker only ever changes here.)
         try:
             a = self.sa(D.AP_INIT_MARKER_SA)
             if (await self.psp.read(a, 1))[0] != D.AP_INIT_MARKER_VALUE:
@@ -1372,6 +1578,64 @@ class FF1PSPContext(CommonContext):
                                  "use": use})
         return out
 
+    def _bestiary_ow_sources(self):
+        """mon -> overworld places, from THIS seed's rolled zones_overworld.
+
+        Every seed ships that table in slot_data["shuffle_tables"] (the roll runs
+        in both modes, not just harder_overworld), so the tab never has to fall
+        back on the vanilla rows baked into bestiary_data -- those name places
+        the monster cannot spawn in (Cobra listed under Cornelia while its real
+        zones were tier 5-8, live 2026-08-31). Cached: the table cannot change
+        within a session."""
+        if getattr(self, "_ow_sources_cache", None) is None:
+            enc = (self.slot_data or {}).get("shuffle_tables") or {}
+            try:
+                ow = base64.b64decode(enc["zones_overworld"])
+            except Exception:
+                return {}
+            hi = None
+            if enc.get("zones_overworld_hi"):
+                try:
+                    hi = base64.b64decode(enc["zones_overworld_hi"])
+                except Exception:
+                    hi = None
+            self._ow_sources_cache = TRACKER.LOGIC.overworld_sources(ow, hi)
+        return self._ow_sources_cache
+
+    def _bestiary_payload(self):
+        bst = self.bestiary
+        checked, killed, flags = set(), set(), {}
+        if bst:
+            base, snap = self._bestiary_baseline, self._bestiary_snap
+            for m in bst.get("monsters") or []:
+                m = int(m)
+                lid = ID.bestiary_loc_id(m)
+                if lid in self.checked_locations or lid in self.sent_locations:
+                    checked.add(m)
+                if (base is not None and snap is not None
+                        and 0 <= m < len(snap) and snap[m] > base[m]):
+                    killed.add(m)
+                info = self.locations_info.get(lid)
+                if info is not None:
+                    flags[m] = int(getattr(info, "flags", 0) or 0)
+        sd = self.slot_data or {}
+        return TRACKER.bestiary_view(
+            bst, sd.get("boss_minions_plan"), killed, checked, flags,
+            tokens=self._tracker_tokens,
+            party_cap=int(sd.get("party_logic_cap") or 0),
+            section_logic=self._tracker_section_logic,
+            ow_sources=self._bestiary_ow_sources())
+
+    def refresh_bestiary(self):
+        """Rebuild + repaint the Bestiary tab. Cheap and idempotent."""
+        ui = getattr(self, "ui", None)
+        if ui is None or not hasattr(ui, "update_bestiary"):
+            return
+        try:
+            ui.update_bestiary(self._bestiary_payload())
+        except Exception as ex:
+            logger.warning(f"Bestiary refresh failed: {ex}")
+
     def refresh_shops(self):
         """Rebuild + repaint the Shops tab. Cheap; safe to call on any event that
         can change visited towns, scouted contents, or checks."""
@@ -1456,6 +1720,52 @@ class FF1PSPContext(CommonContext):
                            if self._shard_hw >= need else ""))
         return self._shard_hw
 
+    def _member_counts(self):
+        """Sticky per-base-job counts of party-member item copies received
+        (starting_party_members seeds). Duplicate jobs in the plan share ONE
+        AP item id (two missing Thieves = two copies of "Thief"), so the
+        sticky-set _ever_won can't count them; count the live items_received
+        and keep per-job high-waters instead (the list empties during a
+        disconnect -- a joined member must never un-join)."""
+        cnt = {}
+        for it in self.items_received:
+            if ID.is_party_member(it.item):
+                j = ID.party_member_job(it.item)
+                cnt[j] = cnt.get(j, 0) + 1
+        for j, c in cnt.items():
+            self._member_hw[j] = max(self._member_hw.get(j, 0), c)
+        return self._member_hw
+
+    def _member_plan_split(self):
+        """(missing, satisfied) partition of the missing_party plan by AP truth.
+        missing = [row, ...] still gone; satisfied = [(row, job, join_level),
+        ...] whose job-item count covers them. Copies of one job fill the
+        TOP-MOST missing plan row first (mirrors the slot_data comment in
+        fill_slot_data). Pure python over items_received -- cheap per tick."""
+        counts = dict(self._member_counts())
+        missing, satisfied = [], []
+        for row, job, lvl in self.missing_party:
+            if counts.get(job, 0) > 0:
+                counts[job] -= 1
+                satisfied.append((row, job, lvl))
+            else:
+                missing.append(row)
+        return missing, satisfied
+
+    def _member_missing_rows(self):
+        """Rows the member feature currently OWNS -- missing (item not
+        received) AND satisfied-but-not-yet-joined -- at their CURRENT
+        formation positions. The set _ko_sync_loop must not stamp, grant_exp
+        must skip and _limbo_revive must not pick. Reads the cache _member_loop refreshes every tick; before its
+        first tick it falls back to ALL plan creation slots (a conservative
+        0.5s over-skip is harmless; the reverse -- touching a held row -- is
+        not). Empty when the feature is off or everyone has joined."""
+        if not self.missing_party:
+            return frozenset()
+        if self._member_hold_rows is not None:
+            return self._member_hold_rows
+        return frozenset(r for r, _j, _lv in self.missing_party)
+
     def _key_won(self, kid):
         """Is cat-0 key item `kid` "won" for strip/restore/hold purposes?
         Normally = its AP item id is in the sticky _ever_won. Two piece modes
@@ -1485,29 +1795,41 @@ class FF1PSPContext(CommonContext):
                 tablet_count=self._tablet_count(),
                 rune_count=self._rune_count(),
                 shard_count=self._shard_count(),
+                crystals_beaten=self._crystals_beaten,
+                member_counts=self._member_counts(),
             )
         except Exception as ex:
             logger.warning(f"Tracker evaluation failed: {ex}")
             return
+        self._tracker_tokens = frozenset(state.tokens)
+        # Region logic, snapshotted for the Bestiary strip: its tabs mirror the
+        # Tracker's, so they must read the SAME section_in_logic answer.
+        self._tracker_section_logic = {
+            k: state.section_in_logic(k) for k in TRACKER.SECTION_KEYS}
         ui.update_tracker(state)
 
     def _register_dyn_chest_names(self):
         """Teach the LOCAL name lookup the dynamic-chest locations this seed
         created but the datapackage does not carry.
 
-        __init__.py registers only `range(_floors)` ordinals per bonus dungeon
-        (5/10/20/40) into LOCATION_NAME_TO_ID, while create_regions creates
-        locations all the way up to the yaml cap (up to 100). Every ordinal in
-        between is a REAL location -- it generates, it holds items, its check
-        sends -- but its id is not in the datapackage, so the server, the
-        tracker and every hint render it as "Unknown location (ID: 17371219)".
-        Live 2026-08-08: Prime's Oxyale, a progression item, was hinted at
-        exactly that id (Hellfire Chasm ordinal 19, past its 10 floors).
+        LEGACY REPAIR. __init__.py used to register only `range(_floors)`
+        ordinals per bonus dungeon (5/10/20/40) into LOCATION_NAME_TO_ID, while
+        create_regions creates locations all the way up to the yaml cap. Every
+        ordinal in between is a REAL location -- it generates, it holds items,
+        its check sends -- but its id was not in the datapackage, so the server,
+        the tracker and every hint rendered it as "Unknown location (ID:
+        17371219)". Live 2026-08-08: Prime's Oxyale, a progression item, was
+        hinted at exactly that id (Hellfire Chasm ordinal 19, past its 10
+        floors).
 
-        Fixing the id registration would change the datapackage and break every
-        in-flight seed, so this is deliberately CLIENT-SIDE ONLY: it repairs the
-        display for seeds that already exist, and changes nothing about
-        generation, ids, or what gets sent.
+        __init__.py now registers the full ids.DYNCHEST_STRIDE block per
+        dungeon, so seeds rolled after 2026-08-29 need none of this -- and
+        crucially they are nameable in FOREIGN clients too, which this repair
+        never reached (live: Meyrime's Storm Badge, Whisperwind ordinal 56).
+        Kept for seeds generated before that change: it repairs the display for
+        worlds that already exist, and changes nothing about generation, ids, or
+        what gets sent. It is a no-op once the datapackage names everything
+        (`added` comes out empty).
 
         Ordinals at or past DYNCHEST_STRIDE are INCLUDED. The first version
         skipped them, reasoning that they alias into the next dungeon's id
@@ -1522,8 +1844,8 @@ class FF1PSPContext(CommonContext):
         wants (dungeon 0 with a cap of 100 really would collide with dungeon
         1). A colliding id is genuinely unnameable; an uncontested one is not.
 
-        Note this only fixes the DISPLAY. `_bonus_dyn_loop.next_ordinal` scans
-        `range(DYNCHEST_STRIDE)`, so past-stride chests still never send a
+        Note this only fixes the DISPLAY. `ids.dyn_chest_pending` clamps its
+        scan to DYNCHEST_STRIDE, so past-stride chests still never send a
         check in-game; they resolve only when the server releases them. See the
         dyn-chest-caps memory.
 
@@ -1590,6 +1912,17 @@ class FF1PSPContext(CommonContext):
             # Random starting party: 4 entries (job id 0..5, or None = vanilla).
             self.party_jobs = list(sd.get("party_jobs") or [None, None, None, None])
             self.thief_steal = bool(sd.get("thief_steal", False))
+            # bestiarysanity: sampled monster ids + option context (None on old
+            # seeds / option off). The kill-count BASELINE is server DataStorage
+            # (like bought hints): new kills only, so it must survive client
+            # restarts without trusting the save (NG+ carries the bestiary over).
+            self.bestiary = sd.get("bestiary") or None
+            self._bestiary_baseline = None
+            self._bestiary_base_known = False
+            if self.bestiary:
+                logger.info(f"  bestiarysanity: {len(self.bestiary.get('monsters') or [])} "
+                            f"monster checks this seed")
+                asyncio.create_task(self._bestiary_store_fetch())
             # DefaultOnToggle: absent means "seed predates the option", not "off".
             self.auto_sell_unusable = bool(
                 sd.get("auto_sell_unusable_items", True))
@@ -1619,6 +1952,25 @@ class FF1PSPContext(CommonContext):
             # Levistone (possession + airship bits; 0 = off, normal AP item).
             self.levistone_shards_required = int(
                 sd.get("levistone_shards_required") or 0)
+            # starting_party_members: missing-member plan, [row, base job 0..5,
+            # join_level] per missing BOTTOM row ([] / absent = full party).
+            # _member_loop soft-deads these rows until the matching job-named
+            # item count covers them, then revives with the join-level EXP floor.
+            self.missing_party = [[int(r), int(j), int(lv)] for r, j, lv
+                                  in (sd.get("missing_party") or [])]
+            # Member counters are PER-SEED/SLOT: reset them when this connect
+            # is a different slot than they were built for. A reconnect to the
+            # SAME slot keeps them -- that stickiness is what stops the
+            # disconnect blip from un-joining a member (see _member_counts).
+            _mkey = (getattr(self, "seed_name", None), getattr(self, "slot", None))
+            if _mkey != self._member_key:
+                self._member_key = _mkey
+                self._member_hw = {}
+                self._member_hold_rows = None
+            if self.missing_party:
+                logger.info("  [party] reduced party: members "
+                            f"{[r + 1 for r, _j, _lv in self.missing_party]} start "
+                            "missing (find their job items to restore them)")
             # Shop AP stock. A shop lists its offers in PARALLEL -- one shelf row
             # per offer, each with its OWN placeholder item id, because price,
             # name and description all live on the item record rather than the
@@ -1685,6 +2037,13 @@ class FF1PSPContext(CommonContext):
                 asyncio.create_task(self._hint_store_fetch())
             # death_link: opt-in. Join the DeathLink bounce group (tag) so we
             # both receive others' deaths and may send our own party wipes.
+            if sd.get("trap_percentage"):
+                logger.info(f"  traps enabled: {sd['trap_percentage']}% of "
+                            f"filler slots are traps")
+                # A received-but-unfired trap exists ONLY in our queue (the
+                # received counter has already passed it), so read back what an
+                # earlier session left armed -- see _trap_store_key.
+                asyncio.create_task(self._trap_store_fetch())
             self.death_link_on = bool(sd.get("death_link", False))
             self.death_link_severity = int(sd.get("death_link_severity") or 3)
             if self.death_link_on:
@@ -1715,6 +2074,22 @@ class FF1PSPContext(CommonContext):
         elif cmd == "SetReply" and self.hint_rows:
             if args.get("key") == self._hint_store_key():
                 self._hint_apply_bought(args.get("value"))
+        # Pending traps: Retrieved answers the connect Get. SetReply is our own
+        # write echoing back, and _trap_apply_stored merges only once, so the
+        # echo can never duplicate what is already queued.
+        if self.slot_data.get("trap_percentage"):
+            if cmd == "Retrieved" and self._trap_store_key() in (args.get("keys") or {}):
+                self._trap_apply_stored(
+                    (args.get("keys") or {})[self._trap_store_key()])
+            elif cmd == "SetReply" and args.get("key") == self._trap_store_key():
+                self._trap_apply_stored(args.get("value"))
+        # bestiarysanity baseline: Retrieved answers the connect Get; SetReply
+        # echoes our own store (confirms the snapshot landed on the server).
+        if self.bestiary:
+            if cmd == "Retrieved" and self._bestiary_key() in (args.get("keys") or {}):
+                self._bestiary_apply_base((args.get("keys") or {})[self._bestiary_key()])
+            elif cmd == "SetReply" and args.get("key") == self._bestiary_key():
+                self._bestiary_apply_base(args.get("value"))
         # A check anywhere can empty a hinted tile, which retires its row.
         if cmd in ("Connected", "RoomUpdate") and self.hint_rows:
             self._hint_dirty = True
@@ -1728,6 +2103,12 @@ class FF1PSPContext(CommonContext):
             self.refresh_tracker()
         if cmd in ("Connected", "ReceivedItems", "RoomUpdate", "LocationInfo"):
             self.refresh_shops()
+        if cmd in ("Connected", "ReceivedItems", "RoomUpdate", "LocationInfo",
+                   "Retrieved", "SetReply"):
+            # ReceivedItems matters now that the strip paints in-logic state:
+            # a Ship landing changes which sections are reachable. refresh_tracker
+            # runs earlier in this same block, so _tracker_tokens is fresh.
+            self.refresh_bestiary()
         if cmd == "Connected":
             # Connected is where the seed's own scaling lands (enc/xp/gil/boss above),
             # so the Boost tab has nothing real to show until now.
@@ -1978,8 +2359,14 @@ class FF1PSPContext(CommonContext):
         """Add `amount` EXP to EVERY party member's P_EXP save field, clamped to
         EXP_CAP (Lv.99 cumulative). The game recomputes level/stats on its next
         level-up check (after a battle), so banked EXP materializes as levels then --
-        it does not level up instantly. Read-modify-write per member, like grant_gil."""
+        it does not level up instantly. Read-modify-write per member, like grant_gil.
+        MISSING party members (starting_party_members) are skipped: 100% gone
+        means no EXP-bag share either (their level comes from the join-level
+        floor when found -- see _member_loop)."""
+        skip = self._member_missing_rows()
         for ci in range(D.PARTY_COUNT):
+            if ci in skip:
+                continue
             a = self.sa(D.party_addr_sa(ci, D.P_EXP))
             cur = await self.psp.read_u32(a)
             await self.psp.write_u32(a, min(cur + amount, D.EXP_CAP))
@@ -2243,6 +2630,15 @@ class FF1PSPContext(CommonContext):
             # grants the real Levistone (possession + airship bits) once
             # levistone_shards_required is reached.
             return (None, None, 0)
+        if ID.is_trap(iid):
+            # Trap item: synthetic, no game grant. _grant_pending enqueues it for
+            # _trap_loop BEFORE this mapping runs, so counter-only here.
+            return (None, None, 0)
+        if ID.is_party_member(iid):
+            # Party-member item (starting_party_members): synthetic, no game
+            # grant. Counter-only; the missing-member loop matches received
+            # copies against slot_data "missing_party" and revives the row.
+            return (None, None, 0)
         if ID.is_job_item(iid) or ID.is_event(iid) or ID.is_vehicle(iid):
             # Event gate tokens are logic-graph markers, not game items at
             # all; vehicle items (Ship) reconcile via _npc_loop's flag write.
@@ -2501,10 +2897,32 @@ class FF1PSPContext(CommonContext):
             self.received_count = c
             for pos in range(c, total):
                 it = self.items_received[pos]
+                if ID.is_trap(it.item):
+                    # Enqueue INSIDE the counter walk so trap delivery inherits
+                    # the pipeline's persistence: the save-resident counter
+                    # marks it delivered (no re-fire on client restart), and a
+                    # death/reload rollback re-delivers -> re-fires it, exactly
+                    # like a re-granted EXP bag (the trap was "undone" with the
+                    # rolled-back save).
+                    # `pos` is the trap's IDENTITY (see trap_store): the
+                    # stored queue carries the same index, so a rollback
+                    # cannot deliver a second copy of a trap the DataStorage
+                    # restore already put back (5 sent, 9 queued, 2026-08-30).
+                    self._trap_enqueue(ID.trap_kind(it.item), pos)
                 if ID.is_job_item(it.item):
                     # Counter-only item (no game grant), so this log line is the
                     # player's only notice of what the scroll does.
                     await self._log_scroll_effect(it.item)
+                if ID.is_party_member(it.item):
+                    # Counter-only item (no game grant): the join is driven by
+                    # the sticky per-job counters over items_received
+                    # (_member_counts/_member_hw -- _ever_won can't count dup
+                    # job copies), so this line is the walk's only trace of
+                    # the receipt in a debug bundle.
+                    _pj = ID.party_member_job(it.item)
+                    logger.info("[party] party member received: %s",
+                                D.JOB_NAMES[_pj] if 0 <= _pj < len(D.JOB_NAMES)
+                                else f"job {_pj}")
                 cat, iid, qty = self._ap_item_to_game(it)
                 if cat == D.CAT_EXP:
                     # EXP bag: add qty EXP to every party member. Additive (not
@@ -2595,8 +3013,17 @@ class FF1PSPContext(CommonContext):
         if not (self.slot_data.get("on_disc") or {}).get("slot_magic"):
             return
         try:
+            # D.AP_INIT_MARKER_SA (save+0x835) lives INSIDE this 48-byte run and
+            # is not slot_magic state. Preserve it across the wipe rather than
+            # letting the wipe decide it: _init_marker_tick reads marker-absent
+            # over a fresh party as "a new game just started" and re-arms the
+            # new-game one-shots off it, so a stray clear here could re-pay the
+            # starting purse. Preserve (not stamp) keeps this call marker-neutral
+            # -- it can neither create nor destroy that signal.
+            keep = (await self.psp.read(self.sa(D.AP_INIT_MARKER_SA), 1))[0]
             await self.psp.write(self.sa(D.SPELL_SLOTS_SPENT_BASE_SA),
                                  bytes(0x30))
+            await self.psp.write(self.sa(D.AP_INIT_MARKER_SA), bytes([keep]))
             logger.info("  [slot_magic] NG+ carried charge state cleared "
                         "(spent + CW pool -> fresh)")
         except Exception:
@@ -2750,8 +3177,12 @@ class FF1PSPContext(CommonContext):
         # id the seed doesn't define makes the SERVER throw and CLOSE the socket, so
         # the whole LocationScouts (and every retry) fails -> the disconnect loop that
         # motivated this guard. missing+checked = every location this slot owns.
+        # Bestiary locations: scouted for the Bestiary tab's classification
+        # icons (progression/useful/filler), never for names in the bake.
+        bst_lids = [ID.bestiary_loc_id(int(m))
+                    for m in ((self.bestiary or {}).get("monsters") or [])]
         known = set(self.missing_locations) | set(self.checked_locations)
-        wanted = loc_ids + shop_lids + npc_lids + dyn_lids
+        wanted = loc_ids + shop_lids + npc_lids + dyn_lids + bst_lids
         if known:
             phantom = [lid for lid in wanted if lid not in known]
             if phantom:
@@ -3125,6 +3556,10 @@ class FF1PSPContext(CommonContext):
         # the seed has any dynamic cap; inert (remaining=0) until armed.
         feats["bonus_dyn_chests"] = any(
             v > 0 for v in (self.bonus_dyn_caps or {}).values())
+        # reduced_party: menu/battle row hiding for missing members. Derived
+        # from the plan for seeds generated before the on_disc key existed
+        # (the plan itself ships top-level as "missing_party").
+        feats.setdefault("reduced_party", bool(_sd.get("missing_party")))
         bake = {"features": feats, "data": data}
         # Remote box names: install the name-override detour + grow the extended
         # name bank. DECOUPLED from spell_tomes (2026-07-24) -- extern_bake grows
@@ -3249,6 +3684,91 @@ class FF1PSPContext(CommonContext):
                 "operations": [{"operation": "add", "value": [f"{shop}:{k}"]}]}])
         except Exception as e:
             logger.info(f"  [hint] could not persist the purchase ({e!r})")
+
+    # ---------------- bestiarysanity: kill-count checks ----------------
+    def _bestiary_key(self):
+        return f"ff1psp_bestiary_base_{self.team}_{self.slot}"
+
+    async def _bestiary_store_fetch(self):
+        """Read the first-connect kill-count baseline and subscribe to it."""
+        try:
+            await self.send_msgs([{"cmd": "Get", "keys": [self._bestiary_key()]},
+                                  {"cmd": "SetNotify", "keys": [self._bestiary_key()]}])
+        except Exception as e:
+            logger.info(f"  [bestiary] baseline read failed ({e!r})")
+
+    def _bestiary_apply_base(self, value):
+        self._bestiary_base_known = True
+        if isinstance(value, list) and len(value) == D.BESTIARY_KILLS_N:
+            self._bestiary_baseline = [int(v) for v in value]
+
+    async def _bestiary_store_base(self, counts):
+        """Store the baseline create-if-missing: `default` seeds the key only
+        when absent and the no-op `default` operation materializes it, so a
+        concurrent client can never overwrite an established baseline. The
+        SetReply echo is what installs it locally."""
+        try:
+            await self.send_msgs([{
+                "cmd": "Set", "key": self._bestiary_key(),
+                "default": [int(c) for c in counts], "want_reply": True,
+                "operations": [{"operation": "default", "value": 0}]}])
+        except Exception as e:
+            logger.info(f"  [bestiary] baseline store failed ({e!r})")
+
+    async def _bestiary_loop(self):
+        """Poll the save-resident bestiary kill counts (u16[203] @ save+0x1198,
+        monster-id indexed) and send a check for each sampled monster whose
+        count rises above the seed's first-connect baseline. NEW KILLS ONLY by
+        design: an NG+ start carries the bestiary over pre-filled, and even a
+        carried-over entry stays checkable because one more kill still bumps
+        its COUNT. The baseline snapshot commits only after two consecutive
+        identical sane reads (title/load transitions can expose stale bytes)."""
+        stable = {"prev": None}
+
+        async def tick():
+            if not self.bestiary:
+                return False              # option off this seed -- end the loop
+            if self.save_delta is None or not self._bestiary_base_known:
+                return
+            raw = await self.psp.read(self.sa(D.BESTIARY_KILLS_SA),
+                                      D.BESTIARY_KILLS_N * 2)
+            counts = [int.from_bytes(raw[i:i + 2], "little")
+                      for i in range(0, D.BESTIARY_KILLS_N * 2, 2)]
+            if any(c > 999 for c in counts):
+                stable["prev"] = None     # mid-load garbage -- not a bestiary frame
+                return
+            prev_snap = self._bestiary_snap
+            self._bestiary_snap = counts
+            if prev_snap != counts:
+                self.refresh_bestiary()
+            if self._bestiary_baseline is None:
+                if stable["prev"] == counts:
+                    logger.info(f"  [bestiary] baseline stored "
+                                f"({sum(1 for c in counts if c)}/{D.BESTIARY_KILLS_N} "
+                                f"entries pre-filled)")
+                    await self._bestiary_store_base(counts)
+                    stable["prev"] = None
+                else:
+                    stable["prev"] = list(counts)
+                return
+            base = self._bestiary_baseline
+            lids = []
+            for mon in self.bestiary.get("monsters") or []:
+                mon = int(mon)
+                if not (0 <= mon < D.BESTIARY_KILLS_N):
+                    continue
+                lid = ID.bestiary_loc_id(mon)
+                if lid in self.sent_locations:
+                    continue
+                if counts[mon] > base[mon]:
+                    self.sent_locations.add(lid)
+                    lids.append(lid)
+                    logger.info(f"  [bestiary] {MON_NAME.get(mon, hex(mon))} "
+                                f"defeated -> check")
+            if lids:
+                await self.check_locations(lids)
+
+        await self._poll(2.0, "bestiary", tick)
 
     def _hint_apply_bought(self, value):
         """Fold a stored ["shop:row", ...] list into the bought set."""
@@ -5582,6 +6102,9 @@ class FF1PSPContext(CommonContext):
             # ONE read serves every single-byte observation below.
             snap = _ByteSnapshot(self.psp, self.sa(span_lo),
                                  await self.psp.read(self.sa(span_lo), span_len))
+            # One answer for the whole tick: the vehicle loan needs it, and the
+            # sage strip below must not fight the loan inside a bonus dungeon.
+            in_bonus = await self._in_bonus_dungeon()
 
             with self._stage("func-reassert"):
                 # Reconcile function bits for WON usage/movement key items. grant_key_item
@@ -6237,7 +6760,13 @@ class FF1PSPContext(CommonContext):
                 # Flag 81 (his GENUINE native handover, v255 repoint) is now
                 # dedup-only: if a canoe-less player triggers his real give
                 # (Lich genuinely dead), strip the duplicate native canoe.
-                if sset and not canoe_won:
+                if sset and not canoe_won and not in_bonus:
+                    # not in_bonus: on a bonus floor the canoe bits may be LOANED
+                    # (_bonus_vehicle_loan) -- stripping them there would fight the
+                    # loan every tick and re-lock the floor's rivers. Same shape as
+                    # the bonus hold in _strip_event_key_natives; the strip is
+                    # idempotent and resumes on the overworld, where the loan has
+                    # already been taken back.
                     # His cutscene still hands over the vanilla canoe. Randomized
                     # location -> strip possession; the real item arrives via the
                     # grant loop. The SAILING bit no longer needs clearing here --
@@ -6265,6 +6794,9 @@ class FF1PSPContext(CommonContext):
                 # outside restore were all DELETED -- proximity detection needs
                 # none of his script to run, so nothing holds any canoe bit
                 # anywhere, ever. Key id 17 is back on OWNED_FUNCTION_REASSERT.)
+
+            with self._stage("veh-loan"):
+                await self._bonus_vehicle_loan(snap, in_bonus)
 
             with self._stage("promoted-keys"):
                 # Ice Cave Levistone: MIGRATED to NPC_MAP_RESET (2026-07-20). Its
@@ -6479,26 +7011,14 @@ class FF1PSPContext(CommonContext):
                             logger.info("  [smith] stripped native Excalibur "
                                         "(Excalibur is a randomized AP item)")
 
-            with self._stage("bahamut"):
-                # --- Bahamut = AP LOCATION ONLY, no promotion (2026-07-08) ----------
-                # Rat's Tail is granted possession-only (not in KEY_ITEM_FUNCTION_BITS),
-                # so Bahamut refuses it and never promotes -- the old 0x1151F b0
-                # class-change-done bit never sets. Detector instead: player is standing
-                # in Bahamut's room (FIELD_MAP_ID == BAHAMUT_ROOM_ID) AND owns the AP
-                # Rat's Tail (possession bit). FIELD_MAP_ID (0x13108, u32) is the fine
-                # per-map id; the coarse LOADED_MAP_ID (0x13118) reads 1 for every
-                # dungeon and would false-fire in Chaos Shrine. NOTHING to strip.
-                bahamut_lid = ID.npc_loc_id(D.BAHAMUT_NPC_ORDINAL)
-                if bahamut_lid not in self.sent_locations:
-                    mid = struct.unpack("<I", await self.psp.read(
-                        self.sa(D.FIELD_MAP_ID_SA), 4))[0]
-                    if mid == D.BAHAMUT_ROOM_ID:
-                        taddr, tmask = D.key_item_bit(D.RATS_TAIL_KEY_ID)
-                        owned = (await snap.rd(self.sa(taddr))) & tmask
-                        if owned:
-                            self.sent_locations.add(bahamut_lid)
-                            await self.check_locations([bahamut_lid])
-                            logger.info("NPC (Bahamut) room + Rat's Tail -> check")
+            # --- Bahamut: NOT an AP location (removed 2026-08-27) ---------------
+            # His only reward is the game's NATIVE whole-party promotion, which
+            # works on its own once the tail's function bit is granted
+            # (KEY_ITEM_FUNCTION_BITS[13]); an AP item on top was double-dipping.
+            # The class change itself is what the client watches: this loop's
+            # rats-tail stage above strips the spent tail via the party-job
+            # fingerprint (any job >= D.PROMOTED_JOB_MIN), and _hold_spent uses
+            # the same fingerprint for the Citadel hold.
 
         await self._poll(2.0, "npc_loop", tick)
 
@@ -6886,7 +7406,8 @@ class FF1PSPContext(CommonContext):
     # Text is the player-facing wording from options.JobScrollBoosts, trimmed of
     # yaml-config talk. Keyed by BASE job (0..5) like every other scroll table.
     SCROLL_EFFECT_MSG = {
-        0: "Gain lifesteal and armor penetration with physical attacks.",
+        0: "Gain lifesteal and armor penetration with physical attacks. "
+           "Undead enemies have no blood to drain, so they heal nothing.",
         2: "As they take damage, they gain attack and max HP, and heal.",
         3: "Restore mana based on damage taken, and heal based on mana spent.",
         4: "Dia spells hurt all bosses. Casting a Dia-family spell also heals "
@@ -7543,8 +8064,14 @@ class FF1PSPContext(CommonContext):
     async def _jobsprite_loop(self):
         """Scroll-gated custom party sprites (battle + pause menu).
 
-        Pins job_sprites art over the resident JOBxx.GIM copies for every
-        class whose scroll is owned. The engine restores vanilla bytes from
+        Pins job_sprites PIXELS over the resident JOBxx.GIM copies for every
+        class whose scroll is owned. The palette is NOT pinned: it is baked on
+        disc (job_sprite_bake), because the engine builds standalone per-actor
+        palette copies from the disc record that several draw paths CLUT from --
+        pinning only the sheets coloured our pixels with the vanilla palette
+        (the "golden" Thief, live 2026-08-30). The baked palette is a superset
+        that keeps every vanilla-used slot's colour, so the scroll gate is
+        exactly this pixel pin and nothing else. The engine restores vanilla bytes from
         disc constantly (menu open, field streaming) and buffers move between
         loads, so this is a PIN, not a one-shot: a cheap 64-byte signature
         read per known sheet per tick, a rewrite only when vanilla bytes
@@ -7555,6 +8082,12 @@ class FF1PSPContext(CommonContext):
         job_sprites.py's module docstring."""
         from . import job_sprites as JS
         known = {}                       # addr -> cls (main sheets only)
+        # Every address a target sheet was EVER found at. The engine reuses the
+        # same buffers, so a battle reloads its vanilla sheet into an address we
+        # have already seen: re-checking these each tick repaints ~0.25s after
+        # the load instead of waiting out the 3s rescan (live 2026-08-30: the
+        # sprite was visibly vanilla for the first second of every fight).
+        seen = {}                        # addr -> cls, never pruned
         tick_n = 0
         RESCAN_TICKS = 12                # * 0.25s = every ~3s
         SCAN_LO, SCAN_HI, SCAN_CHUNK = 0x08800000, 0x0A000000, 0x100000
@@ -7566,11 +8099,12 @@ class FF1PSPContext(CommonContext):
         # loaded a vanilla sheet and nothing re-pinned it for 4+ minutes).
         SHEET_SPAN = JS.PIX_OFF + JS.PIX_LEN
 
-        async def apply(addr, pal, pix):
-            # pixels first: the repaint keys on pixel bytes changing; a
-            # palette-only write is invisible (live-proven 2026-08-12)
+        async def apply(addr, pix):
+            # pixels only -- the palette is already ours, baked into the disc
+            # record every resident copy is loaded from. The repaint keys on
+            # pixel bytes changing anyway (a palette-only write was proven
+            # invisible 2026-08-12).
             await self.psp.write(addr + JS.PIX_OFF, pix)
-            await self.psp.write(addr + JS.PAL_OFF, pal)
 
         async def sheet_sig(addr):
             """Signature window of the sheet at addr, b"" on any failure.
@@ -7593,16 +8127,20 @@ class FF1PSPContext(CommonContext):
             targets = JS.targets_for(owned)
             if not targets:
                 return
-            # cheap pass: re-assert art at known addresses
+            # cheap pass: re-assert art at known + previously-seen addresses
             lost = False
-            for addr, cls in list(known.items()):
+            for addr, cls in list(seen.items()):
                 if cls not in targets:
-                    del known[addr]
+                    seen.pop(addr, None)
+                    known.pop(addr, None)
                     continue
                 sig = await sheet_sig(addr)
                 if sig == JS.VANILLA_SIG[cls]:
-                    await apply(addr, *targets[cls])
-                elif sig != JS.custom_sig(cls):
+                    await apply(addr, targets[cls][1])
+                    known[addr] = cls
+                elif sig == JS.custom_sig(cls):
+                    known[addr] = cls
+                elif addr in known:
                     del known[addr]      # freed or repurposed -> rescan finds it
                     lost = True
             if known and not lost and tick_n % RESCAN_TICKS:
@@ -7612,7 +8150,7 @@ class FF1PSPContext(CommonContext):
             done = {JS.custom_sig(c): c for c in targets}
             addr = SCAN_LO
             while addr < SCAN_HI:
-                # overlap so a magic string straddling a chunk edge still hits,
+                # overlap so a needle straddling a chunk edge still hits,
                 # but NEVER read past SCAN_HI (the WS-fallback wedge above)
                 size = min(SCAN_CHUNK + len(JS.GIM_MAGIC), SCAN_HI - addr)
                 try:
@@ -7625,21 +8163,177 @@ class FF1PSPContext(CommonContext):
                     sig = await sheet_sig(base)
                     cls = want.get(sig)
                     if cls is not None and base + SHEET_SPAN <= SCAN_HI:
-                        await apply(base, *targets[cls])
-                        known[base] = cls
+                        await apply(base, targets[cls][1])
+                        known[base] = seen[base] = cls
                     elif sig in done:
-                        known[base] = done[sig]
+                        known[base] = seen[base] = done[sig]
                     pos = blob.find(JS.GIM_MAGIC, pos + 1)
                 addr += SCAN_CHUNK
                 await asyncio.sleep(0)   # yield between 1MB chunks
 
         await self._poll(0.25, "jobsprite", tick)
 
-    async def _in_battle(self):
-        """True iff a battle is ACTIVE right now.
+    # --- battle sprite holder watch (read-only diagnostic) -----------------
+    # An object of class D.SPRITE_VTBL_BATTLE that never obtained a holder ends
+    # its construction by jumping through the holder's null first word -- the
+    # "CPU Jump to 00000000" / RA 0x088fba28 freeze at battle intro. Proven
+    # against the frozen crash 2026-08-31: of 19 live objects of that class, the
+    # single one whose holder was D.SPRITE_HOLDER_FALLBACK is byte-for-byte the
+    # s1 in the crash registers. See the ff1_data block for the disassembly.
+    #
+    # Two signals, neither of which writes anything:
+    #   supply  -- live/free holder nodes in the arena (LEADING: the crash is a
+    #              request that found none), one 128KB read, every tick
+    #   demand  -- objects of the fatal class and how many are starved
+    #              (CONFIRMING), a 4MB sweep, battle edges only
 
-        Reads D.BATTLE_ACTIVE_FLAG_SA (u8, 1=battle/0=field), which is cleared on
-        battle exit. Do NOT use "*(BATTLE_ACTOR_OBJ_PTR_SA) is in RAM range" for
+    async def _sprite_guard_fired(self):
+        """How many times the on-disc null-holder guard has skipped the call, or
+        None if this disc predates the guard. Non-zero means a battle-intro
+        freeze WAS averted -- the bug is live and the mitigation is carrying it,
+        which is exactly the state that must never look like a clean session."""
+        mb = await self._find_mailbox(b"SNGD", "_sng_mb", "holder")
+        if mb is None:
+            return None
+        try:
+            return await self.psp.read_u32(mb + 4)
+        except Exception:
+            return None
+
+    async def _sprite_nodes(self):
+        """(in use, free) holder nodes, or None. One bounded read."""
+        sig = struct.pack("<III", D.SPRITE_NODE_SIZE, 0x0C, D.SPRITE_OBJ_MAGIC)
+        try:
+            buf = await self.psp.read_chunked(
+                D.SPRITE_NODE_LO, D.SPRITE_NODE_HI - D.SPRITE_NODE_LO)
+        except Exception:
+            return None
+        used = free = 0
+        j = buf.find(sig)
+        while j >= 0:
+            k = j + D.SPRITE_NODE_HDR_SKIP + D.SPRITE_NODE_USED_OFF
+            if k + 4 <= len(buf):
+                if struct.unpack_from("<I", buf, k)[0]:
+                    used += 1
+                else:
+                    free += 1
+            j = buf.find(sig, j + 1)
+        return used, free
+
+    async def _sprite_objects(self):
+        """(rows, starved) for every object of the fatal class.
+
+        Starved == holder is the static fallback, which is exactly the state
+        that crashes. Objects of D.SPRITE_VTBL_OTHER share the block size and
+        sit on the fallback harmlessly, so they are not counted.
+
+        Each row carries the fields that separate a built object from a
+        stillborn one, measured against the 2026-08-31 crash: a healthy object
+        has dims 0x100 x 0x20, an asset pointer and count 1; the starved one had
+        0 x 0, asset 0, count 0 and its tail still reading raw heap fill. `kind`
+        is the object's type argument, which is what the caller varies per row --
+        recording it is how a future bundle names WHICH sprite failed to
+        resolve, rather than just that one did."""
+        pat = struct.pack("<II", D.SPRITE_OBJ_SIZE, D.SPRITE_OBJ_MAGIC)
+        rows = []
+        starved = []
+        addr = D.SPRITE_HEAP_LO
+        while addr < D.SPRITE_HEAP_HI:
+            size = min(0x100000, D.SPRITE_HEAP_HI - addr)
+            try:
+                buf = await self.psp.read_chunked(addr, size)
+            except Exception:
+                buf = b""
+            j = buf.find(pat)
+            while j >= 0:
+                obj = addr + j + D.SPRITE_OBJ_HDR_SKIP
+                try:
+                    vt = await self.psp.read_u32(obj + D.SPRITE_OBJ_VTBL_OFF)
+                    hold = await self.psp.read_u32(
+                        obj + D.SPRITE_OBJ_HOLDER_OFF)
+                except Exception:
+                    vt = hold = None
+                if vt == D.SPRITE_VTBL_BATTLE:
+                    row = {"obj": f"0x{obj:08x}",
+                           "holder": f"0x{hold:08x}" if hold else None}
+                    for lbl, off in (("kind", D.SPRITE_OBJ_KIND_OFF),
+                                     ("w", D.SPRITE_OBJ_W_OFF),
+                                     ("h", D.SPRITE_OBJ_H_OFF),
+                                     ("asset", D.SPRITE_OBJ_ASSET_OFF),
+                                     ("count", D.SPRITE_OBJ_COUNT_OFF)):
+                        try:
+                            row[lbl] = await self.psp.read_u32(obj + off)
+                        except Exception:
+                            row[lbl] = None
+                    row["starved"] = hold == D.SPRITE_HOLDER_FALLBACK
+                    rows.append(row)
+                    if row["starved"]:
+                        starved.append(obj)
+                j = buf.find(pat, j + 1)
+            addr += size
+            await asyncio.sleep(0)          # yield between 1MB chunks
+        return rows, starved
+
+    async def _sprite_holder_loop(self):
+        """Log holder supply whenever it MOVES, plus a full object census on
+        every battle edge. A session then reads as either a sawtooth (nodes
+        returned between fights) or a staircase (leak), and the line that sits
+        on each step names what consumed them."""
+        was_battle = None
+        last = None
+        fired = 0
+        async def tick():
+            nonlocal was_battle, last, fired
+            if self.save_delta is None:
+                return
+            got = await self._sprite_nodes()
+            if got is None:
+                return
+            used, free = got
+            if got != last:
+                warn = ("  <-- NO FREE HOLDERS: the next party-sprite build "
+                        "jumps to 0") if not free else ""
+                logger.info(f"  [holder] nodes in use={used} free={free}{warn}")
+                last = got
+            hits = await self._sprite_guard_fired()
+            # only an INCREASE is a real skip: the counter can be reset to 0 by
+            # hand to re-arm the forced-skip self-test, and announcing that as a
+            # guard hit would put a false positive in the evidence trail
+            if hits is not None and hits > fired:
+                logger.info(f"  [holder] NULL-HOLDER GUARD FIRED -- skips this "
+                            f"boot: {hits} (was {fired}). A battle-intro freeze "
+                            f"was averted; a sprite is missing instead.")
+                fired = hits
+            elif hits is not None:
+                fired = hits          # re-armed/reset: track it, do not announce
+            now = await self._in_battle()
+            if now == was_battle:
+                return
+            was_battle = now
+            rows, starved = await self._sprite_objects()
+            note = ""
+            if starved:
+                bad = [r for r in rows if r["starved"]]
+                note = ("  <-- STARVED: " + ", ".join(
+                    f"{r['obj']} kind={r['kind']} {r['w']}x{r['h']} "
+                    f"asset=0x{(r['asset'] or 0):08x}" for r in bad[:3]))
+            kinds = sorted({r["kind"] for r in rows if not r["starved"]})
+            logger.info(f"  [holder] battle {'START' if now else 'END  '} "
+                        f"nodes={used}/{used + free} sprite objects={len(rows)} "
+                        f"starved={len(starved)} guard_skips={fired} "
+                        f"built kinds={kinds}{note}")
+        await self._poll(0.5, "holder", tick)
+
+    async def _in_battle(self):
+        """True iff the player is NOT in normal field control right now.
+
+        Reads D.BATTLE_ACTIVE_FLAG_SA (u8) -- live-measured 2026-08-28: the
+        byte is 1 during battle AND while the PAUSE MENU is open (it is a
+        "non-field frame" flag, not strictly battle), clearing on return to
+        the walkable field. Loops gating on it therefore also pause during
+        menus, which is safe (writes defer a tick) but explains "delivery
+        held: unsafe frame" while a player sits in a menu.
+        Do NOT use "*(BATTLE_ACTOR_OBJ_PTR_SA) is in RAM range" for
         this: that pointer LATCHES the last battle_base forever (never zeroed on
         exit), so it reads "in battle" permanently after the first fight and
         silently kills every loop that gates on it. Fail safe = False (not in
@@ -8011,6 +8705,15 @@ class FF1PSPContext(CommonContext):
                             lcks[ci] = el
                 except Exception:
                     pass
+                # MISSING party members never contribute to steal rates.
+                # LOAD-BEARING since v290: the battle KO is VIRTUAL (the
+                # classifier cave ORs the RPMK bit; BU_STATUS itself stays 0
+                # on held rows), so the KO'd/petrified `active` test below
+                # can no longer see them -- this exemption is the only thing
+                # keeping a held thief's AGI/LCK out of the steal math.
+                for _held in self._member_missing_rows():
+                    if _held < D.PARTY_COUNT:
+                        active[_held] = False
                 # Thief class id = 1 (see [[class-byte]]); Ninja (7) = promoted Thief.
                 # Only ACTIVE (not KO'd/petrified) thieves/ninjas contribute.
                 thief_agi = sum(a for a, c, al in zip(agis, classes, active)
@@ -8022,8 +8725,8 @@ class FF1PSPContext(CommonContext):
                 # the AP client can flag the reduced steal chance.
                 downed_thieves = sum(1 for c, al in zip(classes, active)
                                      if c in (1, 7) and not al)
-                downed_note = (f" [{downed_thieves} thief"
-                               f"{'ves' if downed_thieves != 1 else ''} "
+                downed_note = (f" [{downed_thieves} "
+                               f"{'thieves' if downed_thieves != 1 else 'thief'} "
                                f"KO'd/petrified -- not contributing]"
                                if downed_thieves else "")
                 if thief_agi <= 0 and thief_lck <= 0:
@@ -8256,7 +8959,15 @@ class FF1PSPContext(CommonContext):
         A row whose species reads 0xFF is an EMPTY formation row: the loop skips
         it before ever calling set_drop, so its slot is ours for good. Take the
         highest such row (furthest from the rows a big formation fills in).
-        Returns None if the slot is unusable, so the caller retries/skips.
+
+        A FULL formation (nine live enemies, no 0xFF row) used to fall back to
+        "the first free slot", i.e. row 0 -- the row most likely to be stamped,
+        picked for no reason but its index. Live 2026-08-20 that lost an
+        Emergency Exit to a 9-enemy formation. Score the rows instead: set_drop
+        is only REACHED for a species that has a drop entry, so a row whose
+        species has category 0 or chance 0 is exactly as safe as an empty one,
+        and among the rest the lowest drop chance is the least likely to claim
+        our slot. Returns None if no slot is usable, so the caller retries/skips.
         """
         base = bb + D.BATTLE_UNIT_OFF + D.PARTY_COUNT * D.BATTLE_UNIT_STRIDE
         try:
@@ -8266,20 +8977,41 @@ class FF1PSPContext(CommonContext):
             return None
         spec = [rows[i * D.BATTLE_UNIT_STRIDE + D.BU_SPECIES]
                 for i in range(D.BATTLE_DROP_SLOTS)]
-        safe = [i for i in range(D.BATTLE_DROP_SLOTS)
-                if spec[i] == 0xFF and lst[i * D.BATTLE_DROP_STRIDE] == 0]
+        free = [i for i in range(D.BATTLE_DROP_SLOTS)
+                if lst[i * D.BATTLE_DROP_STRIDE] == 0]
+        if not free:
+            return None
+        safe = [i for i in free if spec[i] == 0xFF]
         if safe:
             return safe[-1]
-        # Every row is occupied (a full 9-enemy formation). No slot is safe from
-        # the victory writer, so fall back to the first free one and say so --
-        # the steal may still be replaced by that row's natural drop.
-        free = next((i for i in range(D.BATTLE_DROP_SLOTS)
-                     if lst[i * D.BATTLE_DROP_STRIDE] == 0), None)
-        if free is not None:
-            logger.info(f"  [thief-steal] no empty enemy row -- drop slot{free} "
-                        f"can still be overwritten by a natural drop "
-                        f"(species {' '.join(f'{s:02x}' for s in spec)})")
-        return free
+        # Full formation: score every free row by the chance its own species
+        # stamps over us. Unreadable table -> treat as maximally risky (100)
+        # rather than as safe, so a bad read can never look like a good slot.
+        risk = {}
+        seen = {}
+        for i in free:
+            s = spec[i]
+            if s not in seen:
+                try:
+                    ent = await self.psp.read(
+                        D.MONSTER_DROP_TABLE + s * D.MONSTER_DROP_STRIDE, 3)
+                    seen[s] = 0 if (ent[0] == 0 or ent[2] == 0) else ent[2]
+                except Exception:
+                    seen[s] = 100
+            risk[i] = seen[s]
+        unclaimable = [i for i in free if risk[i] == 0]
+        if unclaimable:
+            pick = unclaimable[-1]
+            logger.info(f"  [thief-steal] no empty enemy row -- drop slot{pick} "
+                        f"(species {spec[pick]:02x} has no natural drop, so its "
+                        f"slot is never stamped)")
+            return pick
+        pick = min(free, key=lambda i: (risk[i], -i))
+        logger.info(f"  [thief-steal] no empty enemy row and every free row can "
+                    f"drop -- slot{pick} chosen as the least risky "
+                    f"({risk[pick]}% chance its own drop replaces the steal; "
+                    f"species {' '.join(f'{s:02x}' for s in spec)})")
+        return pick
 
     async def _inv_counts(self):
         """{(cat, game_id): qty} of every occupied inventory record."""
@@ -8291,14 +9023,40 @@ class FF1PSPContext(CommonContext):
                 out[(inv[i], inv[i + 1])] = inv[i + 2]
         return out
 
+    async def _battle_totals(self):
+        """(gil, summed party EXP) -- the two counters a VICTORY moves and an
+        escape/wipe does not. Used to tell "the steal was lost" apart from "the
+        battle never paid out at all"."""
+        gil = int.from_bytes(
+            await self.psp.read(self.sa(D.GIL_ADDR_SA), 4), "little")
+        party = await self.psp.read(self.sa(D.PARTY_BASE_SA),
+                                    D.PARTY_COUNT * D.PARTY_STRIDE)
+        exp = sum(int.from_bytes(
+            party[i * D.PARTY_STRIDE + D.P_EXP:
+                  i * D.PARTY_STRIDE + D.P_EXP + 4], "little")
+            for i in range(D.PARTY_COUNT))
+        return gil, exp
+
     async def _steal_verify_grant(self, cat, iid, name):
         """Log the inventory delta a steal actually produced. Snapshots now
         (mid-battle, before the victory routine banks anything), waits for the
         battle to end, then reports every count that went UP -- so a request/grant
         mismatch (wrong id banked, nothing banked, two items banked) shows up in
-        the log by itself instead of having to be inferred from the box text."""
+        the log by itself instead of having to be inferred from the box text.
+
+        A battle the party RUNS FROM (or loses) awards no drops at all, so "the
+        item never arrived" is the correct outcome there, not a defect -- five
+        of the six mismatches in the 2026-08-20 bundle were flee-shaped, and
+        each one read as a bug. Sample gil + party EXP alongside the inventory
+        and only call MISMATCH when the battle actually paid out. (An AP grant
+        landing in the same window -- an EXP/gil item -- can make a fled battle
+        look won; that direction only over-reports, which is the safe one.)"""
         try:
             before = await self._inv_counts()
+            try:
+                paid0 = await self._battle_totals()
+            except Exception:
+                paid0 = None
             for _ in range(240):                # up to ~2 min of battle
                 await asyncio.sleep(0.5)
                 if not await self._in_battle():
@@ -8323,9 +9081,31 @@ class FF1PSPContext(CommonContext):
                         else f"cat{c}:{g}")
             got = ", ".join(f"{nm(k)} +{v}" for k, v in gained.items()) or "NOTHING"
             ok = gained.get((cat, iid), 0) > 0
+            # Did this battle pay out at all? (gil or party EXP moved). Only
+            # asked when the item is missing -- a successful steal needs no
+            # explanation and should cost no extra reads.
+            paid1 = None
+            if not ok and paid0 is not None:
+                try:
+                    paid1 = await self._battle_totals()
+                except Exception:
+                    pass
+            won = None
+            if paid0 is not None and paid1 is not None:
+                won = (paid1[0] > paid0[0]) or (paid1[1] > paid0[1])
+            if ok:
+                tail = ""
+            elif won is False:
+                tail = ("  <-- battle ended without a victory (ran away, or "
+                        "the party fell): no drops are awarded then, so the "
+                        "steal was never banked")
+            else:
+                tail = "  <-- MISMATCH"
+            if paid0 is not None and paid1 is not None and not ok:
+                tail += (f" [gil {paid1[0] - paid0[0]:+d}, "
+                         f"party exp {paid1[1] - paid0[1]:+d}]")
             logger.info(f"  [thief-steal] grant check: asked for {name} "
-                        f"({cat},{iid}) -> inventory gained {got}"
-                        + ("" if ok else "  <-- MISMATCH"))
+                        f"({cat},{iid}) -> inventory gained {got}" + tail)
         except Exception as e:
             logger.info(f"  [thief-steal] grant check failed: {e!r}")
 
@@ -8643,6 +9423,13 @@ class FF1PSPContext(CommonContext):
         pre-v228 bake, which leaves every leg vanilla."""
         return await self._find_mailbox(b"MPWR", "_mp_mb", "magic_power")
 
+    async def _rp_mailbox(self):
+        """On-disc RPMK mailbox (reduced_party, v276): mask u8 @+4, bit N =
+        display row N held (missing member). None on a bake without the
+        feature -- the menu caves then aren't installed either, so there is
+        nothing to arm."""
+        return await self._find_mailbox(b"RPMK", "_rp_mb", "party")
+
     async def _write_magic_power_tables(self, soft_ids):
         """Publish the three per-monster-id u16[256] tables the magic_power
         caves read. Called from _write_monster_rewards so it rides the SAME
@@ -8782,19 +9569,22 @@ class FF1PSPContext(CommonContext):
             return None
 
     # Popup slot recs: ctx + 0x420 + idx*124; kind u8 @+0x44, active u8 @+0x77.
-    # The spawn lands at base + count (count is NOT always 0), so the icon can sit
-    # anywhere from _SC_SLOT_BASE up -- scan the transient pool by KIND rather
-    # than assuming a fixed 5 slots (a fixed 0x3C..0x40 scan found nothing and
-    # left "MISS!!" text on screen, live 2026-07-23).
+    # The icon records are placed by the allocator bump cursor (bb+0x67B6), so
+    # they can sit anywhere in the transient pool -- scan by KIND rather than
+    # assuming a fixed 5 slots (a fixed 0x3C..0x40 scan found nothing and
+    # left "MISS!!" text on screen, live 2026-07-23). Since the v274 cave
+    # (base 0x68C3 = cursor for the call) the spawner's act stamps land on
+    # these same records too, so kind-scan + act=0 clears everything the cue
+    # created; no stale record 0x3C stamp exists any more (that stamp's
+    # NULL-buffer submit was the 2026-08-21 party vanish).
     # (record geometry: the shared _SLOT_BASE0/_SLOT_STRIDE declared above)
     _STEAL_SLOT_KIND_OFF, _STEAL_SLOT_ACTIVE_OFF = 0x44, 0x77
-    # Scan the REAL transient pool and nothing past it. The cave writes base
-    # 0x3C, but the game recomputes base from its own counter before the spawn
-    # lands (live 2026-07-24: icon at slots 0x25..0x29, base ~0x21 + in-flight
-    # count) -- so a 0x3C.. window misses it entirely. The pool is idx ~0x21..
-    # ~0x42; the old 0x50 ceiling ran PAST the end of the slot array and zeroed
-    # "active" bytes in whatever battle-ctx memory followed whenever a stray
-    # byte read 19 -> party sprites vanished + crash ~2.5s after the cue.
+    # Scan the REAL transient pool and nothing past it. Icons land at the
+    # cursor (live 2026-07-24: slots 0x25..0x29 with ~0x21 + in-flight count
+    # already allocated). The pool is idx ~0x21..~0x42; the old 0x50 ceiling
+    # ran PAST the end of the slot array and zeroed "active" bytes in whatever
+    # battle-ctx memory followed whenever a stray byte read 19 -> party
+    # sprites vanished + crash ~2.5s after the cue.
     _STEAL_SLOT_SCAN_LO, _STEAL_SLOT_SCAN_HI = 0x21, 0x43
     _STEAL_SHOW_SEC = 2.5              # how long the cue stays up before it fades out
 
@@ -8899,12 +9689,19 @@ class FF1PSPContext(CommonContext):
         so a slow battle-start intro can't restore the def before the icon shows."""
         cleared_n = 0        # slots we deactivated (0 = icon never found)
         # pool_dead = this task's OWN verdict on the transient pool, from the
-        # kind-byte scan below. All-0xff there is the one state that separated
-        # every fatal fade from every harmless one (5/5 vs 0/19 across the
-        # Eridose bundles), and crash 5 proved _steal_block_live's fresher
-        # reads can still pass 1 ms after the scan read dead memory (same-bb
-        # new battle reinitializes the low slots first). None = scan never
-        # ran, treated as dead.
+        # scan below -- judged on the KIND BYTES ONLY, exactly what the
+        # "kinds[0..0x50]" dump prints. Kind-bytes-all-0xff + rewrite = crash,
+        # 8/8 across every Eridose bundle (v258..271) with zero false
+        # positives in ~27 fades; every fatal fade printed that dump and no
+        # harmless rewrite ever did. v2 of this gate required EVERY byte of
+        # the scan region to be 0xff, which only unmapped memory satisfies --
+        # a torn-down-and-REUSED block reads ff kinds with junk record bodies,
+        # evaluated pool_dead=False, and crash 8 (2026-08-21, patcher 271)
+        # walked straight through. A live-but-EMPTY pool also reads ff kinds;
+        # skipping the rewrite then costs at most one stolen item, and a pool
+        # that has no popups mid-battle is itself evidence the battle is not
+        # in the state the self-heal was written for. Fail safe = skip.
+        # None = scan never ran, treated as dead.
         pool_dead = None
         # Map we started the fade on. If it changes before the finally block
         # commits, the battle block `bb` points at has been torn down and
@@ -8927,7 +9724,12 @@ class FF1PSPContext(CommonContext):
             lo, hi = self._STEAL_SLOT_SCAN_LO, self._STEAL_SLOT_SCAN_HI
             base = bb + self._SLOT_BASE0 + lo * self._SLOT_STRIDE
             blk = await self.psp.read(base, (hi - lo) * self._SLOT_STRIDE)
-            pool_dead = blk.count(0xFF) == len(blk)
+            # KIND bytes only -- the whole-block test (v2) let crash 8 through:
+            # a reused block reads ff kinds over junk bodies and is just as
+            # fatal to write into as unmapped memory (see pool_dead above)
+            pool_dead = all(
+                blk[i * self._SLOT_STRIDE + self._STEAL_SLOT_KIND_OFF] == 0xFF
+                for i in range(hi - lo))
             for i in range(hi - lo):
                 rec = i * self._SLOT_STRIDE
                 # only clear slots holding OUR icon (kind == borrowed def), never
@@ -8953,6 +9755,10 @@ class FF1PSPContext(CommonContext):
                 cnt = (await self.psp.read(bb + 0x68CA, 1))[0]
                 logger.info(f"  [steal-icon] fade: cleared {cleared_n} slot(s); "
                             f"batch count 0x68ca reads {cnt} (never written)")
+                got = await self._sprite_nodes()
+                if got is not None:
+                    logger.info(f"  [holder] cue faded  nodes in use={got[0]} "
+                                f"free={got[1]}")
             if not cleared_n:
                 # Diagnostic: the icon is somewhere else -- dump every slot's
                 # kind byte so the real landing zone can be pinned from the log.
@@ -9089,6 +9895,10 @@ class FF1PSPContext(CommonContext):
                                                 random.choice(units)]))
             await self.psp.write(mb + 8, struct.pack("<H", se))
             await self.psp.write(mb + 4, bytes([1]))
+            got = await self._sprite_nodes()
+            if got is not None:
+                logger.info(f"  [holder] cue armed  nodes in use={got[0]} "
+                            f"free={got[1]}")
             # Fade the cue out after a couple seconds and hand def 19 back, so a
             # red insta-kill MISS!! later in the fight renders correctly (they
             # share def 19). Battle-end restore is the backstop if this doesn't
@@ -9133,6 +9943,11 @@ class FF1PSPContext(CommonContext):
         (absolute runtime addr, not sa-relative)."""
         prev = None          # row -> dict(hp=..., mp=...) baseline
         hp_gain = [0] * D.PARTY_COUNT    # Master: temp max HP gained this battle
+        # v274: our LIVE share of BU_ATTACK_BONUS per row, and the previous
+        # MB_MATK reading it is derived from. Both are per-battle, so they
+        # reset wherever hp_gain does.
+        atk_ours = [0] * D.PARTY_COUNT
+        matk_prev = [0] * D.PARTY_COUNT
         while not self.exit_event.is_set():
             await asyncio.sleep(0.3)
             try:
@@ -9190,6 +10005,8 @@ class FF1PSPContext(CommonContext):
                 if not await self._in_battle():
                     prev = None
                     hp_gain = [0] * D.PARTY_COUNT
+                    atk_ours = [0] * D.PARTY_COUNT
+                    matk_prev = [0] * D.PARTY_COUNT
                     continue
                 bb = await self.psp.read_u32(self.sa(D.BATTLE_ACTOR_OBJ_PTR_SA))  # latch-ok (in-battle gate is _in_battle() above; this only validates the ptr)
                 if not (0x08800000 <= bb < 0x0A000000):
@@ -9241,6 +10058,57 @@ class FF1PSPContext(CommonContext):
                     dhp = p["hp"] - c["hp"]
                     dmp = p["mp"] - c["mp"]
                     alive = (c["st"] & 3) == 0
+                    # --- v275 GRAND MASTER ATTACK INVARIANT ---------------------
+                    # The engine zeroes BU_ATTACK_BONUS when a unit goes down
+                    # (st&3: KO or stone) but preserves BU_MAXHP_BONUS -- live
+                    # 2026-08-27:
+                    #   DEATH : atk 92->92  atkbonus 31->0  hpbonus 123->123
+                    #   REVIVE: atk 61->61  atkbonus  0->0  hpbonus 123->123
+                    # MB_MATK is untouched by death, and the caves (MSTCHK/RWMMST)
+                    # add to it and to BU_ATTACK_BONUS in lockstep -- so a living
+                    # Master's scroll share of the field always equals the
+                    # accumulator. Rather than detect revive EDGES (v274 -- blind
+                    # to a KO+raise landing inside one poll window), enforce that
+                    # invariant every tick:
+                    #
+                    #   ours += acc growth          the caves granted since last tick
+                    #   ours  = min(ours, field)    field DROPPED below our share =>
+                    #                               a wipe happened; a tonic can only
+                    #                               ever raise the field, never
+                    #                               lower it, so this never clips a
+                    #                               tonic
+                    #   acc > ours  =>  add the difference back to the field
+                    #
+                    # Add-only writes keep tonics vanilla (they die with the unit,
+                    # stack on top otherwise). A mailbox misread (acc reads 0 for a
+                    # tick) contributes nothing: prev never moves backward, since
+                    # acc is monotonic within a battle (the caves only add; the
+                    # client zeroes the mailbox on the battle->field edge, where
+                    # these trackers reset too). The cap stays spent across death by
+                    # design: he comes back exactly as strong as he was, no
+                    # stronger. hp>0 mirrors the max-HP leg's guard against the
+                    # HP-write/status-write ordering window (v270).
+                    acc = matk[row]
+                    if not alive:
+                        atk_ours[row] = 0
+                    elif c["cls"] in (2, 8) and c["hp"] > 0:
+                        atk_ours[row] += max(0, acc - matk_prev[row])
+                        atk_ours[row] = min(atk_ours[row], c["atkbonus"])
+                        if acc > atk_ours[row]:
+                            back = acc - atk_ours[row]
+                            nb = min(0xFFFF, c["atkbonus"] + back)
+                            na = min(0xFFFF, c["atk"] + back)
+                            await self.psp.write(base + D.BU_ATTACK_BONUS,
+                                                 nb.to_bytes(2, "little"))
+                            await self.psp.write(base + D.BU_ATTACK,
+                                                 na.to_bytes(2, "little"))
+                            c["atkbonus"], c["atk"] = nb, na
+                            atk_ours[row] = acc
+                            logger.info(
+                                f"  [scrolls] Master row{row}: restored +{back} "
+                                f"attack after KO (atkbonus {nb}, atk {na}, "
+                                f"acc {acc})")
+                    matk_prev[row] = max(matk_prev[row], acc)
                     # (Crimson Wizard delta leg removed in v120 -- on-disc now.)
                     # (v130: the Grand Master ATTACK leg also moved on-disc -- to
                     # the same damage epilogues as the CW refund -- so it can draw
@@ -9492,7 +10360,13 @@ class FF1PSPContext(CommonContext):
             try:
                 if self.save_delta is None or await self._in_battle():
                     continue
+                mrows = self._member_missing_rows()
                 for row in range(D.PARTY_COUNT):
+                    if row in mrows:
+                        # HELD row (missing / not-yet-joined party member):
+                        # _member_loop owns it and stamps the full-KO state
+                        # itself; skipping avoids duplicate stamps + log spam.
+                        continue
                     b = await self.psp.read(self.sa(D.party_addr_sa(row, D.P_HP)), 4)
                     hp = int.from_bytes(b[0:2], "little")
                     mx = int.from_bytes(b[2:4], "little")
@@ -9504,6 +10378,273 @@ class FF1PSPContext(CommonContext):
                                              bytes([st | D.P_STATUS_KO]))
                         logger.info(f"  [ko_sync] row{row} was 0 HP without the KO "
                                     "state (blood magic?) -- marked KO")
+            except Exception:
+                # transient read failures (save block relocating) are expected
+                await asyncio.sleep(2.0)
+
+    # ---------------- missing party members (starting_party_members) --------------
+    _MEMBER_TICK = 0.5
+
+    async def _exp_for_level(self, lvl):
+        """Cumulative EXP needed to REACH lvl, read from the game's own
+        threshold table (D.EXP_FOR_LEVEL_ADDR -- BOOT static data, entry 0 =
+        Lv2; one curve for all jobs). Lv<=1 -> 0. None on an implausible read
+        (boot-time zeros): the caller treats the character as UNJOINED (held)
+        and retries the join next tick -- only that row's join waits, the
+        rest of the tick proceeds."""
+        if lvl <= 1:
+            return 0
+        v = await self.psp.read_u32(D.EXP_FOR_LEVEL_ADDR + 4 * (lvl - 2))
+        return v if 0 < v <= D.EXP_CAP else None
+
+    async def _member_swap_rows(self, a, b):
+        """Swap party display rows a and b.
+
+        LAYOUT TRAP (live corruption 2026-08-28): the identity/class/status
+        "arrays" at PARTY_BASE_SA-4/-2/-1 are NOT separate storage -- they
+        alias the 4-byte TAIL (+0x58..+0x5B) of the PRECEDING record. Swapping
+        the full 0x5C records AND the array bytes double-moves overlapping
+        bytes and scrambles the party (a present member turned up dead in
+        slot 1). Correct model: display row r = record BODY (0x58 bytes at
+        party_addr_sa(r, 0)) + the row's tail QUAD read through
+        identity_addr_sa(r) (slotid/?/class/status, 4 bytes) -- swap each
+        exactly once, plus the per-row spell arrays (spent/cwpool/soma)."""
+        pairs = [(self.sa(D.party_addr_sa(a, 0)), self.sa(D.party_addr_sa(b, 0)),
+                  0x58),
+                 (self.sa(D.identity_addr_sa(a)), self.sa(D.identity_addr_sa(b)), 4),
+                 (self.sa(D.SPELL_SLOTS_SPENT_BASE_SA + a * 8),
+                  self.sa(D.SPELL_SLOTS_SPENT_BASE_SA + b * 8), 8),
+                 (self.sa(D.SPELL_SLOTS_CWPOOL_SA + a),
+                  self.sa(D.SPELL_SLOTS_CWPOOL_SA + b), 1),
+                 (self.sa(D.SPELL_SLOTS_SOMA_SA + a),
+                  self.sa(D.SPELL_SLOTS_SOMA_SA + b), 1)]
+        for pa, pb, n in pairs:
+            va = await self.psp.read(pa, n)
+            vb = await self.psp.read(pb, n)
+            await self.psp.write(pa, vb)
+            await self.psp.write(pb, va)
+
+    async def _member_identity_rows(self):
+        """{identity: current row} over the 4 party records. The identity byte
+        (D.identity_addr_sa) TRAVELS with a Formation swap while plan state is
+        keyed by CREATION slot -- and at new game row r holds identity r -- so
+        resolving through this map keeps every enforcement/join write on the
+        same CHARACTER wherever the player moved them (formation-swap hazard,
+        review 2026-08-28). None when the bytes are not a permutation of 0..3
+        (title screen / mid-rewrite): callers fall back to identity == row."""
+        ids = {}
+        for r in range(D.PARTY_COUNT):
+            b = await self.psp.read(self.sa(D.identity_addr_sa(r)), 1)
+            ids[b[0]] = r
+        return ids if sorted(ids) == [0, 1, 2, 3] else None
+
+    async def _member_loop(self):
+        """starting_party_members: hold MISSING members full-KO; join found ones.
+
+        Missing encoding = SOFT-DEAD (P_HP 0, field KO byte CLEAR -- settled
+        by a live A/B against full-KO, user call 2026-08-28): the clear byte
+        natively makes the CHURCH refuse them and keeps Phoenix Down / Life
+        from targeting them, which full-KO could only fake with re-kill
+        hacks. The member can't act, is never targeted, earns no battle EXP.
+        Battle is 100% engine-side since v290: the classifier cave
+        (_RP_WIPE_HOOK, iso_patcher) ORs the RPMK held bit into BU_STATUS
+        at read time, so held rows register out-of-action for the wipe
+        check with no BU write, no battle-start race and no kneel wart --
+        this loop does not touch battle RAM at all.
+
+        OWNERSHIP: the loop owns every UNJOINED plan character -- missing
+        (item not received) AND satisfied-but-not-yet-joined -- publishing
+        their CURRENT rows in _member_hold_rows every tick. _ko_sync_loop,
+        grant_exp and _limbo_revive skip hold rows. A
+        character who JOINS leaves the set for good: normal rules resume,
+        ko_sync stamps their real deaths for the church, and nothing here
+        ever touches them again -- so a joined member's death can never be
+        silently undone (blood-magic / deathlink races, review 2026-08-28).
+
+        JOIN LATCH (persists in the SAVE, not the client): a plan character
+        is joined iff P_EXP >= the join level's threshold (game's own table,
+        _exp_for_level). The join write IS the latch: EXP floor + full HP +
+        KO byte cleared UNCONDITIONALLY -- a ko_sync race or the battle
+        write-back may have stamped KO while unjoined, and the old KO-clear
+        precondition stranded exactly those joins (review 2026-08-28). A
+        reload to a pre-join save rolls EXP under the floor and the join
+        re-fires; the engine grants the levels with real stat rolls at the
+        next battle victory.
+
+        ROWS: plan entries are keyed by CREATION slot; every write resolves
+        the character's CURRENT row through the identity array
+        (_member_identity_rows), so a Formation swap can never point the
+        writes at the wrong character.
+
+        WRITE GATES: joined characters (the EXP latch) are exempt from every
+        write, which is what makes acting on an EMPTY items_received safe --
+        a virgin seed has no items (so a _synced() gate would deadlock the
+        loop, live 2026-08-28), and a disconnect blip that empties the list
+        can only ever affect UNJOINED characters, who are supposed to be held
+        anyway. No writes on a fresh new game before
+        the L1 block it writes -- residual micro-race: a join arriving in
+        the ~1s before the gil/monk one-shots finish flips _party_state to
+        "underway" under them; start_inventory party members only, accepted).
+        The NG+ carried-creation snapshot is skipped via
+        _carried_save_snapshot. Battle: hands-off (see the encoding
+        paragraph -- the wipe-check KO is baked and virtual since v290).
+        Joins happen on the FIELD only."""
+        if not self.missing_party:
+            return                      # feature off this seed
+        announced = set()
+        killed = set()                  # rows enforced at least once this run
+                                        # (a later hp>0 = a revival to re-kill)
+        while not self.exit_event.is_set():
+            await asyncio.sleep(self._MEMBER_TICK)
+            try:
+                if self.save_delta is None:
+                    continue
+                # NO _synced() gate here: a virgin seed has ZERO received
+                # items, so _synced() stays False forever and the loop would
+                # never enforce (live 2026-08-28: full party played normally).
+                # The disconnect-blip protection it was meant to provide is
+                # covered strictly better by the per-row EXP join-latch below:
+                # a JOINED character (P_EXP >= their plan floor) is never
+                # touched no matter what the transiently-empty counts claim.
+                missing, satisfied = self._member_plan_split()
+                sat_slots = {pr for pr, _j, _lv in satisfied}
+                idmap = await self._member_identity_rows()
+
+                def row_of(creation_slot):
+                    return (idmap or {}).get(creation_slot, creation_slot)
+
+                # Partition EVERY plan character by the persistent join latch
+                # (joined iff save EXP >= the join level's threshold), counts
+                # only decide whether an unjoined one may JOIN this tick.
+                # floor None (threshold table unreadable) = can't judge ->
+                # leave that character completely alone this tick.
+                enforce = []            # (cur_row,) unjoined + item not received
+                join_pending = []       # (creation_slot, cur_row, job, lvl, floor)
+                for pr, job, lvl in self.missing_party:
+                    floor = await self._exp_for_level(lvl)
+                    if floor is None:
+                        continue
+                    cur = row_of(pr)
+                    exp = await self.psp.read_u32(
+                        self.sa(D.party_addr_sa(cur, D.P_EXP)))
+                    if exp >= floor:
+                        continue        # JOINED: theirs is a normal life now
+                    if pr in sat_slots:
+                        join_pending.append((pr, cur, job, lvl, floor))
+                    else:
+                        enforce.append(cur)
+                hold = (frozenset(enforce)
+                        | frozenset(cur for _p, cur, _j, _lv, _f in join_pending))
+                self._member_hold_rows = hold
+                # Arm the on-disc RPMK held-row mask (menu/battle row hiding +
+                # char-select skips). Re-written every tick: a savestate load
+                # reverts cave RAM, and a join must un-hide the row at once.
+                # hold can never cover all 4 rows (the plan holds <= 3), so
+                # the caves' all-held guard is belt-and-braces only.
+                _mb = await self._rp_mailbox()
+                if _mb is not None:
+                    _mask = 0
+                    for _r in hold:
+                        _mask |= 1 << _r
+                    await self.psp.write(_mb + IP.RP_MB_MASK_OFF,
+                                         bytes([_mask & 0xF]))
+                if await self._in_battle():
+                    # v290: NOTHING to do in battle. Soft-dead HP 0 natively
+                    # denies turns/targeting/EXP (probed 2026-08-27 with the
+                    # client off); the baked classifier cave (_RP_WIPE_HOOK)
+                    # ORs the RPMK bit into BU_STATUS at read time so held
+                    # rows register out-of-action for the wipe check; the
+                    # v280 popup-ctor hooks born-hide the sprites. The old
+                    # per-battle stamp + 50ms fast-poll + act pokes lived
+                    # here -- deleted with the races they existed to win.
+                    # Field records are engine-owned mid-battle.
+                    continue
+                state = await self._party_state()
+                if state == "uninit":
+                    continue
+                if state == "fresh" and not getattr(self, "_party_applied", False):
+                    continue            # _party_loop still stabilizing L1 blocks
+                if state == "underway" and await self._carried_save_snapshot():
+                    continue            # NG+ creation screen shows the beaten save
+                # LEADER NORMALIZATION (user call 2026-08-28): the overworld
+                # walker always draws slot 1's job, so a Formation swap that
+                # parks a MISSING member in slot 1 shows a ghost leader. On a
+                # true field frame (never in the menu -- the non-field flag
+                # covers both) swap the held occupant of row 0 with the
+                # top-most un-held row, exactly the state the game's own
+                # formation swap moves (record + identity/class/status bytes +
+                # the spent/pool/soma spell arrays), then retick fresh.
+                if 0 in hold and not any(cur == 0 for _p, cur, _j, _lv, _f
+                                         in join_pending):
+                    tgt = next((r for r in range(D.PARTY_COUNT)
+                                if r not in hold), None)
+                    if tgt is not None:
+                        await self._member_swap_rows(0, tgt)
+                        logger.info("  [party] leader normalization: moved the "
+                                    f"missing member in slot 1 down to slot "
+                                    f"{tgt + 1}")
+                        continue        # rows moved; recompute next tick
+                for row in enforce:
+                    b = await self.psp.read(
+                        self.sa(D.party_addr_sa(row, D.P_HP)), 4)
+                    hp = int.from_bytes(b[0:2], "little")
+                    mx = int.from_bytes(b[2:4], "little")
+                    if mx == 0:
+                        continue        # record not real yet
+                    if hp:
+                        await self.psp.write(
+                            self.sa(D.party_addr_sa(row, D.P_HP)),
+                            (0).to_bytes(2, "little"))
+                        if row in killed:
+                            # a held row came back to life = a church/Life/
+                            # Phoenix revival landed -> re-kill + tell the
+                            # player why their gil did nothing
+                            logger.info("  [party] a MISSING member cannot be "
+                                        "revived -- find their item in the "
+                                        "multiworld instead")
+                        killed.add(row)
+                    st = (await self.psp.read(
+                        self.sa(D.status_addr_sa(row)), 1))[0]
+                    if st & D.P_STATUS_KO:
+                        # SOFT-DEAD encoding (user call 2026-08-28, after a
+                        # live A/B against full-KO): the CLEAR KO byte is what
+                        # makes the church refuse them and keeps Phoenix Down
+                        # / Life from targeting them -- all native, no
+                        # re-kill hacks. A set byte here is battle write-back
+                        # or a stray stamp -> strip it back off.
+                        await self.psp.write(
+                            self.sa(D.status_addr_sa(row)),
+                            bytes([st & ~D.P_STATUS_KO]))
+                for pr, cur, job, lvl, floor in join_pending:
+                    b = await self.psp.read(
+                        self.sa(D.party_addr_sa(cur, D.P_HP)), 4)
+                    hp = int.from_bytes(b[0:2], "little")
+                    mx = int.from_bytes(b[2:4], "little")
+                    if mx == 0:
+                        continue        # record not real yet
+                    # JOIN, atomically with the latch: EXP floor first (the
+                    # persisted joined-marker), then HP + KO regardless of
+                    # what a race stamped while unjoined.
+                    await self.psp.write_u32(
+                        self.sa(D.party_addr_sa(cur, D.P_EXP)), floor)
+                    if hp == 0:
+                        await self.psp.write(
+                            self.sa(D.party_addr_sa(cur, D.P_HP)),
+                            mx.to_bytes(2, "little"))
+                    st = (await self.psp.read(
+                        self.sa(D.status_addr_sa(cur)), 1))[0]
+                    if st & D.P_STATUS_KO:
+                        await self.psp.write(
+                            self.sa(D.status_addr_sa(cur)),
+                            bytes([st & ~D.P_STATUS_KO]))
+                    if pr not in announced:
+                        announced.add(pr)
+                        jn = (D.JOB_NAMES[job]
+                              if 0 <= job < len(D.JOB_NAMES) else f"job {job}")
+                        logger.info(
+                            f"  [party] {jn} JOINS the party (member "
+                            f"{pr + 1})! Lv {lvl} lands at the next "
+                            "battle victory")
             except Exception:
                 # transient read failures (save block relocating) are expected
                 await asyncio.sleep(2.0)
@@ -9613,7 +10754,10 @@ class FF1PSPContext(CommonContext):
         blk = await self.psp.read(bb + D.BATTLE_UNIT_OFF,
                                   D.PARTY_COUNT * D.BATTLE_UNIT_STRIDE)
         best, best_mx = None, 0
+        mrows = self._member_missing_rows()
         for row in range(D.PARTY_COUNT):
+            if row in mrows:
+                continue    # never revive a MISSING member (starting_party_members)
             o = row * D.BATTLE_UNIT_STRIDE
             mx = int.from_bytes(blk[o + D.BU_MAXHP:o + D.BU_MAXHP + 2], "little")
             if mx > best_mx:
@@ -9776,6 +10920,345 @@ class FF1PSPContext(CommonContext):
                         + (f" (x{n})" if n > 3 else ""))
                 prev_living, wipe_polls = None, 0
                 await asyncio.sleep(min(30.0, 2.0 ** min(n, 5)))
+
+    # ---------------- trap items (yaml trap_percentage) ---------------------------
+    # Received trap items (ids.TRAP_OFF) queue here and spring at the NEXT
+    # battle, one per battle, spaced out only when a backlog builds up.
+    # Delivery persistence rides the received-counter pipeline (see the enqueue
+    # in _grant_pending); the queue itself is session state, which is fine
+    # because an already-counted trap is never re-enqueued on reconnect.
+    # NO FUSE. A trap springs at the very next battle (user 2026-08-30) -- the
+    # old 0-10 and 0-2 fuses only delayed the FIRST trap, because arming is
+    # one-per-battle and a batch drains at 1/battle either way, so the wait cost
+    # the player the connection between the pickup and the trap.
+    # Spacing appears ONLY on a backlog, and the rule lives in trap_fuse so it
+    # can be unit-tested by SHAPE ("3 queued -> T . T T"); see there for why the
+    # threshold is "2 still waiting" rather than the "3 in hand" it is specified
+    # as. Nothing here re-derives it.
+    # Each name is the ability's OWN in-game string + " Trap": the battle box
+    # prints "Silence" / "Death" / "Ink" / "Poison Darts", all decoded from the
+    # disc name banks 2026-08-30. NB spells index their bank 1-BASED and enemy
+    # skills index theirs 0-BASED -- the two live sightings are what proved it.
+    _TRAP_NAMES = {0: "Death Trap", 2: "Ink Trap",
+                   3: "Silence Trap", 4: "Poison Darts Trap"}
+    # RETIRED ordinals (see ff1psp.RETIRED_TRAP_KINDS): the gen side can no
+    # longer roll these, but an in-flight multiworld generated on an older
+    # apworld still can, so they are swallowed here instead of falling through
+    # as an unknown kind that would sit in the queue forever.
+    _TRAP_RETIRED = {1: "Mana Sap Trap", 5: "Monster Magnet Trap",
+                     6: "Ogre's Toll Trap"}
+    # Each surviving trap IS a real ability the engine already ships, cast by a
+    # real monster with its own animation, message and targeting. All four
+    # records were verified against live RAM 2026-08-30 -- see the on-disc cave
+    # iso_patcher._trap_cave, which does the actual committing.
+    _TRAP_EFFECT = {0: 0x36,     # spell 54 Death   -- single target
+                    2: 0x56,     # skill 0x15 "Ink" -- party-wide, acc 72
+                    3: 0x06,     # spell 6 Silence  -- party-wide
+                    4: 0x57}     # skill 0x16 poison darts -- party-wide spray
+
+    def _trap_enqueue(self, kind, idx=None):
+        """Queue one received trap. No fuse is drawn -- it springs at the next
+        battle unless a backlog is being spaced out (see _trap_arm).
+
+        `idx` is the items_received position this trap was delivered from, and
+        it is the trap's identity across the two delivery roads -- see
+        trap_store for why it exists and what each road may drop."""
+        if TS.is_pending(idx, self._trap_queue, self._trap_armed):
+            # The counter just rolled back over a trap that is STILL WAITING to
+            # fire (in-place save reload): the queue -- or this slot's stored
+            # queue, restored at connect -- already holds it. Delivering it
+            # again is the 5-sent-9-queued double count, not a second trap.
+            return
+        if kind in self._TRAP_RETIRED:
+            logger.info(f"  [trap] {self._TRAP_RETIRED[kind]} received -- that "
+                        f"trap has been retired; ignoring")
+            return
+        if kind not in self._TRAP_EFFECT:
+            logger.info(f"  [trap] unknown trap kind {kind} -- ignoring")
+            return
+        name = self._TRAP_NAMES.get(kind, f"Trap {kind}")
+        self._trap_queue.append(TS.entry(kind, idx))
+        if idx is not None:
+            self._trap_seen_idx.add(int(idx))
+        logger.info(f"  [trap] {name} received -- it will spring soon...")
+        self._trap_store_save()
+
+    async def _trap_real_battle(self):
+        """battle_base for a battle that is REALLY under way, else None.
+
+        D.BATTLE_ACTIVE_FLAG_SA is a "non-field frame" flag, not a battle flag:
+        it also reads 1 while the PAUSE MENU is open (see _in_battle), and
+        BATTLE_ACTOR_OBJ_PTR_SA LATCHES the last battle's base forever. Gating a
+        trap on the raw flag alone therefore counted menu frames as battles --
+        it ticked every fuse down on menu close, and back when the client still
+        fired traps itself it wrote status into the PREVIOUS battle's dead block
+        and logged "the party is afflicted" into the void. That is why the
+        2026-08-29 playtest found several traps and noticed none go off.
+
+        Two cheap tests, both already proven elsewhere in this client:
+          * the resolved-encounter block must decode (_battle_xp) -- the steal
+            loop's guard against exactly this, commented there "proven decisive";
+          * at least one ENEMY row must be alive. A battle that has already ENDED
+            leaves a block a later menu frame still re-reads through the latched
+            pointer; _battle_xp alone cannot tell those apart, a living enemy can.
+
+        Fail safe = None: skipping a tick costs nothing. The cave does the actual
+        firing now, so this only decides which frames count as a battle for the
+        fuses and for the one-trap-per-battle arming gate."""
+        if not await self._in_battle():
+            return None
+        try:
+            bb = await self.psp.read_u32(self.sa(D.BATTLE_ACTOR_OBJ_PTR_SA))
+            if await self._battle_xp(bb) is None:
+                return None
+            rows = await self.psp.read(
+                bb + D.BATTLE_UNIT_OFF + D.PARTY_COUNT * D.BATTLE_UNIT_STRIDE,
+                D.BATTLE_ENEMY_ROWS * D.BATTLE_UNIT_STRIDE)
+        except Exception:
+            return None
+        for i in range(D.BATTLE_ENEMY_ROWS):
+            o = i * D.BATTLE_UNIT_STRIDE
+            if (rows[o + D.BU_SPECIES] != 0xFF
+                    and int.from_bytes(rows[o + D.BU_HP:o + D.BU_HP + 2],
+                                       "little") > 0):
+                return bb
+        return None
+
+    async def _trap_loop(self):
+        """Move queued traps along and hand the due one to the on-disc cave.
+
+        A queued trap arms the TRP1 mailbox as soon as the player is on the
+        field, and the cave springs it at the start of the next battle as a REAL
+        monster ability (see iso_patcher._trap_cave). Only a BACKLOG is spaced
+        out -- see _trap_arm and trap_fuse.
+
+        The client does NOT fire traps any more. It cannot: the cave runs at
+        phase 1 of a round, which is over long before a 0.5s poll could notice
+        the battle at all. So arming happens on the FIELD -- the same shape the
+        retired Ogre's Toll needed -- and there is no race left to lose.
+
+        Only REAL battles advance a fuse: the edges ride _trap_real_battle(),
+        never the raw in-battle byte. See there for what that byte actually
+        means and what gating on it cost."""
+        prev_bb = None
+
+        async def tick():
+            nonlocal prev_bb
+            if not self.slot_data:
+                return
+            if self.save_delta is None:
+                return
+            bb = await self._trap_real_battle()
+            if prev_bb is not None and bb is None:
+                # a real battle just ended: burn one battle off the backlog gap
+                # and re-open the one-trap-per-battle latch
+                if self._trap_gap > 0:
+                    self._trap_gap -= 1
+            prev_bb = bb
+            # ONE TRAP PER BATTLE (user design 2026-08-30). The cave runs at
+            # phase 1 of EVERY round, so arming mid-fight would let a second
+            # trap open round 2 of the same battle -- two traps reading as one
+            # long bad turn instead of two events. Arm on the FIELD only.
+            await self._trap_arm(in_battle=bb is not None)
+
+        await self._poll(0.5, "trap_loop", tick)
+
+    async def _trap_arm(self, in_battle=False):
+        """Keep the TRP1 mailbox holding the due trap, and notice when the cave
+        spends it.
+
+        `in_battle` suppresses ARMING -- the spend confirmation is still
+        collected mid-battle, so the trap that just fired is retired promptly
+        and its successor is ready the moment the fight ends.
+
+        A trap that LANDS mid-fight cannot spring in that same battle, and it is
+        not worth re-attempting without changing delivery first: _trap_enqueue
+        is called from inside _grant_pending's counter walk, which sits behind a
+        SAFE-STATE GATE that explicitly includes not-in-battle. A trap sent
+        mid-fight is therefore not queued at all until the battle ends -- proven
+        live 2026-08-30, where the arrival always reported in_battle=False with
+        every other condition clear. Making it work means scanning
+        items_received for traps on a separate index outside that gate, which
+        takes traps off the received-counter pipeline the idx dedup relies on.
+
+        Re-armed EVERY tick while a trap is pending, like the BDC1 chest
+        mailbox: the Death victim is re-rolled each time, so an ambush that
+        kills the member we picked before the cave fires cannot leave the trap
+        aimed at a corpse. The cave clears `armed` itself and bumps `fired`, so
+        a re-arm can never double-fire one trap."""
+        mb = await self._find_mailbox(IP._TRP_MB_MAGIC, "_trap_mb", "trap")
+        if mb is None:
+            return
+        try:
+            fired = (await self.psp.read(mb + IP._TRP_MB_FIRED_OFF, 1))[0]
+        except Exception:
+            return
+        if self._trap_fired_seen is None:
+            self._trap_fired_seen = fired          # baseline, never a fire
+        elif fired != self._trap_fired_seen:
+            self._trap_fired_seen = fired
+            spent, self._trap_armed = self._trap_armed, None
+            if spent is not None:
+                name = self._TRAP_NAMES.get(spent["kind"],
+                                            f"Trap {spent['kind']}")
+                try:
+                    row = (await self.psp.read(mb + IP._TRP_MB_ROW_OFF, 1))[0]
+                except Exception:
+                    row = None
+                logger.info(f"  [trap] {name} sprang"
+                            + (f" -- enemy row {row} cast it" if row is not None
+                               else ""))
+            # Space the NEXT one out only if a backlog is building. Decided
+            # here, on the fire, from what is still waiting -- not drawn per
+            # trap at receipt -- so it re-evaluates as the queue drains and
+            # stops spacing the moment the backlog is gone.
+            self._trap_gap = TF.next_gap(len(self._trap_queue))
+            if self._trap_gap:
+                logger.info(f"  [trap] {len(self._trap_queue)} more waiting -- "
+                            f"spacing the next one {self._trap_gap} battle(s) "
+                            f"out")
+            self._trap_store_save()
+        if in_battle:
+            return                          # never arm a second trap mid-fight
+        if self._trap_gap > 0:
+            return                          # backlog spacing: hold this battle
+        if self._trap_armed is None:
+            if not self._trap_queue:
+                return
+            self._trap_armed = self._trap_queue.pop(0)
+            self._trap_store_save()
+        eff = self._TRAP_EFFECT[self._trap_armed["kind"]]
+        target = await self._trap_target(eff)
+        if target is None:
+            return                                  # nobody to aim at: hold
+        try:
+            await self.psp.write(mb + IP._TRP_MB_TARGET_OFF,
+                                 bytes([target]) + b"\x00\x00")
+            await self.psp.write(mb + IP._TRP_MB_EFFECT_OFF,
+                                 eff.to_bytes(2, "little"))
+            await self.psp.write(mb + IP._TRP_MB_ARMED_OFF, bytes([1]))
+        except Exception:
+            pass                                    # next tick re-arms
+
+    async def _trap_target(self, eff):
+        """The value the cave stamps into unit+0x41, or None to hold.
+
+        Read the effect's TARGET MODE rather than tabling it: only mode 0x02
+        wants a per-row selector, and getting that wrong is invisible on the
+        three party-wide traps (they ignore the byte) and wrong ONLY on Death --
+        exactly the bug a hardcoded 0xFF hid during the live rehearsals.
+
+        Death takes a RANDOM LIVING member (user design 2026-08-30). A row the
+        member feature still holds is not a person yet, so it is never picked."""
+        import random as _random
+        try:
+            mode = (await self.psp.read(
+                D.MAGIC_INFO_REC0 + (eff - 1) * D.MAGIC_INFO_STRIDE
+                + D.MI_TARGET_MODE, 1))[0]
+        except Exception:
+            return None
+        if mode != D.MI_TARGET_SINGLE:
+            return 0xFF                             # party-wide: no selector
+        held = self._member_missing_rows()
+        living = []
+        for row in range(D.PARTY_COUNT):
+            if row in held:
+                continue
+            try:
+                hp = int.from_bytes(await self.psp.read(
+                    self.sa(D.party_addr_sa(row, D.P_HP)), 2), "little")
+            except Exception:
+                return None
+            if hp > 0:
+                living.append(row)
+        return _random.choice(living) if living else None
+
+    # -- trap delivery persistence ----------------------------------------------
+    # The queue is the ONLY record of a received-but-unfired trap: the received
+    # counter has already advanced past it, so the counter walk will never
+    # re-enqueue it and a client restart used to drop it silently. Keep it in
+    # this slot's own DataStorage key (same mechanism as the bought-hint rows).
+    def _trap_store_key(self):
+        return f"ff1psp_traps_{self.team}_{self.slot}"
+
+    def _trap_state(self):
+        """Queue + the trap whose mailbox arming is live, as plain dicts.
+
+        The armed one is included so a client that dies between "armed" and
+        "the cave spent it" restores it rather than eating it. The cost of the
+        other race -- dying just AFTER the cave fired but before we saw the
+        counter move -- is one trap firing twice, which is strictly better than
+        a trap silently vanishing (the failure that started this whole rework).
+
+        Every entry carries the items_received index it came from, which is
+        what lets the counter walk and this store recognise the SAME trap
+        instead of both delivering it. An older client reading this back just
+        ignores the extra key.
+
+        The backlog GAP is deliberately not persisted: it is at most two
+        battles, the stored value is a bare list, and adding a dict wrapper
+        would strand every queue already saved by an older client. A restart
+        mid-gap costs one trap arriving a battle or two early."""
+        armed = ([TS.entry(self._trap_armed["kind"],
+                           self._trap_armed.get("idx"))]
+                 if self._trap_armed else [])
+        return ([TS.entry(t["kind"], t.get("idx")) for t in self._trap_queue]
+                + armed)
+
+    async def _trap_store_fetch(self):
+        """Read this slot's stored queue and subscribe to its updates."""
+        key = self._trap_store_key()
+        try:
+            await self.send_msgs([{"cmd": "Get", "keys": [key]},
+                                  {"cmd": "SetNotify", "keys": [key]}])
+        except Exception as e:
+            logger.info(f"  [trap] could not read pending traps ({e!r}) -- "
+                        f"traps received before this session may be lost")
+
+    def _trap_apply_stored(self, value):
+        """Merge the stored queue in ONCE, at connect. Later SetReply echoes are
+        our own writes coming back and must not re-add anything.
+
+        Entries whose index this session has ALREADY enqueued are dropped: the
+        counter walk got there first, and a save reload rolls that counter back
+        over traps this store is holding too (5 sent, 9 queued, live
+        2026-08-30). Dropping is safe only because the index proves the same
+        trap is already accounted for -- see trap_store."""
+        if self._trap_restored:
+            return
+        self._trap_restored = True
+        # "battles" is the retired per-trap fuse; a queue saved by an older
+        # client still carries it and is read fine without it.
+        restored = TS.restorable(value, self._trap_seen_idx, self._TRAP_NAMES)
+        for e in restored:
+            if e.get("idx") is not None:
+                self._trap_seen_idx.add(int(e["idx"]))
+        if restored:
+            self._trap_queue += restored
+            logger.info(f"  [trap] {len(restored)} trap(s) received in an "
+                        f"earlier session are still armed")
+
+    def _trap_store_save(self):
+        """Persist the queue (fire-and-forget). Skipped when nothing changed, so
+        the per-battle-end call is silent on a trapless seed. Never awaited by a
+        caller: a server hiccup must not stall the trap loop."""
+        state = self._trap_state()
+        if state == self._trap_stored:
+            return
+        self._trap_stored = state
+
+        async def push():
+            try:
+                await self.send_msgs([{
+                    "cmd": "Set", "key": self._trap_store_key(),
+                    "default": [], "want_reply": False,
+                    "operations": [{"operation": "replace", "value": state}]}])
+            except Exception as e:
+                logger.info(f"  [trap] could not persist pending traps ({e!r})")
+        try:
+            asyncio.create_task(push())
+        except RuntimeError:
+            pass                            # no running loop (tests / teardown)
 
     # ---------------- shop AP stock (sequential AP purchases in stores) ----------------
     async def _patch_mutate(self, patch, new):
@@ -10043,6 +11526,73 @@ class FF1PSPContext(CommonContext):
         elif (await self.psp.read(self.sa(D.BONUS_MAPID_ADDR), 1))[0] >= D.BONUS_MAPID_MIN:
             self._bonus_latch = True
         return self._bonus_latch
+
+    async def _bonus_vehicle_loan(self, snap, in_bonus):
+        """Lend the canoe/airship FUNCTION bits for the duration of a bonus floor.
+
+        WHY (live 2026-08-21, Hellfire Chasm special floor 0xD2): the DLC fake-
+        overworld floors hand out their own ship but NOT a canoe -- the river
+        check reads the player's real sailing bit -- so a player who has not won
+        the Canoe cannot cross a single river on such a floor. See
+        D.BONUS_VEHICLE_LOAN for the measured matrix and for why this loans
+        function bits only, never possession.
+
+        Loan = set any listed bit that is currently clear, remembering exactly
+        which rows WE set. Release = clear those same rows again.
+
+        The release is the dangerous half (the map-scoped-hold lesson), so it has
+        two guards:
+          * TRUE OVERWORLD ONLY, by the FINE map id -- _in_bonus_dungeon's latch
+            clears on the COARSE bucket, which reads 0 on Whisperwind floors, and
+            believing that would take the canoe back mid-dungeon.
+          * ON FOOT ONLY (vehicle mode 0). Clearing the sailing bit under a party
+            that is sitting in a canoe/ship is exactly how you strand someone in
+            the middle of water.
+        A row whose key was won in the meantime is dropped from the debt instead
+        of being cleared -- that bit is legitimately the player's now."""
+        if self.save_delta is None:
+            return
+        if in_bonus:
+            for row in D.BONUS_VEHICLE_LOAN:
+                addr, mask, kid, label = row
+                if self._key_won(kid):
+                    continue          # legitimately theirs -- never a loan
+                asa = self.sa(addr)
+                cur = await snap.rd(asa)
+                if not (cur & mask):
+                    await snap.wr(asa, cur | mask)
+                    logger.info(f"  [veh-loan] loaned {label} for the bonus "
+                                f"dungeon ({addr:#x} |= {mask:#04x}) -- "
+                                f"returned on the overworld")
+                # Record the debt even when the bit was ALREADY set. A client
+                # restarted on a bonus floor sees its own outstanding loan as an
+                # ordinary set bit, and with a fresh empty debt it would never
+                # give it back -- a free canoe for the rest of the seed. For an
+                # UNWON key a set bit here can only be our loan or a native
+                # grant this seed strips anyway, so adopting it is correct in
+                # both cases.
+                self._veh_loan.add(row)
+            return
+        if not self._veh_loan:
+            return
+        fine = await self.psp.read_u32(self.sa(D.FIELD_MAP_ID_SA))
+        if fine != D.OVERWORLD_FIELD_MAP_ID:
+            return
+        if (await self.psp.read(self.sa(D.SD_VEHICLE_MODE_SA), 1))[0] != 0:
+            return                    # still riding something -- never strand
+        for row in sorted(self._veh_loan, key=lambda r: (r[0], r[1])):
+            addr, mask, kid, label = row
+            if self._key_won(kid):
+                logger.info(f"  [veh-loan] {label} kept -- key {kid} won while "
+                            f"the loan was out")
+                continue
+            asa = self.sa(addr)
+            cur = await snap.rd(asa)
+            if cur & mask:
+                await snap.wr(asa, cur & ~mask)
+                logger.info(f"  [veh-loan] returned {label} "
+                            f"({addr:#x} &= ~{mask:#04x})")
+        self._veh_loan.clear()
 
     async def _rune_borrow_zone(self):
         """Should the id-35 display borrow be released right now?
@@ -10467,7 +12017,16 @@ class FF1PSPContext(CommonContext):
         pair = self._dyn_names.get((dg, nxt))
         if patch is None or pair is None:
             return 0
-        slot = nxt % TN.DYN_SLOTS
+        # Alternate on every ARM, not on ordinal parity. The ordinals handed
+        # here are no longer consecutive (dyn_chest_pending returns the lowest
+        # UNSENT one, and a foreign !collect can pre-check any of them), so
+        # `nxt % 2` can hand two arms in a row the SAME slot -- exactly the
+        # slot the box the player just opened is still rendering from, which
+        # is the ping-pong this function exists to preserve.
+        if self._dyn_slot_target != (dg, nxt):
+            self._dyn_slot_target = (dg, nxt)
+            self._dyn_slot_turn += 1
+        slot = self._dyn_slot_turn % TN.DYN_SLOTS
         entry = TN.dyn_slot_entry(
             False, TN.render_remote(pair[0], pair[1], TN.DYN_SLOT_GLYPHS))
         width = len(entry)                 # every NAME entry is fixed-size
@@ -10579,17 +12138,27 @@ class FF1PSPContext(CommonContext):
             dbg["latched"] = latched
             return latched
 
-        def next_ordinal(dg):
-            """Count of this dungeon's dynamic locations already checked = the next
-            0-based ordinal to send (persistence rides AP sent_locations)."""
-            return sum(1 for o in range(ID.DYNCHEST_STRIDE)
-                       if ID.dyn_chest_loc_id(dg, o) in self.sent_locations)
+        def pending(dg):
+            """(next ordinal to send, ordinals still unchecked) for `dg`.
+            Thin wrapper over ids.dyn_chest_pending, which carries the whole
+            why -- in short: the next ordinal is the LOWEST UNCHECKED one, not
+            the COUNT of checked ones. sent_locations also absorbs the server's
+            checked_locations, so a foreign !collect pre-checks dyn ordinals
+            this player never opened; counting then lands on one of those, the
+            `lid not in sent_locations` guard below eats the ring entry
+            silently, and the dungeon freezes on that chest forever (live
+            2026-08-30, Yine)."""
+            return ID.dyn_chest_pending(dg, self.bonus_dyn_caps.get(dg, 0),
+                                        self.sent_locations)
 
         armed_remain = -1   # last remaining value written (log arm/disarm edges)
+        dropped_warned = False   # one-shot: ring entry consumed, no check sent
         last_hits = None    # cave-entry diagnostic counter (u8 @+6, wraps)
         dbg = {}            # last raw gate inputs, for the not-arming diagnostic
         last_dbg = None
         self._dyn_slot_logged = None    # last (dg, nxt) logged by _dyn_arm_name
+        self._dyn_slot_target = None    # last (dg, nxt) armed (drives the
+        self._dyn_slot_turn = 0         # ping-pong: one slot flip per arm)
         while not self.exit_event.is_set():
             await asyncio.sleep(CHEST_POLL_S)
             try:
@@ -10616,28 +12185,42 @@ class FF1PSPContext(CommonContext):
                 # consume and the re-arm below (it costs map/floor reads)
                 dg = await dungeon_idx()
                 for k in hits:
+                    sent = False
                     if dg is not None:
-                        # next_ordinal is re-derived per entry on purpose --
+                        # pending() is re-derived per entry on purpose --
                         # sent_locations grows inside this loop
-                        o = next_ordinal(dg)
-                        if o < self.bonus_dyn_caps.get(dg, 0):
+                        o, left = pending(dg)
+                        if left:
                             lid = ID.dyn_chest_loc_id(dg, o)
                             if lid not in self.sent_locations:
                                 self.sent_locations.add(lid)
                                 await self.check_locations([lid])
+                                sent = True
                                 logger.info(
                                     f"Bonus dynamic chest -> check (dungeon "
                                     f"{dg}, chest {o + 1}/"
                                     f"{self.bonus_dyn_caps.get(dg, 0)})")
+                    if not sent and not dropped_warned:
+                        # The cave already ATE this chest's vanilla grant, so a
+                        # ring entry that sends no check is a chest that gave the
+                        # player nothing at all. Dropping it in silence is what
+                        # let the 2026-08-30 freeze run a whole session looking
+                        # like "the cave never fired": say it once, with the
+                        # inputs that decide it.
+                        dropped_warned = True
+                        logger.warning(
+                            f"  [bonus_dyn] stripped chest dropped with no "
+                            f"check (dungeon {dg}, caps "
+                            f"{dict(self.bonus_dyn_caps)}) -- that chest gave "
+                            f"nothing; report this log")
                     await self.psp.write(mb + 8 + 2 * k, b"\xFF\xFF")
                 # 2) re-arm remaining + next box-name sid for the dungeon we're
                 # standing in (sid 0 = cave leaves the vanilla box name)
                 remain = 0
                 sid = 0
-                nxt = None if dg is None else next_ordinal(dg)
+                nxt, left = (None, 0) if dg is None else pending(dg)
                 if dg is not None:
-                    remain = max(0, min(255,
-                                        self.bonus_dyn_caps.get(dg, 0) - nxt))
+                    remain = min(255, left)
                     if remain:
                         sid = await self._dyn_arm_name(dg, nxt)
                 await self.psp.write(mb + 4, bytes([remain]))
@@ -10662,7 +12245,12 @@ class FF1PSPContext(CommonContext):
                             dbg.get("latched"), dg, nxt)
                     if snap != last_dbg:
                         last_dbg = snap
-                        cap = 0 if dg is None else self.bonus_dyn_caps.get(dg, 0)
+                        # same clamp dyn_chest_pending uses, so an over-stride
+                        # yaml cap still reports "cap reached" rather than
+                        # a phantom gate failure once ordinal 63 is done
+                        cap = (0 if dg is None else
+                               min(self.bonus_dyn_caps.get(dg, 0),
+                                   ID.DYNCHEST_STRIDE))
                         if dg is not None and cap and snap[5] >= cap:
                             # normal end-state, NOT a fault: every AP check for
                             # this dungeon is done, so further chests are vanilla
@@ -10799,6 +12387,44 @@ class FF1PSPContext(CommonContext):
                                 f"(0x{cur:02x}->0x{want:02x})")
             except Exception as e:
                 logger.info(f"  [bonus_crystal] {e!r} -- retrying next tick")
+
+    async def _crystal_count_loop(self):
+        """READ-ONLY: keep self._crystals_beaten equal to the crystals the game
+        itself says are earned, so the tracker strip's "Crystals x/n" line shows
+        game truth instead of the reachability fixpoint (user report 2026-08-21:
+        the fixpoint read 3/4 with two fiends beaten -- Tiamat was merely
+        unreachable, and the line never moved on the Fire Fiend kill).
+
+        Source of truth mirrors the on-disc crystals_needed wrapper exactly:
+        the four Fiend story flags (D.FIEND_FLAG_BITS) on vanilla-path seeds,
+        the bonus shadow byte (D.BONUS_CRYSTAL_SHADOW_ADDR bits 0-3) on
+        bonus_dungeon_crystals seeds. Live value, NOT a high-water: the flags
+        are save-resident, so a reload that legitimately rewinds past a fiend
+        kill should rewind this line too (the in-game crystal display does).
+        The value persists across a disconnect (no reads -> no change) and
+        None until the first successful read (tracker falls back to fixpoint)."""
+        while not self.exit_event.is_set():
+            await asyncio.sleep(CHEST_POLL_S)
+            try:
+                if self.save_delta is None:
+                    continue
+                cnt = 0
+                if self.bonus_dungeon_crystals:
+                    cur = (await self.psp.read(
+                        self.sa(D.BONUS_CRYSTAL_SHADOW_ADDR), 1))[0]
+                    cnt = sum(1 for i in range(4)
+                              if cur & D.bonus_crystal_shadow_mask(i))
+                else:
+                    base = min(a for a, _m in D.FIEND_FLAG_BITS)
+                    span = max(a for a, _m in D.FIEND_FLAG_BITS) - base + 1
+                    buf = await self.psp.read(self.sa(base), span)
+                    cnt = sum(1 for a, m in D.FIEND_FLAG_BITS
+                              if buf[a - base] & m)
+                if cnt != self._crystals_beaten:
+                    self._crystals_beaten = cnt
+                    self.refresh_tracker()
+            except Exception as e:
+                logger.info(f"  [crystal_count] {e!r} -- retrying next tick")
 
     # ---------------- bridge orchestration ----------------
     async def _await_game_loaded(self, timeout=90.0):
@@ -10958,7 +12584,7 @@ class FF1PSPContext(CommonContext):
             "!!!  FIX: close EVERY PPSSPP window (check Task Manager for a",
             "!!!  stray PPSSPPWindows64.exe), do NOT load a savestate made on",
             "!!!  another seed (use an in-game save), then reconnect.",
-            "!!!  STILL BROKEN? Type  /ff1psp_logs  -- it saves one zip with",
+            "!!!  STILL BROKEN? Type  /logs  -- it saves one zip with",
             "!!!  everything needed to diagnose this; send it to whoever",
             "!!!  maintains this apworld.",
             bar, ""):
@@ -11029,7 +12655,7 @@ class FF1PSPContext(CommonContext):
             else:
                 logger.error("  [FF1 PSP] PPSSPP was not launched. Full "
                              "traceback is in the FF1PSPClient log; run "
-                             "/ff1psp_logs to bundle it.")
+                             "/logs to bundle it.")
             logger.debug("bridge start traceback:\n" + traceback.format_exc())
 
     async def _start_bridge(self):
@@ -11103,6 +12729,8 @@ class FF1PSPContext(CommonContext):
                 return
         loops = [
             ("watchdog", self._cpu_watchdog),
+            # server-link-down popup/flash (see _offline_alert_loop)
+            ("offline_alert", self._offline_alert_loop),
             ("save_delta", self._save_delta_loop),
             ("party", self._party_loop),
             ("starting_gil", self._starting_gil_loop),
@@ -11122,15 +12750,23 @@ class FF1PSPContext(CommonContext):
             # break a battle entered with the whole party already dead (nobody can
             # act -> the engine hangs); armed only by our own death-link wipes
             ("battle_limbo", self._battle_limbo_loop),
+            # trap items (trap_percentage): queued fuses + battle-start fires
+            ("trap", self._trap_loop),
             # field KO reconciler: 0 HP without the KO state (blood magic, any
             # client HP write) -> stamp KO so the pose/church behave normally
             ("ko_sync", self._ko_sync_loop),
+            # starting_party_members: keep missing members soft-dead (field +
+            # battle) and revive them when their job item arrives. See _member_loop.
+            ("member", self._member_loop),
             # class rename: scroll-gated custom class names in the status menu
             ("classname", self._classname_loop),
             # scroll-gated custom party sprites: pins job_sprites art over the
             # resident JOBxx.GIM copies (battle + pause menu; field is baked
             # at map load and out of scope -- job-sprite-surfaces memory)
             ("jobsprite", self._jobsprite_loop),
+            # read-only watch on battle sprite holders: an object that gets
+            # none is the "CPU Jump to 00000000" / RA 0x088fba28 battle freeze
+            ("holder", self._sprite_holder_loop),
             # lute_tablets: "Lute Tablets N of M" progress line in Key Items
             ("keyratio", self._keyratio_loop),
             ("movement", self._movement_loop),
@@ -11147,6 +12783,9 @@ class FF1PSPContext(CommonContext):
             # bonus_dungeon_crystals: light a Crystal shadow bit on a Soul-of-Chaos
             # superboss kill (only ticks when the option is on). See _bonus_crystal_loop.
             ("bonus_crystal", self._bonus_crystal_loop),
+            # read-only crystals-earned count (Fiend flags / shadow bits) feeding
+            # the tracker's "Crystals x/n" line. See _crystal_count_loop.
+            ("crystal_count", self._crystal_count_loop),
             ("table", self._table_loop),
             # key-item-add box ("You obtain the {key}.") -> AP name authoring
             ("mapmsg", self._mapmsg_loop),
@@ -11157,12 +12796,143 @@ class FF1PSPContext(CommonContext):
             ("npc", self._npc_loop),
             ("shop", self._shop_loop),
             ("shop_hint", self._shop_hint_loop),
+            # bestiarysanity: kill-count delta -> monster checks (ends itself
+            # immediately when the seed has no bestiary block)
+            ("bestiary", self._bestiary_loop),
             # slot_magic: re-word the level-up "MP increased by N." line
             ("slotbox", self._slotbox_loop),
         ]
         self._tasks = [asyncio.create_task(self._guard(fn, name))
                        for name, fn in loops]
+        # Keep a handle on the new-game one-shots so a second New Game can
+        # re-spawn the ones that have already returned (see _NEWGAME_ONESHOTS).
+        byname = dict(zip((n for n, _f in loops), self._tasks))
+        self._oneshot_tasks = {n: byname[n] for n in self._NEWGAME_ONESHOTS
+                               if n in byname}
         logger.info("PPSSPP bridge running.")
+
+    # ------------- offline alert (server link lost while the game runs) -------
+    # The AP text client announces a server drop with one log line and silent
+    # auto-retries; with PPSSPP in front that is invisible, and the bridge keeps
+    # the game feeling fully alive while checks and item traffic quietly stop
+    # (2026-08-27: an archipelago.gg room timed out unnoticed mid-session).
+    # Windows warning box + taskbar flash when the link drops, repeated every 5
+    # minutes until it is back; a deliberate /disconnect never alerts.
+    _OFFLINE_ALERT_TITLE = "FF1 PSP Archipelago"
+    _OFFLINE_ALERT_TEXT = (
+        "Connection to the Archipelago server was lost.\n\n"
+        "This game does not work offline!\n\n"
+        "Please reconnect to your slot to get the game working again.")
+    _OFFLINE_ALERT_REPEAT_S = 300      # re-alert cadence while down
+    _OFFLINE_ALERT_DEBOUNCE_S = 10     # ignore blips the auto-retry heals
+
+    def _alert_popup(self):
+        """Topmost warning box on a daemon thread (MessageBoxW blocks its
+        thread). One box at a time; _alert_stand_down closes a stale one."""
+        t = getattr(self, "_alert_box_thread", None)
+        if t is not None and t.is_alive():
+            return
+        import threading, ctypes
+
+        def show():
+            try:  # MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST
+                ctypes.windll.user32.MessageBoxW(
+                    0, self._OFFLINE_ALERT_TEXT, self._OFFLINE_ALERT_TITLE,
+                    0x30 | 0x10000 | 0x40000)
+            except Exception:
+                pass
+        self._alert_box_thread = threading.Thread(
+            target=show, name="OfflineAlertBox", daemon=True)
+        self._alert_box_thread.start()
+
+    def _client_hwnd(self):
+        """The kivy client window, found by title PREFIX -- the GUI appends a
+        version to base_title ("Archipelago FF1 PSP Client"), so an exact
+        FindWindow can never match."""
+        import ctypes
+        user32 = ctypes.windll.user32
+        found = []
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        def cb(hwnd, _):
+            buf = ctypes.create_unicode_buffer(128)
+            user32.GetWindowTextW(hwnd, buf, 128)
+            if buf.value.startswith("Archipelago FF1 PSP Client"):
+                found.append(hwnd)
+                return False
+            return True
+        try:
+            user32.EnumWindows(cb, None)
+        except Exception:
+            pass
+        return found[0] if found else None
+
+    def _alert_flash(self, stop=False):
+        """Flash the client's taskbar button until it is focused."""
+        import ctypes
+        hwnd = self._client_hwnd()
+        if hwnd is None:
+            return
+
+        class FLASHWINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("hwnd", ctypes.c_void_p),
+                        ("dwFlags", ctypes.c_uint), ("uCount", ctypes.c_uint),
+                        ("dwTimeout", ctypes.c_uint)]
+        # FLASHW_STOP = 0; FLASHW_ALL | FLASHW_TIMERNOFG = 3 | 0xC
+        fi = FLASHWINFO(ctypes.sizeof(FLASHWINFO), hwnd,
+                        0 if stop else (3 | 0xC), 0, 0)
+        try:
+            ctypes.windll.user32.FlashWindowEx(ctypes.byref(fi))
+        except Exception:
+            pass
+
+    def _alert_stand_down(self):
+        """Link restored: stop the flash and close a still-open warning box
+        (the box's own title is exact, so FindWindow works for it)."""
+        import ctypes
+        self._alert_flash(stop=True)
+        try:
+            hwnd = ctypes.windll.user32.FindWindowW(
+                None, self._OFFLINE_ALERT_TITLE)
+            if hwnd:
+                ctypes.windll.user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
+        except Exception:
+            pass
+
+    async def _offline_alert_loop(self):
+        import os, time
+        armed = False              # only alert on a LOSS: a link existed this run
+        down_since = None
+        last_alert = 0.0
+        while not self.exit_event.is_set():
+            await asyncio.sleep(5.0)
+            try:
+                if self._server_up():
+                    if down_since is not None and last_alert:
+                        logger.info("[offline-alert] server connection restored.")
+                        self._alert_stand_down()
+                    armed, down_since, last_alert = True, None, 0.0
+                    continue
+                if (not armed or os.name != "nt"
+                        or getattr(self, "psp", None) is None
+                        or getattr(self, "disconnected_intentionally", False)):
+                    continue
+                now = time.monotonic()
+                if down_since is None:
+                    down_since = now
+                    continue
+                if now - down_since < self._OFFLINE_ALERT_DEBOUNCE_S:
+                    continue
+                if last_alert and now - last_alert < self._OFFLINE_ALERT_REPEAT_S:
+                    continue
+                last_alert = now
+                logger.info(
+                    "[offline-alert] AP server connection is DOWN. This game "
+                    "does not work offline! Reconnect the client (/connect).")
+                self._alert_popup()
+                self._alert_flash()
+            except Exception as e:
+                logger.info(f"  [offline_alert] {e!r}")
 
     async def _cpu_watchdog(self):
         """Watch for the "attached to PPSSPP but no game is running" state and say
@@ -11317,7 +13087,7 @@ def launch(connect: Optional[str] = None,
     FF1PSPContext._start_bridge -> launcher.ensure_ppsspp), so the client is
     guaranteed running and connected before the game comes up."""
     Utils.init_logging("FF1PSPClient")
-    # Ring-buffer the log from the very first line: /ff1psp_logs ships it even
+    # Ring-buffer the log from the very first line: /logs ships it even
     # when the log FILE rotated or the interesting line scrolled hours ago.
     from . import debug_bundle as _DB
     _DB.install_breadcrumbs()

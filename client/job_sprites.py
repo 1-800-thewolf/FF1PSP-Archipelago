@@ -82,6 +82,13 @@ VANILLA_SIG = {
         "0000000000000000000002021a181718000000000000000002021b181717181c"),
 }
 
+# The shipped palette is a MERGED palette (see re_only/job_sprite_tool.py
+# `merge`) and is BAKED ON DISC by job_sprite_bake -- the client never writes
+# it. That is not an optimisation: the engine builds standalone per-actor
+# palette copies from the disc record and several draw paths CLUT from those,
+# so a palette pinned only into the resident sheets left our pixels coloured
+# vanilla (the "golden" Thief, live 2026-08-30). sheet()[0] therefore exists
+# for the BAKER; the runtime pin uses sheet()[1] alone.
 _cache = {}          # cls -> (pal, pix) | None, resolved once per process
 
 
