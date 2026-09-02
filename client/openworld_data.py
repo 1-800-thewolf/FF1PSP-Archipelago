@@ -10,9 +10,11 @@ semantics, read live per step) located by its vanilla 512-byte prefix.
 Two INDEPENDENT toggles select which edits the client applies (ApClient
 _openworld_loop): EARLY_GRID_EDITS (early_open_progression) = Cornelia->Duergar foot
 pass + Gulg/Crescent<->Ice canoe river; EXTENDED_GRID_EDITS (extended_open_progression)
-= Duergar->Western Keep foot trail + Duergar<->Melmond canoe river. CANAL_ATT (canal
-walk+sail shallows) is applied ALWAYS -- the canal is blown normally; we only make the
-open canal walkable. See memories open-progression-rework, canal-shallows-plan.
+= Duergar->Western Keep foot trail + Duergar<->Melmond canoe river. CANAL_ATT
+(the canal's centre cell, walk+sail) is applied ALWAYS -- the canal is blown
+normally; we only make the open canal walkable. CANAL_BRIDGE_GRID_EDITS draws the
+bridge there once it is open (the canal ids' own art is ANM-driven and cannot be
+baked). See memories open-progression-rework, canal-shallows-plan.
 """
 
 ANCHOR_OFF = 132 * 510 + 155 * 2          # 0x1082E
@@ -225,15 +227,18 @@ EXTENDED_RIVER_CLASS_EDITS = {
     (96, 163): 7,
 }
 
-# {tile_id: attr} -- canal cells become walk+sail shallows (0x000F); applied ALWAYS
+# {tile_id: attr} -- the canal's centre channel cell becomes walk+sail (0x000F);
+# applied ALWAYS -- it is the walk+sail attr, not art.
 CANAL_ATT = {372: 0x000F}
 
 # {(x, y): tile_id} -- canal BRIDGE art: a 3-cell vertical bridge on column x=94
-# (vanilla Cornelia-bridge tile ids, walk-only attrs already correct) replacing the
-# shallows look of the open canal. GATED on the canal-open bit (CANAL_OPEN_ADDR/BIT):
-# written only once Nerrick blows the canal, so the crossing is never drawn early.
-# Foot connectivity is unchanged vs the shallows ford; x=93/95 stay ocean so the
-# canal is still sailable.
+# (vanilla Cornelia-bridge tile ids, walk-only attrs already correct). This is the
+# ONLY path that draws a bridge at the canal: those cells' own tile ids take their
+# art from the ANM animation system, so an on-disc ASC re-skin is inert (measured
+# 2026-09-01). GATED on the canal-open bit (CANAL_OPEN_ADDR/BIT) -- the AMD grid
+# holds the canal ids in BOTH states, so an ungated paint would hand the player a
+# walkable bridge before Nerrick blows it. x=93/95 stay vanilla so the ship lane
+# survives.
 CANAL_BRIDGE_GRID_EDITS = {
     (94, 156): 353,
     (94, 157): 369,

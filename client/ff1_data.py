@@ -603,8 +603,12 @@ MAGIC_INFO_REC0   = 0x08954D1A
 MAGIC_INFO_STRIDE = 14
 MI_TARGET_MODE    = 1      # u8: 0x01 all / 0x02 single / 0x04 self /
                            #     0x08 all allies / 0x10 one ally
-MI_TARGET_SINGLE  = 0x02   # the only mode needing a per-row selector in
-                           # unit+0x41; the rest take 0xFF
+MI_TARGET_SINGLE  = 0x02   # needs a per-row PARTY selector in unit+0x41
+MI_TARGET_SELF    = 0x04   # needs the CASTER's own row
+MI_TARGET_ONE_ALLY = 0x10  # needs an ally (= enemy) row
+# Only 0x01 (all) and 0x08 (all allies) truly ignore unit+0x41 -- both proven
+# live 2026-09-01 with 0xFF. 0x04/0x10 take the cave's caster-row sentinel
+# (iso_patcher._TRP_TARGET_CASTER); 0xFF there is an out-of-bounds row.
 
 # SLOT N IS OWNED BY ENEMY ROW N -- it is not a free-for-all list. The victory
 # reward loop (0x888646c) walks enemy rows 0..8 and calls set_drop(0x8886654)

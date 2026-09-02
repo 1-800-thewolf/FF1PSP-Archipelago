@@ -296,42 +296,24 @@ for _amt, _sz in EXP_BAG_AMOUNTS.items():
     EXP_BAG_ITEM_NAMES.append(_bn)
 FILLER_ITEM_NAMES = FILLER_ITEM_NAMES + EXP_BAG_ITEM_NAMES
 
-# Trap items: SYNTHETIC (no native game id) filler-replacing items that spring at
-# a random upcoming battle (0-2 battles after receipt; see ApClient._trap_loop).
-# Every surviving kind maps onto a REAL ability the engine already ships, cast by
-# a real monster with its own animation, message and targeting -- a trap the
-# player cannot see is the bug this roster was cut down to fix (2026-08-29). trap_percentage (yaml) rolls them in via
-# World._trap_roll; NOT in FILLER_ITEM_NAMES -- the roll happens up front so
-# a 0% seed contains none and the datapackage still names them for multiworlds
-# that do. kind ordinals are FROZEN (they are the AP item id, ID.trap_item_id).
-TRAP_ITEMS = {
-    0: "Death Trap",            # spell 54 "Death"   -- single target
-    2: "Ink Trap",              # skill 0x15 -> effect 0x56 -- party-wide. The box
-                                # prints "Ink"; "Blind" is the PLAYER spell (id 60),
-                                # so the old name pointed at the wrong ability.
-    3: "Silence Trap",          # spell 6 "Silence"  -- party-wide
-    4: "Poison Darts Trap",     # skill 0x16 -> effect 0x57 -- party-wide. The box
-                                # prints "Poison Darts" (Manticore's spray). If a
-                                # crowded shop bank trims this, name_banks cuts at the
-                                # LAST space first -> "Poison Darts", still exact.
-}
-# RETIRED kinds: the ordinal is the AP item id, so a retired kind leaves a
-# permanent GAP rather than being reused -- renumbering would make an in-flight
-# seed generated on an older apworld deliver the WRONG trap. The name is
-# deliberately NOT registered in ITEM_NAME_TO_ID (nothing may roll or plando it
-# any more); the client keeps a no-op branch keyed on the ordinal so an old
-# multiworld that still sends one is ignored instead of crashing.
-RETIRED_TRAP_KINDS = {
-    1: "Mana Sap Trap",         # removed 2026-08-29 (real-cast rework): the survivors
-                                # must each BE a real ability the engine already
-                                # animates, and an exhaustive dump of effects
-                                # 0x01-0x74 found no MP-drain effect anywhere in the
-                                # game -- there is nothing for it to borrow.
-    5: "Monster Magnet Trap",   # removed 2026-08-29 (user): encounter rate x4/90s
-    6: "Ogre's Toll Trap",      # removed 2026-08-29 (user): a stat modifier with no
-                                # ability analogue. It was FELT, never SEEN -- the
-                                # playtest complaint that started the rework.
-}
+# Trap items: SYNTHETIC (no native game id) filler-replacing items that spring
+# at the next battle (see ApClient._trap_loop and client/trap_fuse.py). Every
+# kind maps onto a REAL ability the engine already ships, cast by a real monster
+# with its own animation, message and targeting -- a trap the player cannot see
+# is the bug the roster was rebuilt to fix (2026-08-29).
+#
+# The roster itself lives in ff1psp/trap_data.py: ONE table of kind -> effect id,
+# with the item NAME derived from the ability's own in-game string (ability_data,
+# generated from the ISO). It is imported rather than restated here because it is
+# also imported by the client and by the tests -- adding a trap used to mean four
+# hand-copied dicts agreeing on a string. See trap_data for the frozen-ordinal
+# and unique-name invariants, which are asserted at import.
+#
+# trap_percentage (yaml) rolls them in via World._trap_roll; NOT in
+# FILLER_ITEM_NAMES -- the roll happens up front so a 0% seed contains none and
+# the datapackage still names them for multiworlds that do.
+from .trap_data import (TRAP_EFFECTS, TRAP_ITEMS,       # noqa: F401
+                        RETIRED_TRAP_KINDS, trap_name)
 for _kind, _name in TRAP_ITEMS.items():
     ITEM_NAME_TO_ID.setdefault(_name, ID.trap_item_id(_kind))
     ITEM_NAME_TO_CLASS.setdefault(_name, ItemClassification.trap)
@@ -731,15 +713,35 @@ class FF1PSPWorld(World):
             self.options.loot_in_normally_empty_chests.value)
         return removed
 
+    def _next_trap(self):
+        """The next trap kind, dealt from a shuffled DECK OF CARDS.
+
+        Every kind goes in the deck, the deck is shuffled once, and kinds are
+        popped one at a time; the deck is only refilled when it runs out. So a
+        seed with fewer traps than kinds contains NO DUPLICATES at all, and one
+        with more spreads them as evenly as the count allows -- no kind repeats
+        until every other kind has been dealt. `random.choice` per slot gave a
+        lumpy spread instead (14 traps could easily be four Deaths and no Fire).
+
+        Modelled on AoM's trap deck. Adding a kind to TRAP_ITEMS is enough to
+        put it in rotation -- nothing here needs editing.
+        """
+        if not getattr(self, "_trap_deck", None):
+            self._trap_deck = list(TRAP_ITEM_NAMES)
+            self.random.shuffle(self._trap_deck)
+        return self._trap_deck.pop()
+
     def _trap_roll(self):
         """One independent trap_percentage roll: a trap item name, or None.
         The ONE place the roll lives, so the two callers (get_filler_item_name
         for balance-slot fillers, create_items for the base pool's own filler
         tokens) cannot drift. 0% consumes no RNG at all -- a trapless seed keeps
-        the pre-feature random stream."""
+        the pre-feature random stream.
+
+        The roll decides WHETHER this slot is a trap; _next_trap decides WHICH."""
         tp = self.options.trap_percentage.value
         if tp and self.random.randrange(100) < tp:
-            return self.random.choice(TRAP_ITEM_NAMES)
+            return self._next_trap()
         return None
 
     def get_filler_item_name(self) -> str:
@@ -1070,8 +1072,9 @@ class FF1PSPWorld(World):
                     shop_ap_prices[shop] = prices
             shuffle_tables = RANDO.build_shuffle_tables(
                 self.random,
-                # the pair set_rules already gated the bestiary on
+                # the tables set_rules already gated the bestiary on
                 ow_tables=self._overworld_zone_tables(),
+                cv_table=self._cave_zone_table(),
                 shop_tier=int(self.options.shop_item_pool.value),
                 # Extra NORMAL stock rows per store (yaml shop_max_extra_items).
                 # A per-store roll of 0..this, on top of the AP/hint reserve.
@@ -1481,6 +1484,13 @@ class FF1PSPWorld(World):
                     "early": _sop >= OpenProgression.option_early,
                     "extended": _sop >= OpenProgression.option_extended,
                     "northern_docks": bool(self.options.northern_docks.value),
+                    # zones_caves ships whenever either harder toggle is on, so
+                    # the client can name dungeon places exactly too. Absent on
+                    # pre-2026-09-01 seeds, where logic.bestiary_source_rule
+                    # falls back to the old conservative answer.
+                    "cave_exact": True,
+                    "chaos_floor": bool(
+                        self.options.chaos_floor_encounters.value),
                 },
             }
         return {
@@ -1787,6 +1797,32 @@ class FF1PSPWorld(World):
         return LOGIC.overworld_sources(
             ow, ow_hi if self.options.harder_overworld_encounters.value else None)
 
+    def _cave_zone_table(self):
+        """This seed's zones_caves (cameos stamped in), or None when it ships
+        none. Same derived-rng trick and the same reason as
+        _overworld_zone_tables: set_rules must see the dungeon encounters the
+        player's game will actually run, and build_shuffle_tables takes this
+        very table later (cv_table=), so the two cannot drift."""
+        if getattr(self, "_cv_table_built", False) is False:
+            self._cv_table_built = True
+            self._cv_table_cache = RANDO.cave_zone_table(
+                self.multiworld.seed, self.player,
+                dungeon_harder=bool(
+                    self.options.harder_dungeon_encounters.value),
+                overworld_harder=bool(
+                    self.options.harder_overworld_encounters.value))
+        return self._cv_table_cache
+
+    def _bestiary_cave_sources(self):
+        """mon -> {('cave', map id)} for THIS seed's dungeons, or None when the
+        seed rerolled nothing and the baked rows are already exact."""
+        cv = self._cave_zone_table()
+        if cv is None:
+            return None
+        return LOGIC.cave_sources(cv, {
+            "harder_dungeons": bool(
+                self.options.harder_dungeon_encounters.value)})
+
     def _bestiary_setup(self):
         """(chosen monster ids, mon -> OR-of-AND access alts) for bestiarysanity;
         ([], {}) when off. Cached -- create_regions, create_items, set_rules and
@@ -1816,6 +1852,11 @@ class FF1PSPWorld(World):
             "early": _op >= OpenProgression.option_early,
             "extended": _op >= OpenProgression.option_extended,
             "northern_docks": bool(self.options.northern_docks.value),
+            # The seed's own zones_caves is in hand (_cave_zone_table), so a
+            # harder-dungeon cave is an exact place, not a pool to write off.
+            "cave_exact": True,
+            # Chaos' floor only has random battles when this is on.
+            "chaos_floor": bool(self.options.chaos_floor_encounters.value),
         }
         minion_rules = {}
         if self.options.boss_minions.value:
@@ -1828,9 +1869,11 @@ class FF1PSPWorld(World):
             minion_rules = LOGIC.bestiary_minion_monsters(
                 plan, opts["bonus_excluded"])
         ow_sources = self._bestiary_ow_sources()
+        cave_sources = self._bestiary_cave_sources()
         rules = {}
         for mon in LOGIC.BESTIARY_ELIGIBLE:
-            alts = LOGIC.bestiary_rule_alts(mon, opts, minion_rules, ow_sources)
+            alts = LOGIC.bestiary_rule_alts(mon, opts, minion_rules, ow_sources,
+                                            cave_sources)
             if alts:
                 rules[mon] = alts
         hunt = sorted(rules)
@@ -2304,8 +2347,17 @@ class FF1PSPWorld(World):
             "Lute Tablet":  ("Chaos Shrine Plaza ", "Chaos Shrine Basement "),
             # The Earth Rod opens the mud gate inside the Cavern of Earth itself;
             # same-map grant is inert until re-entry. Lower chests already sit
-            # behind the Rod (fill never places it there), so Upper is the gap.
-            "Earth Rod":    ("Cavern of Earth Upper ",),
+            # behind the Rod (fill never places it there), so the gap is the floor
+            # that HOLDS the mud gate -- B3 -- not all of "Upper". B1/B2/B4 are
+            # separate maps, so a Rod found there reloads before the gate is
+            # reached and is not inert. B3 has no region of its own (all 16 Upper
+            # chests share cavern_of_earth_b1 in _locinfo), so the five B3 chests
+            # are named exactly (idx 40-44). #13 is the one the Vampire blocks.
+            "Earth Rod":    ("Cavern of Earth Upper Chest #12",
+                             "Cavern of Earth Upper Chest #13",
+                             "Cavern of Earth Upper Chest #14",
+                             "Cavern of Earth Upper Chest #15",
+                             "Cavern of Earth Upper Chest #16"),
             # Matoya consumes the Crystal Eye in her own cave; her NPC location
             # already self-blocks it ([CRYSTAL_EYE] extra req) but the three cave
             # chests were uncovered.

@@ -50,6 +50,7 @@ from . import apworld_watch as APWATCH
 from .monster_names import MONSTER_NAME as MON_NAME
 from .ppsspp_ws import PPSSPP, USER_RAM_BASE, USER_RAM_SIZE
 from .. import data as DATA
+from .. import trap_data as TD
 from .. import hints as HINTS
 from .. import ids as ID
 from .. import logic as LOGIC
@@ -169,7 +170,7 @@ CHEST_POLL_S = 0.1
 # (observed home region first, full user RAM as fallback).
 BANK_SCAN_WINDOWS = ((0x09000000, 0x01000000),
                      (USER_RAM_BASE, USER_RAM_SIZE))
-# Overworld map arena (open-progression edits + canal shallows) lives in the high heap.
+# Overworld map arena (open-progression edits + canal attr) lives in the high heap.
 OW_SCAN_WINDOWS = ((0x09800000, 0x00800000),
                    (USER_RAM_BASE, USER_RAM_SIZE))
 # Periodic re-anchor cadence while walking the overworld: catches an in-place arena
@@ -798,7 +799,13 @@ class FF1PSPContext(CommonContext):
         # strip paints its in-logic / shine states off this, exactly as the
         # Tracker strip does -- refresh_tracker is the only writer.
         self._tracker_tokens = None
-        self._tracker_section_logic = None
+        # Seed-table derivations for the Bestiary tab, built once per session.
+        # The cave one has its own _built flag because None is a REAL answer:
+        # this seed ships no zones_caves, so the caves are vanilla and the rows
+        # baked into bestiary_data already describe them exactly.
+        self._ow_sources_cache = None
+        self._cave_sources_built = False
+        self._cave_sources_cache = None
         self.bestiary = None              # slot_data "bestiary" dict (bestiarysanity):
                                           # {"monsters": [mon ids], "progression": b,
                                           # "opts": {...}}; None = option off/old seed
@@ -1408,14 +1415,15 @@ class FF1PSPContext(CommonContext):
         # Usability shading: which gear this party can equip and which spells it
         # can learn, now / after a class change / never. Party is live when the
         # game is attached, else the seed's base jobs from slot_data.
-        jobs, mlv, live = self._party_for_shops()
+        jobs, mlv, live, future_jobs = self._party_for_shops()
         known_jobs = [j for j in jobs if j is not None]
-        learn_tbl = self._effective_magic_learn() if known_jobs else b""
+        learn_tbl = (self._effective_magic_learn()
+                     if known_jobs or future_jobs else b"")
 
         towns = []
         for city, name, shop_idxs in TRACKER.SHOP_TOWNS:
             stock = self._city_stock(shops_tbl, city, price_tbls, ap_ordinals,
-                                     jobs)
+                                     jobs, future_jobs)
             shops = []
             for s in shop_idxs:
                 # store_row 0/1/2 -> weapon/armor/item, from the AP-slot table.
@@ -1480,33 +1488,62 @@ class FF1PSPContext(CommonContext):
                     for school in magic.values():
                         for sp in school:
                             sp["use"] = self._spell_use(learn_tbl, magic_tbl,
-                                                        sp["index"], jobs, mlv)
+                                                        sp["index"], jobs, mlv,
+                                                        future_jobs)
             towns.append({
                 "city": city, "name": name, "shops": shops, "magic": magic,
                 "visited": city in self._towns_visited,
             })
         return {"any_ap": any_ap, "towns": towns,
                 "party": {"live": live, "known": len(known_jobs),
-                          "shaded": bool(known_jobs)}}
+                          "missing": len(future_jobs),
+                          "shaded": bool(known_jobs or future_jobs)}}
 
     @staticmethod
-    def _spell_use(learn_tbl, magic_tbl, idx, jobs, mlv):
+    def _spell_use(learn_tbl, magic_tbl, idx, jobs, mlv, future=()):
         try:
-            return RANDO.spell_learn_state(learn_tbl, magic_tbl, idx, jobs, mlv)
+            return RANDO.spell_learn_state(learn_tbl, magic_tbl, idx, jobs, mlv,
+                                           future_jobs=future)
         except Exception:
             return "now"            # never fade on a decode failure
 
     def _party_for_shops(self):
-        """(jobs, magic_levels, live) for the Shops tab's usability shading.
+        """(jobs, magic_levels, live, future_jobs) for the Shops tab's shading.
 
         LIVE reading (classes + magic level, refreshed by _shop_hint_loop) when
         the game is attached. Otherwise the seed's slot_data party_jobs: base
         classes only, so promotion state and magic level are unknown -- which the
-        state helpers treat as "do not fade on a guess"."""
+        state helpers treat as "do not fade on a guess".
+
+        starting_party_members splits that party in two. A member you have not
+        been handed yet is SOFT-DEAD, not absent: their class byte is intact, so
+        reading the class array straight would let a Red Mage you still have to
+        FIND vote "you can learn that now" on every black spell in the game
+        (user report 2026-09-01). Those rows move to `future_jobs`, which the
+        state helpers can only ever score "later". Held rows = the member loop's
+        own set, so received-but-not-yet-joined counts as future too -- the join
+        lands within a tick and the shading follows it.
+
+        Row spaces differ by path and must not be crossed: the live class array
+        is indexed by CURRENT formation row (which is what _member_missing_rows
+        tracks), while slot_data party_jobs is indexed by CREATION slot (which is
+        what the plan rows in _member_plan_split are)."""
         live = self._party_view
         if live:
-            return live["jobs"], live["magiclv"], True
-        return list(self.party_jobs or []), None, False
+            held = self._member_missing_rows()
+            jobs = [None if r in held else j
+                    for r, j in enumerate(live["jobs"])]
+            mlv = [None if r in held else v
+                   for r, v in enumerate(live["magiclv"])]
+            future = [j for r, j in enumerate(live["jobs"]) if r in held]
+            return jobs, mlv, True, future
+        jobs = list(self.party_jobs or [])
+        if not self.missing_party:
+            return jobs, None, False, []
+        missing, satisfied = self._member_plan_split()
+        held = set(missing) | {r for r, _j, _lv in satisfied}
+        future = [j for r, j in enumerate(jobs) if r in held and j is not None]
+        return [None if r in held else j for r, j in enumerate(jobs)],             None, False, future
 
     async def _read_party_view(self):
         """One contiguous read of the class array + party records -> current class
@@ -1537,11 +1574,13 @@ class FF1PSPContext(CommonContext):
                 pass
         return learn
 
-    def _city_stock(self, shops_tbl, city, price_tbls, ap_ordinals, jobs=()):
+    def _city_stock(self, shops_tbl, city, price_tbls, ap_ordinals, jobs=(),
+                    future_jobs=()):
         """{store_row -> [{"name","price","gid","use"}]} of a town's NATIVE shop
         stock (plus "caravan" for Onrac), named, priced, and tagged with whether
         this party can equip it ("now"/"later"/"never"; consumables are always
-        "now"). The AP shelves are already dropped by rando.shop_stock_for_city.
+        "now"). `future_jobs` are members this seed has not handed over yet --
+        they can only ever raise a row to "later" (see _party_for_shops). The AP shelves are already dropped by rando.shop_stock_for_city.
         Decoding is best-effort: a table this seed doesn't ship just yields an
         empty town rather than a dead tab."""
         if not shops_tbl:
@@ -1554,6 +1593,7 @@ class FF1PSPContext(CommonContext):
             logger.warning(f"Shop stock decode failed for city {city}: {ex}")
             return {}
         known = [j for j in jobs if j is not None]
+        future = [j for j in future_jobs or () if j is not None]
         # Activatable gear is usable by ANYONE as a battle item, so it never
         # shades "never" -- gear_equip_state returns "now" for it, or "later"
         # while the equipment_runes gate still locks activation (rune_ok).
@@ -1567,10 +1607,11 @@ class FF1PSPContext(CommonContext):
             out[row] = []
             for e in entries:
                 use = "now"          # consumables: anyone can use them
-                if gear_row and known and gear_tbl:
+                if gear_row and (known or future) and gear_tbl:
                     try:
                         use = RANDO.gear_equip_state(gear_tbl, e["gid"], known,
-                                                     rune_ok=rune_ok)
+                                                     rune_ok=rune_ok,
+                                                     future_jobs=future)
                     except Exception:
                         use = "now"  # never fade on a decode failure
                 out[row].append({"name": self._game_item_name(cat, e["gid"]),
@@ -1602,6 +1643,27 @@ class FF1PSPContext(CommonContext):
             self._ow_sources_cache = TRACKER.LOGIC.overworld_sources(ow, hi)
         return self._ow_sources_cache
 
+    def _bestiary_cave_sources(self):
+        """mon -> dungeon places, from THIS seed's zones_caves, or None.
+
+        The cave twin of _bestiary_ow_sources. That table only ships when a
+        harder toggle is on (rando.build_shuffle_tables); with it absent the
+        caves are plain vanilla and bestiary_data's baked rows are already
+        exact, so None means "use the baked rows", not "unknown". Cached: the
+        table cannot change within a session."""
+        if not self._cave_sources_built:
+            self._cave_sources_built = True
+            enc = (self.slot_data or {}).get("shuffle_tables") or {}
+            if enc.get("zones_caves"):
+                try:
+                    cv = base64.b64decode(enc["zones_caves"])
+                except Exception:
+                    cv = None
+                if cv:
+                    self._cave_sources_cache = TRACKER.LOGIC.cave_sources(
+                        cv, (self.bestiary or {}).get("opts") or {})
+        return self._cave_sources_cache
+
     def _bestiary_payload(self):
         bst = self.bestiary
         checked, killed, flags = set(), set(), {}
@@ -1623,8 +1685,8 @@ class FF1PSPContext(CommonContext):
             bst, sd.get("boss_minions_plan"), killed, checked, flags,
             tokens=self._tracker_tokens,
             party_cap=int(sd.get("party_logic_cap") or 0),
-            section_logic=self._tracker_section_logic,
-            ow_sources=self._bestiary_ow_sources())
+            ow_sources=self._bestiary_ow_sources(),
+            cave_sources=self._bestiary_cave_sources())
 
     def refresh_bestiary(self):
         """Rebuild + repaint the Bestiary tab. Cheap and idempotent."""
@@ -1802,10 +1864,6 @@ class FF1PSPContext(CommonContext):
             logger.warning(f"Tracker evaluation failed: {ex}")
             return
         self._tracker_tokens = frozenset(state.tokens)
-        # Region logic, snapshotted for the Bestiary strip: its tabs mirror the
-        # Tracker's, so they must read the SAME section_in_logic answer.
-        self._tracker_section_logic = {
-            k: state.section_in_logic(k) for k in TRACKER.SECTION_KEYS}
         ui.update_tracker(state)
 
     def _register_dyn_chest_names(self):
@@ -5567,15 +5625,16 @@ class FF1PSPContext(CommonContext):
         await self._poll(2.0, "shop_hint_loop", tick)
 
     # ---------------- spell-tome names/descriptions (B2) ----------------
-    # ---------------- open-progression runtime map edits + canal shallows ----------------
+    # ---------------- open-progression runtime map edits + canal attr ----------------
     async def _openworld_loop(self):
         """Overworld (MAP_00) maintenance. Two INDEPENDENT yaml toggles carve foot
         trails + canoe rivers into the decompressed grid: early_open_progression ->
         EARLY_GRID_EDITS, extended_open_progression -> EXTENDED_GRID_EDITS (unioned
-        per slot_data). The canal SHALLOWS (CANAL_ATT = walk+sail attrs) are applied
-        ALWAYS, regardless of the toggles -- but we NO LONGER force the canal-open
-        bit, so they only take effect once the player blows the canal normally
-        (Nitro -> Nerrick). See [[open-progression-rework]] / [[canal-shallows-plan]].
+        per slot_data). The canal ATTR (CANAL_ATT = walk+sail on the channel's
+        centre cell) is applied ALWAYS, regardless of the toggles -- the canal-open
+        bit is not forced and not read: the cell only exists in the grid once the
+        player has blown the canal normally (Nitro -> Nerrick). Its ART is baked,
+        never poked. See [[open-progression-rework]] / [[canal-shallows-plan]].
 
         The grid/ATT arena is re-decompressed on (some) overworld loads and relocates
         between boots: cheap canary check at the cached arena addresses; on mismatch
@@ -5605,9 +5664,9 @@ class FF1PSPContext(CommonContext):
         # bake the loop would rewrite values that are already correct -- and pay
         # for it with the 8 MB anchor rescan (measured 1.0-2.1 s per pass, the
         # in-game stutter in the 2026-08-08 report). Drop them and keep only
-        # what the bake does NOT cover: the canal shallows, the canal-open-gated
-        # bridge art and the river terrain-CLASS cells (map_bake writes the tile
-        # grid only). Pre-242/unbaked seeds keep the full repair path.
+        # what the bake does NOT cover: the canal attr and the river
+        # terrain-CLASS cells (map_bake writes the tile grid only).
+        # Pre-242/unbaked seeds keep the full repair path.
         ow_baked = bool(getattr(self, "bake_ok", False)) and bool(
             ((getattr(self, "_bake", None) or {}).get("features")
              or {}).get("_ow_map"))
@@ -5635,27 +5694,30 @@ class FF1PSPContext(CommonContext):
             class_edits = {}
         class_canary = next(iter(sorted(class_edits))) if class_edits else None
         canal_att = getattr(OW, "CANAL_ATT", {})
-        # Canal BRIDGE art (3 cells on column x=94): drawn INSTEAD of the shallows
-        # look, but only once the canal is actually blown -- the bridge tiles are
-        # walkable, so writing them before Nerrick's event would hand the player a
-        # free crossing. Gate = the canal-open tilemap bit (canal-flag-bit memory).
+        # Canal BRIDGE art (3 cells on column x=94): the ONLY thing that draws a
+        # bridge at the canal. Baking it was tried and measured INERT (v308): the
+        # canal ids take their art from the ANM animation system, not from ASC, so
+        # the art has to be tile ids the engine already draws as a bridge -- i.e.
+        # this grid write. Gate = the canal-open tilemap bit (canal-flag-bit
+        # memory); the AMD grid carries the canal ids in BOTH states, so an ungated
+        # paint would hand the player a walkable bridge before Nerrick's event.
         canal_bridge = getattr(OW, "CANAL_BRIDGE_GRID_EDITS", {})
-        # map_bake.bake_canal_ford writes the ford's attr + art + river anim on
-        # disc; the CANAL_ATT poke is documented there as a belt-and-suspenders
-        # fallback. On a verified bake it is pure cost -- and it is the LAST
-        # thing keeping the arena scan alive once the grid edits are baked, so
-        # dropping it is what actually retires the 8 MB rescan.
-        if ow_baked and canal_att:
-            canal_att = {}
         canal_open_addr_sa = getattr(OW, "CANAL_OPEN_ADDR_SA", D.CANAL_OPEN_ADDR_SA)
         canal_open_bit = getattr(OW, "CANAL_OPEN_BIT", 0x08)
-        # Canal shallows are always-on; the loop still runs with all toggles off to
-        # maintain them. Bail only if there is genuinely nothing to write.
+        # map_bake.bake_canal_crossing writes the canal cell's walk+sail attr on
+        # disc; the CANAL_ATT poke is the fallback for seeds whose ISO predates it.
+        # On a verified bake it is pure cost -- and it is the LAST thing keeping
+        # the arena scan alive once the grid edits are baked, so dropping it is
+        # what actually retires the 8 MB rescan.
+        if ow_baked and canal_att:
+            canal_att = {}
+        # The canal attr is always-on; the loop still runs with all toggles off to
+        # maintain it. Bail only if there is genuinely nothing to write.
         if not grid_edits and not canal_att and not canal_bridge and not class_edits:
             return
         logger.info(f"  [openworld] early={early} extended={extended} docks={docks} "
                     f"({len(grid_edits)} grid edits, {len(class_edits)} river-class "
-                    f"cells; canal shallows always-on)")
+                    f"cells; canal attr always-on)")
         grid_base = None
         grid_bases = None       # all live anchor hits (rescan fills; see below)
         att_base = None         # primary (canary) ATT copy
@@ -5685,6 +5747,14 @@ class FF1PSPContext(CommonContext):
         # a while (menu screens, transitions) used to mean a multi-MB sweep
         # every 3 s for the whole stretch.
         last_scan = {"window": 0.0, "full": 0.0, "wait": 3.0}
+        # Last address the arena was actually FOUND at. OW_SCAN_WINDOWS[0] is a
+        # static guess (0x09800000 +8MB) and the arena does NOT always live in it
+        # -- 2026-09-01 sessions had it at 0x09775dda and 0x09d75dda, one below the
+        # window and one above. Every narrow re-anchor then missed and recovery had
+        # to wait out the 30s gate on the full sweep: 35 s of the canal rendering
+        # without its bridge, right after the battle that moved the arena. The
+        # narrow window is re-centred on this hit instead.
+        last_hit = {"base": None}
         # Relocation guard: the overworld arena is re-decompressed to a FRESH
         # (often different) address every time the player re-enters the overworld
         # -- from a town, dungeon, or battle. The canary/anchor checks can't see
@@ -5724,10 +5794,18 @@ class FF1PSPContext(CommonContext):
             if now - last_scan["window"] < last_scan["wait"]:
                 return
             last_scan["window"] = now
-            windows = [OW_SCAN_WINDOWS[0]]
+            narrow = OW_SCAN_WINDOWS[0]
+            if last_hit["base"] is not None:
+                nsize = OW_SCAN_WINDOWS[0][1]
+                lo = max(USER_RAM_BASE, (last_hit["base"] - nsize // 2) & ~0xFFF)
+                # Clamp inside user RAM: a read crossing 0x0A000000 silently wedges
+                # the HybridPSP bridge ([[hybridpsp-oob-read-ws-wedge]]).
+                lo = min(lo, USER_RAM_BASE + USER_RAM_SIZE - nsize)
+                narrow = (lo, nsize)
+            windows = [narrow]
             if not narrow_only and now - last_scan["full"] >= 30.0:
                 last_scan["full"] = now
-                windows = list(OW_SCAN_WINDOWS)
+                windows = [narrow] + list(OW_SCAN_WINDOWS[1:])
             for start, size in windows:
                 t0 = loop.time()
                 blob = await (self.psp_scan or self.psp).read_chunked(
@@ -5750,6 +5828,7 @@ class FF1PSPContext(CommonContext):
                 att_base = att_bases[0] if att_bases else None
                 if grid_base is not None:
                     last_scan["wait"] = 3.0
+                    last_hit["base"] = grid_base
                     return
             last_scan["wait"] = min(last_scan["wait"] * 2, 30.0)
 
@@ -5899,6 +5978,12 @@ class FF1PSPContext(CommonContext):
                 # minute with edits unapplied (foot trails missing) before a tick
                 # finally lands. Re-entry is exactly when we want the fast cadence.
                 last_scan["wait"] = 3.0
+                # ...and let the FULL sweep run on this re-entry if the narrow
+                # window misses. The excursion is what moved the arena, so gating
+                # the fallback for 30 s is exactly backwards -- that gate is what
+                # made the canal bridge lapse for 35 s after a battle. Bounded: one
+                # extra sweep per excursion, and only when the narrow scan misses.
+                last_scan["full"] = 0.0
             if grid_base is None:
                 await rescan()
                 if grid_base is None:
@@ -5906,7 +5991,7 @@ class FF1PSPContext(CommonContext):
                 await apply()
                 return
             # arena located: revalidate via canary(s). Check the grid canary (if any
-            # grid edits) and the canal-shallows attr canary; any drift -> reapply.
+            # grid edits) and the canal attr canary; any drift -> reapply.
             drifted = False
             if cur["canary"] is not None:
                 cv = await self.psp.read(cell_addr(grid_base, cur["canary"]), 2)
@@ -10935,26 +11020,48 @@ class FF1PSPContext(CommonContext):
     # can be unit-tested by SHAPE ("3 queued -> T . T T"); see there for why the
     # threshold is "2 still waiting" rather than the "3 in hand" it is specified
     # as. Nothing here re-derives it.
-    # Each name is the ability's OWN in-game string + " Trap": the battle box
-    # prints "Silence" / "Death" / "Ink" / "Poison Darts", all decoded from the
-    # disc name banks 2026-08-30. NB spells index their bank 1-BASED and enemy
-    # skills index theirs 0-BASED -- the two live sightings are what proved it.
-    _TRAP_NAMES = {0: "Death Trap", 2: "Ink Trap",
-                   3: "Silence Trap", 4: "Poison Darts Trap"}
-    # RETIRED ordinals (see ff1psp.RETIRED_TRAP_KINDS): the gen side can no
-    # longer roll these, but an in-flight multiworld generated on an older
-    # apworld still can, so they are swallowed here instead of falling through
-    # as an unknown kind that would sit in the queue forever.
-    _TRAP_RETIRED = {1: "Mana Sap Trap", 5: "Monster Magnet Trap",
-                     6: "Ogre's Toll Trap"}
-    # Each surviving trap IS a real ability the engine already ships, cast by a
-    # real monster with its own animation, message and targeting. All four
-    # records were verified against live RAM 2026-08-30 -- see the on-disc cave
-    # iso_patcher._trap_cave, which does the actual committing.
-    _TRAP_EFFECT = {0: 0x36,     # spell 54 Death   -- single target
-                    2: 0x56,     # skill 0x15 "Ink" -- party-wide, acc 72
-                    3: 0x06,     # spell 6 Silence  -- party-wide
-                    4: 0x57}     # skill 0x16 poison darts -- party-wide spray
+    # THE ROSTER IS NOT RESTATED HERE. It lives in ff1psp/trap_data.py -- one
+    # table of kind -> effect id, with the AP item name derived from the
+    # ability's own in-game string, so the client and the world can never drift
+    # apart on either. This used to be two hand-copied dicts kept in step with
+    # a third in the gen side and a fourth frozen in the tests.
+    #
+    # Names ARE the battle box's own strings ("Silence", "Death", "Ink",
+    # "Poison Darts"), decoded from the disc name banks -- spells index their
+    # bank 1-BASED and enemy skills index a DIFFERENT bank 0-BASED, which is
+    # exactly the sort of detail that belongs in a generator and not in four
+    # places. Every kind is a real ability the engine already animates; the
+    # on-disc cave (iso_patcher._trap_cave) does the committing.
+    #
+    # Rejected during the 2026-09-01 sweeps and deliberately absent: Confuse
+    # 0x2F (no party-side effect OR animation), NulShock 0x07 / NulFrost 0x0F /
+    # NulDeath 0x1B (animation renders over the party instead of the monsters
+    # they buff), and every party-wide KO/stone/paralysis enemy skill.
+    _TRAP_NAMES = TD.TRAP_ITEMS
+    _TRAP_EFFECT = TD.TRAP_EFFECTS
+    # RETIRED ordinals: the gen side can no longer roll these, but an in-flight
+    # multiworld generated on an older apworld still can, so they are swallowed
+    # instead of falling through as an unknown kind that would sit in the queue
+    # forever.
+    _TRAP_RETIRED = TD.RETIRED_TRAP_KINDS
+
+    def _trap_ui_push(self):
+        """Repaint the trap-queue overlay. Cheap and idempotent, so it is safe
+        to call from every path that can move the queue.
+
+        The ARMED trap counts and is the one named: it has been handed to the
+        cave and is genuinely the next to fire, so dropping it would show 0
+        while a trap is still about to go off (user call 2026-09-01)."""
+        ui = getattr(self, "ui", None)
+        if ui is None or not hasattr(ui, "update_trap_status"):
+            return
+        try:
+            pending = ([self._trap_armed] if self._trap_armed else []) \
+                + list(self._trap_queue)
+            nxt = self._TRAP_NAMES.get(pending[0]["kind"], "?") if pending else ""
+            ui.update_trap_status(len(pending), nxt)
+        except Exception as ex:
+            logger.warning(f"Trap overlay update failed: {ex}")
 
     def _trap_enqueue(self, kind, idx=None):
         """Queue one received trap. No fuse is drawn -- it springs at the next
@@ -11149,7 +11256,15 @@ class FF1PSPContext(CommonContext):
         exactly the bug a hardcoded 0xFF hid during the live rehearsals.
 
         Death takes a RANDOM LIVING member (user design 2026-08-30). A row the
-        member feature still holds is not a person yet, so it is never picked."""
+        member feature still holds is not a person yet, so it is never picked.
+
+        Modes 0x04 (self) and 0x10 (one ally) also need a REAL row -- the
+        vanilla enemy caster writes its own row for 0x04 and calls the picker
+        for 0x10 (0x08881E3C-0x08881E8C) -- but the row we would have to name is
+        the CASTER's, and the cave only chooses that at fire time. So they get
+        the 0xFE sentinel and the cave substitutes the row it picked. 0xFF there
+        would be an out-of-bounds row index, not a harmless ignored byte.
+        Modes 0x01 and 0x08 genuinely ignore the byte (both proven live)."""
         import random as _random
         try:
             mode = (await self.psp.read(
@@ -11157,6 +11272,8 @@ class FF1PSPContext(CommonContext):
                 + D.MI_TARGET_MODE, 1))[0]
         except Exception:
             return None
+        if mode in (D.MI_TARGET_SELF, D.MI_TARGET_ONE_ALLY):
+            return IP._TRP_TARGET_CASTER          # cave fills in its caster row
         if mode != D.MI_TARGET_SINGLE:
             return 0xFF                             # party-wide: no selector
         held = self._member_missing_rows()
@@ -11237,6 +11354,10 @@ class FF1PSPContext(CommonContext):
             self._trap_queue += restored
             logger.info(f"  [trap] {len(restored)} trap(s) received in an "
                         f"earlier session are still armed")
+            # Restoring does not go through _trap_store_save (the stored value
+            # is what we just read), so the overlay needs telling directly or a
+            # reconnect would show an empty panel over a full queue.
+            self._trap_ui_push()
 
     def _trap_store_save(self):
         """Persist the queue (fire-and-forget). Skipped when nothing changed, so
@@ -11246,6 +11367,11 @@ class FF1PSPContext(CommonContext):
         if state == self._trap_stored:
             return
         self._trap_stored = state
+        # This is the one place that already knows the queue REALLY changed
+        # (the guard above makes the per-battle-end call a no-op otherwise), so
+        # it is where the overlay repaint belongs -- no extra call sites to keep
+        # in sync, and silent on a trapless seed.
+        self._trap_ui_push()
 
         async def push():
             try:

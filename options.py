@@ -534,10 +534,13 @@ class BestiarysanityPercent(Range):
     default = 0
 
 
-class BestiaryProgression(DefaultOnToggle):
+class BestiaryProgression(Toggle):
     """📖 Allow progression items on bestiary checks (bestiarysanity only).
     If on, any item can hide behind a monster hunt, so a required item
     may sit on a bestiary check.
+
+    Off by default (user call 2026-09-01): a monster hunt is a long tail, and
+    hiding a required item behind one can stall a run for hours.
     """
     internal_name = "bestiary_progression"
     display_name = "Bestiary Progression"
@@ -1195,9 +1198,8 @@ class LevistoneShardsExtra(Range):
 
 class TrapPercentage(Range):
     """💣 Chance for each filler item in your pool to be replaced with a
-    trap instead. Traps trigger at the start of the next battle:
-    Silence, Ink, Poison Darts, Death. Traps can be dodged and resisted
-    like normal hostile abilities and spells."""
+    trap instead. Traps trigger at the start of the next combat and can
+    be dodged and resisted like any other hostile ability."""
     internal_name = "trap_percentage"
     display_name = "Trap Percentage"
     range_start = 0

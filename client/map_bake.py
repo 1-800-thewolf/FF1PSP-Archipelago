@@ -93,171 +93,65 @@ def place_giant_rock(iso_path, log=print):
 
 
 # --------------------------------------------------------------------------
-# Canal FORD -- single-tile walkable crossing with distinct water art, on-disc in
-# MAP_00.PCK. Live-designed against a running game + user-approved 2026-07-26.
+# Canal CROSSING -- one walkable cell in the blown canal, on-disc in MAP_00.PCK.
+# Live-designed against a running game + user-approved 2026-07-26. The ART half
+# lives in the CLIENT, not here; baking it was tried and measured inert 2026-09-01.
 #
 # The Nerrick canal, once blown open, is a 3x2 block of globally-unique tile ids:
 #   y156 (banks)   (93,156)=0x163  (94,156)=0x164  (95,156)=0x165
 #   y157 (channel) (93,157)=0x173  (94,157)=0x174  (95,157)=0x175
 # The ship sails the y157 channel. (94,156)=0x164 is ALREADY walkable in vanilla
 # (attr 0x0002), so making the single cell (94,157)=0x174 walk+sail turns column
-# x=94 into a clean 1-tile FORD: forest(94,155) -> 0x164 -> 0x174 -> forest(94,158).
-# Its two neighbours 0x173/0x175 keep vanilla 0xF00F = ship-only, no foot, so the
-# crossing is ONE tile wide rather than three (user request). Every other canal id
-# is left BIT-FOR-BIT VANILLA.
+# x=94 into a clean 1-tile crossing: forest(94,155) -> 0x164 -> 0x174 ->
+# forest(94,158). Its two neighbours 0x173/0x175 keep vanilla 0xF00F = ship-only,
+# no foot, so the crossing is ONE tile wide rather than three (user request).
 #
-# Three coordinated edits, all on tile id 0x174 alone:
-#   1. ATT -> 0x000F (walk + sail).
-#   2. ASC -> a copy of donor 0xA3's subtile assembly (the light-cyan shallow art
-#      the Duergar pass uses). Copying a working ASC entry verbatim needs no
-#      understanding of the subtile-word bit format.
-#   3. ANM.ATI -> move 0x174 out of the deep-ocean animation family and into the
-#      RIVER family. THIS is the edit that actually changes what you see: the
-#      overworld composites a per-frame ANIMATION OVERLAY over every tile id
-#      registered in MAP_00_ANM.ATI, and the ocean overlay was painting over the
-#      base art -- which is why an ASC-only reskin was provably INERT in game (see
-#      [[canal-shallows-plan]]). Registered in the river family the cell renders as
-#      animated river water, clearly distinct from the surrounding ocean.
+# ONE edit, on tile id 0x174 alone: ATT -> 0x000F (walk + sail). Every byte of the
+# canal's ART is left BIT-FOR-BIT VANILLA, because on-disc art edits DO NOT WORK
+# here -- see below.
 #
-# ATI FORMAT (cracked 2026-07-26, validated against all 50 records): u32 count,
-# u32 offsets[count] (ATI-relative), then the records. Each record is a 0x1C-byte
-# header [cnt, type, -1, flag, 0, param, 0] followed by `cnt` member tile ids at
-# STRIDE 8 (u32 id + u32 pad) EXCEPT the last member, which carries no trailing
-# pad -- so record length == 0x1C + (cnt-1)*8 + 4.
+# THE ART CANNOT BE BAKED AS ASC. Measured live 2026-09-01 (v308): the bridge's own
+# ASC entries were copied onto the canal ids 0x164<-0x161 and 0x174<-0x171, donors
+# chosen to share their target's ANM.ATI record so the overlay would match. The
+# patch reached the ISO and reached RAM -- the baked bridge signature was found at
+# both 0x161's and 0x164's live ASC entries -- and the canal still rendered
+# unchanged. So for a tile id registered in MAP_00_ANM.ATI, ASC is not the art: the
+# animation system supplies it, and moving the id to another record (what the
+# RETIRED water reskin did, donor 0xA3 + a move into the river family) changes the
+# look only by making it that record's animation -- which is the river the
+# 2026-09-01 report photographed. Drawing a BRIDGE here on disc would need
+# ANM.GIM/ATI frame semantics that are not cracked; until they are, the bridge is
+# the client's grid write (openworld_data.CANAL_BRIDGE_GRID_EDITS), which writes
+# tile ids the engine already draws as a bridge.
 #
-# NET-ZERO SIZE: removing 0x174 from the ocean record (-8 bytes) and appending it
-# to the river record (+8 bytes) leaves the ATI subfile length UNCHANGED, so the
-# enclosing PCK's inner-directory offsets never move. This matters: MAP_00_ASC.BIN
-# begins only 4 bytes after the ATI ends, so a grown ATI would have collided with
-# it and required rebuilding the whole PCK directory.
+# The AMD grid holds the canal ids 0x163-0x165/0x173-0x175 at those cells in BOTH
+# states (verified on disc), so the closed canal is not a different grid -- which is
+# why the client's bridge paint keeps its canal-open gate.
 #
-# SAFE by construction: the canal ids exist in the grid ONLY while the canal is
-# OPEN -- the closed state uses different land ids that we never touch, so before
-# the player blows the canal this area stays an ordinary walkable foot path (user
-# requirement). Id 0x174 > 255, so the ATT edit lands OUTSIDE the client's
-# 512-byte ATT_PREFIX signature: the openworld loop's ATT sig-scan is unaffected,
-# and its CANAL_ATT poke (kept as a belt-and-suspenders fallback this round)
-# writes the same 0x000F to the same id. COSMETIC and non-load-bearing: a failure
-# here is swallowed by the caller and never aborts the bake.
+# Id 0x174 > 255, so the ATT edit lands OUTSIDE the client's 512-byte ATT_PREFIX
+# signature: the openworld loop's ATT sig-scan is unaffected, and its CANAL_ATT
+# poke (the fallback for seeds whose ISO predates this bake) writes the same
+# 0x000F to the same id. Non-load-bearing: a failure here is swallowed by the
+# caller and never aborts the bake.
 _PCK00 = "MAP_00.PCK"
 _ASC00 = b"MAP_00_ASC.BIN"
 _ATT00 = b"MAP_00_ATT.BIN"
 _ATI00 = b"MAP_00_ANM.ATI"
 _ASC_HDR = 12                # ASC.BIN: 12-byte header, then 512 * 8 u16 entries
 _ASC_STRIDE = 16             # 8 u16 = 16 bytes per tile id
-_ATI_HDR = 0x1C              # per-record header size
-_ATI_STRIDE = 8              # member entry stride (last member carries no pad)
 
-CANAL_FORD_ID = 0x174        # (94,157) -- the single cell that becomes the ford
-CANAL_FORD_ATTR = 0x000F     # walk + sail
-CANAL_ART_DONOR = 0x0A3      # light-cyan shallow tile; its ASC is copied verbatim
-CANAL_ANIM_ANCHOR = 0x1F0    # dominant river tile -> identifies the river ATI record
+CANAL_CROSS_ID = 0x174       # (94,157) -- the single cell that becomes walkable
+CANAL_CROSS_ATTR = 0x000F    # walk + sail
 # Canal ids deliberately left vanilla (asserted by the test_patch regression)
 CANAL_UNTOUCHED_IDS = (0x163, 0x164, 0x165, 0x173, 0x175)
 
 
-def _ati_records(ati):
-    """[(index, start, end, member_count)] for an ATI blob, validating the format."""
-    n_recs = struct.unpack_from("<I", ati, 0)[0]
-    offs = list(struct.unpack_from(f"<{n_recs}I", ati, 4))
-    out = []
-    for ri, (a, b) in enumerate(zip(offs, offs[1:] + [len(ati)])):
-        cnt = struct.unpack_from("<I", ati, a)[0]
-        if _ATI_HDR + (cnt - 1) * _ATI_STRIDE + 4 != b - a:
-            raise ValueError(f"ATI record {ri}: cnt {cnt} inconsistent with "
-                             f"length {b - a:#x}")
-        out.append((ri, a, b, cnt))
-    return out
-
-
-def _ati_members(ati, start, cnt):
-    """The `cnt` member tile ids of the record beginning at `start`."""
-    return [struct.unpack_from("<I", ati, start + _ATI_HDR + k * _ATI_STRIDE)[0]
-            for k in range(cnt)]
-
-
-def _ati_owner(ati, tile_id):
-    """(start, cnt, member_index) of the record registering `tile_id`, or None."""
-    for _ri, a, _b, cnt in _ati_records(ati):
-        members = _ati_members(ati, a, cnt)
-        if tile_id in members:
-            return a, cnt, members.index(tile_id)
-    return None
-
-
-def _ati_move_member(ati, tile_id, anchor_id):
-    """Move `tile_id` out of whichever animation record owns it into the record that
-    contains `anchor_id`. Returns a new blob of exactly the SAME length."""
-    ati = bytes(ati)
-    recs = _ati_records(ati)
-    src = dst = None
-    for ri, a, b, cnt in recs:
-        members = _ati_members(ati, a, cnt)
-        if tile_id in members:
-            src = (ri, a, b, cnt, members.index(tile_id))
-        if anchor_id in members:
-            dst = (ri, a, b, cnt)
-    if src is None:
-        raise ValueError(f"ATI: tile {tile_id:#x} is not registered in any record")
-    if dst is None:
-        raise ValueError(f"ATI: anchor {anchor_id:#x} is not registered in any record")
-    if src[0] == dst[0]:
-        raise ValueError(f"ATI: {tile_id:#x} already shares {anchor_id:#x}'s record")
-
-    def rebuild(start, members):
-        """Serialise one record with a new member list, preserving its header."""
-        body = bytearray(ati[start:start + _ATI_HDR])
-        struct.pack_into("<I", body, 0, len(members))
-        for k, mid in enumerate(members):
-            body += struct.pack("<I", mid)
-            if k != len(members) - 1:
-                body += b"\x00\x00\x00\x00"       # last member carries no pad
-        return bytes(body)
-
-    src_members = _ati_members(ati, src[1], src[3])
-    src_members.pop(src[4])                                       # de-register: -8 bytes
-    dst_members = _ati_members(ati, dst[1], dst[3]) + [tile_id]   # register:    +8 bytes
-    pieces = {src[0]: rebuild(src[1], src_members),
-              dst[0]: rebuild(dst[1], dst_members)}
-
-    out = bytearray(ati[:recs[0][1]])            # count + offset table, patched below
-    new_offs = []
-    for ri, a, b, _cnt in recs:
-        new_offs.append(len(out))
-        out += pieces.get(ri, ati[a:b])
-    for ri, off in enumerate(new_offs):
-        struct.pack_into("<I", out, 4 + ri * 4, off)
-    if len(out) != len(ati):
-        raise ValueError(f"ATI size changed {len(ati):#x} -> {len(out):#x} "
-                         f"(the move must be net-zero)")
-    _ati_records(bytes(out))                     # re-validate every record
-    return bytes(out)
-
-
-def build_canal_ford(blob):
-    """Return the MAP_00 blob carrying the single-tile canal ford (attr + art +
-    river animation). Idempotent: an already-forded blob is returned unchanged."""
+def build_canal_crossing(blob):
+    """Return the MAP_00 blob with the canal's centre channel cell walk+sail.
+    Idempotent, and the ONLY bytes it touches are that tile id's ATT entry."""
     blob = bytearray(blob)
-    aoff, _asz = _find_subfile(blob, _ASC00)
     toff, _tsz = _find_subfile(blob, _ATT00)
-    ioff, isz = _find_subfile(blob, _ATI00)
-    ford = aoff + _ASC_HDR + CANAL_FORD_ID * _ASC_STRIDE
-    donor = bytes(blob[aoff + _ASC_HDR + CANAL_ART_DONOR * _ASC_STRIDE:][:_ASC_STRIDE])
-    ati = bytes(blob[ioff:ioff + isz])
-
-    owner = _ati_owner(ati, CANAL_FORD_ID)
-    anchor = _ati_owner(ati, CANAL_ANIM_ANCHOR)
-    if anchor is None:
-        raise ValueError(f"ATI: river anchor {CANAL_ANIM_ANCHOR:#x} not registered")
-    if (bytes(blob[ford:ford + _ASC_STRIDE]) == donor
-            and struct.unpack_from("<H", blob, toff + CANAL_FORD_ID * 2)[0] == CANAL_FORD_ATTR
-            and owner is not None and owner[0] == anchor[0]):
-        return bytes(blob)                                        # already baked
-
-    blob[ford:ford + _ASC_STRIDE] = donor                                     # 1. art
-    struct.pack_into("<H", blob, toff + CANAL_FORD_ID * 2, CANAL_FORD_ATTR)   # 2. attr
-    blob[ioff:ioff + isz] = _ati_move_member(                                 # 3. anim
-        ati, CANAL_FORD_ID, CANAL_ANIM_ANCHOR)
+    struct.pack_into("<H", blob, toff + CANAL_CROSS_ID * 2, CANAL_CROSS_ATTR)
     return bytes(blob)
 
 
@@ -360,28 +254,28 @@ def bake_openworld_grid(iso_path, early, extended, docks, log=print):
         f"extended={extended} docks={docks}; compressed {len(comp)}/{data_size})")
 
 
-def bake_canal_ford(iso_path, log=print):
-    """Bake the single-tile canal ford into `iso_path` (in place, same dpk record
-    slot). COSMETIC/non-load-bearing -- the caller swallows failures."""
+def bake_canal_crossing(iso_path, log=print):
+    """Bake the canal's walkable centre cell into `iso_path` (in place, same dpk
+    record slot). Non-load-bearing -- the caller swallows failures."""
     with open(iso_path, "r+b") as f:
         dpk_off, dpk_size = _find_dpk(f)
         f.seek(dpk_off)
         dpk = bytearray(f.read(dpk_size))
         rec_off, data_off, data_size = _dpk_records(dpk)[_PCK00]
         blob = wp16.decompress(bytes(dpk[data_off:data_off + data_size]))
-        new_blob = build_canal_ford(blob)
+        new_blob = build_canal_crossing(blob)
         if new_blob == blob:
-            log("[map_bake] canal ford: already baked")
+            log("[map_bake] canal crossing: already baked")
             return
         comp = wp16.compress(new_blob)
         if wp16.decompress(comp) != new_blob:
             raise ValueError(f"{_PCK00}: wp16 round-trip mismatch")
         if len(comp) > data_size:
-            raise ValueError(f"{_PCK00} ford PCK {len(comp)} > slot {data_size}")
+            raise ValueError(f"{_PCK00} canal PCK {len(comp)} > slot {data_size}")
         dpk[data_off:data_off + data_size] = comp + b"\x00" * (data_size - len(comp))
         struct.pack_into("<I", dpk, rec_off + 32, len(new_blob))   # DECOMPRESSED size
         f.seek(dpk_off)
         f.write(dpk)
-    log(f"[map_bake] canal ford (94,157): tile {CANAL_FORD_ID:#05x} -> attr "
-        f"{CANAL_FORD_ATTR:#06x} + art {CANAL_ART_DONOR:#05x} + river anim "
+    log(f"[map_bake] canal crossing (94,157): tile {CANAL_CROSS_ID:#05x} -> attr "
+        f"{CANAL_CROSS_ATTR:#06x}, art left vanilla "
         f"(compressed {len(comp)}/{data_size})")

@@ -32,6 +32,7 @@ from kivy.graphics import (Color, Line, Rectangle, StencilPop, StencilPush,
 from kivy.metrics import dp
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
+from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.gridlayout import GridLayout
 from kivy.uix.label import Label
 from kivy.uix.scrollview import ScrollView
@@ -287,7 +288,8 @@ class _AreaTile(BoxLayout):
                               height=dp(20), halign="left", valign="middle",
                               shorten=True, shorten_from="right")
         self.count_lbl = Label(text="", markup=True, size_hint_y=None,
-                               height=dp(18), halign="left", valign="middle")
+                               height=dp(18), halign="left", valign="middle",
+                               shorten=True, shorten_from="right")
         self.needs_lbl = Label(text="", markup=True, size_hint_y=None,
                                height=dp(16), halign="left", valign="middle",
                                shorten=True, shorten_from="right")
@@ -393,7 +395,8 @@ class _KeyItemChip(Label):
 
     def __init__(self, label, **kw):
         super().__init__(text=label, markup=True, size_hint=(1, None),
-                         height=dp(20), halign="center",
+                         height=dp(20), halign="center", shorten=True,
+                         shorten_from="right",
                          valign="middle", font_size=dp(10), **kw)
         # NOT self._label: kivy's Label uses that name for its internal CoreLabel,
         # and shadowing it breaks texture_update with a bare AttributeError.
@@ -663,7 +666,11 @@ class _BoostSlider(BoxLayout):
             self.note_lbl = Label(text="", markup=True, size_hint_y=None,
                                   height=dp(30), font_size=dp(11),
                                   halign="left", valign="top")
-            self.note_lbl.bind(size=lambda w, _v: setattr(w, "text_size", w.size))
+            self.note_lbl.bind(
+                width=lambda w, v: setattr(w, "text_size", (v, None)))
+            self.note_lbl.bind(
+                texture_size=lambda w, ts: setattr(
+                    w, "height", max(dp(30), ts[1] + dp(2))))
             self.add_widget(self.note_lbl)
         self._static_note = note
 
@@ -845,8 +852,10 @@ class _LockBar(BoxLayout):
         sw.add_widget(self.slider)
         ends = BoxLayout(orientation="horizontal", size_hint_y=None, height=dp(12))
         self._off_lbl = Label(text="", markup=True, font_size=dp(11),
+                              shorten=True, shorten_from="right",
                               halign="left", valign="middle")
         self._on_lbl = Label(text="", markup=True, font_size=dp(11),
+                             shorten=True, shorten_from="right",
                              halign="right", valign="middle")
         for lbl in (self._off_lbl, self._on_lbl):
             lbl.bind(size=lambda w, _v: setattr(w, "text_size", w.size))
@@ -857,6 +866,7 @@ class _LockBar(BoxLayout):
         # RIGHT: state heading over its explanation.
         text = BoxLayout(orientation="vertical", spacing=dp(1))
         self.head_lbl = Label(text="", markup=True, halign="left", valign="bottom",
+                              shorten=True, shorten_from="right",
                               size_hint_y=None, height=dp(18))
         self.body_lbl = Label(text="", markup=True, halign="left", valign="top",
                               font_size=dp(12))
@@ -1069,23 +1079,28 @@ class TrackerMixin:
         self._totals_lbl.bind(
             size=lambda w, _v: setattr(w, "text_size", w.size))
         self._crystals_lbl = Label(text="", markup=True, halign="right",
-                                   valign="middle", size_hint_x=None, width=dp(110))
+                                   valign="middle", shorten=True, shorten_from="right",
+                                  size_hint_x=None, width=dp(110))
         self._crystals_lbl.bind(
             size=lambda w, _v: setattr(w, "text_size", w.size))
         self._tablets_lbl = Label(text="", markup=True, halign="right",
-                                  valign="middle", size_hint_x=None, width=dp(150))
+                                  valign="middle", shorten=True, shorten_from="right",
+                                  size_hint_x=None, width=dp(150))
         self._tablets_lbl.bind(
             size=lambda w, _v: setattr(w, "text_size", w.size))
         self._runes_lbl = Label(text="", markup=True, halign="right",
-                                valign="middle", size_hint_x=None, width=dp(110))
+                                valign="middle", shorten=True, shorten_from="right",
+                                  size_hint_x=None, width=dp(110))
         self._runes_lbl.bind(
             size=lambda w, _v: setattr(w, "text_size", w.size))
         self._shards_lbl = Label(text="", markup=True, halign="right",
-                                 valign="middle", size_hint_x=None, width=dp(150))
+                                 valign="middle", shorten=True, shorten_from="right",
+                                  size_hint_x=None, width=dp(150))
         self._shards_lbl.bind(
             size=lambda w, _v: setattr(w, "text_size", w.size))
         self._members_lbl = Label(text="", markup=True, halign="right",
-                                  valign="middle", size_hint_x=None, width=dp(110))
+                                  valign="middle", shorten=True, shorten_from="right",
+                                  size_hint_x=None, width=dp(110))
         self._members_lbl.bind(
             size=lambda w, _v: setattr(w, "text_size", w.size))
         line.add_widget(self._totals_lbl)
@@ -1321,9 +1336,16 @@ class TrackerMixin:
         head = BoxLayout(orientation="horizontal", size_hint_y=None,
                          height=dp(28), spacing=dp(6))
         self._shops_note = Label(
-            text="", markup=True, size_hint_x=0.42,
+            text="", markup=True, size_hint_x=0.42, font_size=dp(12),
             halign="left", valign="middle")
-        self._shops_note.bind(size=lambda w, _v: setattr(w, "text_size", w.size))
+        # The note wraps to as many lines as it needs and the header row grows to
+        # match -- a fixed 28dp row vertically centered a 2-3 line note and clipped
+        # every line but the middle one.
+        self._shops_note.bind(
+            width=lambda w, v: setattr(w, "text_size", (v, None)))
+        self._shops_note.bind(
+            texture_size=lambda _w, ts: setattr(
+                head, "height", max(dp(28), ts[1] + dp(6))))
         head.add_widget(self._shops_note)
         cap = Label(text="[b]Search:[/b]", markup=True, size_hint_x=None,
                     width=dp(56), halign="right", valign="middle")
@@ -1510,7 +1532,11 @@ class TrackerMixin:
             bits.append("Party unknown, so nothing is shaded.")
         elif not party.get("live"):
             bits.append("Game not attached: shading uses your yaml's base "
-                        "classes (promotion and magic level unknown).")
+                        "classes.")
+        if party.get("missing"):
+            n = party["missing"]
+            bits.append(f"{n} party member{'s' if n > 1 else ''} not found yet "
+                        "(shown as later, not now).")
         return f"[color=8C8C8C]{'  '.join(bits)}[/color]" if bits else ""
 
     # Columns per town row. A town has at most 4 (weapon / armor / item / magic,
@@ -1715,9 +1741,14 @@ class TrackerMixin:
         head = BoxLayout(orientation="horizontal", size_hint_y=None,
                          height=dp(28), spacing=dp(6))
         self._bestiary_note = Label(text="", markup=True, size_hint_x=0.42,
+                                    font_size=dp(12),
                                     halign="left", valign="middle")
+        # Wrap on width only and grow the header row -- see the Shops note.
         self._bestiary_note.bind(
-            size=lambda w, _v: setattr(w, "text_size", w.size))
+            width=lambda w, v: setattr(w, "text_size", (v, None)))
+        self._bestiary_note.bind(
+            texture_size=lambda _w, ts: setattr(
+                head, "height", max(dp(28), ts[1] + dp(6))))
         head.add_widget(self._bestiary_note)
         cap = Label(text="[b]Search:[/b]", markup=True, size_hint_x=None,
                     width=dp(56), halign="right", valign="middle")
@@ -1921,13 +1952,13 @@ class TrackerMixin:
     # build_bestiary_tab). Only Summary is painted by index here.
     _BESTIARY_SUMMARY_IDX = 0
 
-    # The Bestiary strip uses the EXACT scheme _paint_tab_titles gives the
-    # Tracker strip, driven off tracker.bestiary_view's "strip" block:
-    #   never held anything   -> grayscale, caption "-"
-    #   cleared               -> grayscale, caption "0" (still clickable)
-    #   region not in logic   -> out-of-logic dark grey + slashes
-    #   in logic, none found  -> section colour + shine
-    #   otherwise             -> section colour, no shine
+    # Three looks, driven off tracker.bestiary_view's "strip" block:
+    #   never held anything      -> grayscale, caption "-"
+    #   cleared (tab complete)   -> grayscale, caption "0" (still clickable)
+    #   monsters left, none      -> out-of-logic dark grey + slashes
+    #     fightable right now
+    #   fightable, none found    -> section colour + shine
+    #   fightable, some found    -> section colour, no shine
     # The caption is the REMAINING COUNT, not the Tracker's percent: a monster
     # hunt is a to-do list and "12 left" is the actionable number.
     def _paint_bestiary_tab(self, idx, skey, info):
@@ -1954,7 +1985,10 @@ class TrackerMixin:
             # Tracker strip: a monster is filed under EVERY section it roams,
             # so one Cornelia kill also counts as `found` in Fire, Earth, Water,
             # Elfheim and Lategame and would light all of them on turn 1 (live
-            # 2026-08-31, 6/97 checks in). The tab follows its REGION only.
+            # 2026-08-31, 6/97 checks in). in_logic is bestiary_view's own
+            # per-PLACE answer -- never the Tracker's region flag, which counts
+            # chests and crossed Elfheim out while its forests were huntable
+            # (user report 2026-09-01).
             bar.set_out_logic(idx, True)
         else:
             bar.set_out_logic(idx, False)
@@ -2120,6 +2154,7 @@ class TrackerMixin:
         head_row.add_widget(Label(text=""))
         self._boost_attach_lbl = Label(text="", markup=True, halign="right",
                                        valign="middle", font_size=dp(12),
+                                       shorten=True, shorten_from="right",
                                        size_hint_x=None, width=dp(150))
         self._boost_attach_lbl.bind(
             size=lambda w, _v: setattr(w, "text_size", w.size))
@@ -2157,6 +2192,7 @@ class TrackerMixin:
 
         self._boost_status = Label(text="", markup=True, size_hint_y=None,
                                    height=dp(20), font_size=dp(12),
+                                   shorten=True, shorten_from="right",
                                    halign="left", valign="middle")
         self._boost_status.bind(size=lambda w, _v: setattr(w, "text_size", w.size))
         root.add_widget(self._boost_status)
@@ -2371,7 +2407,8 @@ class _ShopRow(BoxLayout):
                            shorten_from="right")
         self._left.bind(size=lambda w, _v: setattr(w, "text_size", w.size))
         self._right = Label(text=right, markup=True, halign="right",
-                            valign="middle", size_hint_x=None,
+                            valign="middle", shorten=True,
+                            shorten_from="right", size_hint_x=None,
                             width=PRICE_WIDTH)
         self._right.bind(size=lambda w, _v: setattr(w, "text_size", w.size))
         self.add_widget(self._left)
@@ -2388,9 +2425,15 @@ class _ShopHeaderRow(BoxLayout):
     def __init__(self, text, rgba, **kw):
         super().__init__(orientation="vertical", size_hint_y=None,
                          height=dp(24), **kw)
+        # GROWS instead of clipping, same rule as _wrap_label. With the height
+        # pinned at one line and text_size pinned to the widget, a header wider
+        # than the pane wrapped and only its LAST line stayed visible -- a
+        # Bestiary group came out titled "ship)" (live 2026-09-01). Wrap on
+        # width only and let the row take the lines it needs.
         lbl = Label(text=f"[b]{text}[/b]", markup=True, halign="left",
                     valign="bottom", size_hint_y=None, height=dp(21))
-        lbl.bind(size=lambda w, _v: setattr(w, "text_size", w.size))
+        lbl.bind(width=lambda w, _v: setattr(w, "text_size", (w.width, None)),
+                 texture_size=lambda w, ts: self._grow(w, ts))
         self.add_widget(lbl)
         rule = Widget(size_hint_y=None, height=dp(2))
         with rule.canvas:
@@ -2399,6 +2442,10 @@ class _ShopHeaderRow(BoxLayout):
         rule.bind(pos=lambda w, _v: self._sync(w),
                   size=lambda w, _v: self._sync(w))
         self.add_widget(rule)
+
+    def _grow(self, lbl, texture_size):
+        lbl.height = max(dp(21), texture_size[1] + dp(2))
+        self.height = lbl.height + dp(3)
 
     def _sync(self, w):
         self._line.pos = (w.x, w.y + dp(1))
@@ -2413,7 +2460,10 @@ def _shop_header(name, kind=None):
 
 
 def _offer_label(markup):
+    # shorten: a ROW_HEIGHT row cannot show a second line, so an over-wide line
+    # must ellipsize -- wrapping here is what leaves a mid-sentence fragment.
     lbl = Label(text=markup, markup=True, size_hint_y=None, height=ROW_HEIGHT,
+                shorten=True, shorten_from="right",
                 halign="left", valign="middle")
     lbl.bind(size=lambda w, _v: setattr(w, "text_size", w.size))
     return lbl
@@ -2445,8 +2495,9 @@ def _hl(name, query):
 
 
 # Usability shading. "now" = this party can equip/learn it today, "later" = only
-# after a class change (or a higher magic level), "never" = no member's class can
-# ever use it. Each row's color is faded toward the tab background by these
+# after a class change, a higher magic level, or the arrival of a party member
+# this seed has not handed over yet (starting_party_members), "never" = no
+# member's class -- present or still to be found -- can ever use it. Each row's color is faded toward the tab background by these
 # factors, so the shelf keeps its category colors and only its BRIGHTNESS carries
 # the state -- nothing moves, nothing hides.
 # Grouping (usable first, "never" collapsed) now carries most of the signal, so
@@ -2456,7 +2507,8 @@ _USE_FADE = {"now": 1.0, "later": 0.62, "never": 0.5}
 _USE_PRICE_FADE = {"now": 1.0, "later": 0.72, "never": 0.6}
 
 
-# Sort order within a shop: usable now, then after a class change, then never.
+# Sort order within a shop: usable now, then after a class change / a missing
+# member joins, then never.
 # Stable, so each group keeps the in-game shelf order.
 _USE_ORDER = {"now": 0, "later": 1, "never": 2}
 
@@ -2471,6 +2523,7 @@ class _ExpandRow(Button):
     def __init__(self, text, on_toggle, **kw):
         super().__init__(text=text, markup=True, size_hint_y=None,
                          height=ROW_HEIGHT, halign="left", valign="middle",
+                         shorten=True, shorten_from="right",
                          background_normal="", background_down="",
                          background_color=(0, 0, 0, 0), font_size=dp(13), **kw)
         self.bind(size=lambda w, _v: setattr(w, "text_size", w.size))
@@ -2563,6 +2616,134 @@ def make_manager(base_cls):
 
     class FF1PSPManager(TrackerMixin, base_cls):
         base_title = "Archipelago FF1 PSP Client"
+
+        # --- trap-queue overlay -------------------------------------------------
+        # Two lines pinned top-right ABOVE the tab bar, so they are visible on
+        # every tab rather than only the log. Hidden entirely -- text AND the
+        # black plate -- whenever nothing is queued, which is the normal state
+        # for most seeds (trap_percentage defaults to 0). Colour is AP's
+        # conventional trap colour, the same one AoM's overlay uses.
+        _TRAP_COLOR = "C9695F"
+
+        def build(self):
+            """Wrap the stock window in a FloatLayout so the trap panel can be
+            pinned over it. Everything else is the base build, untouched."""
+            main_content = super().build()
+            try:
+                root = FloatLayout()
+                root.add_widget(main_content)
+
+                box = BoxLayout(orientation="vertical", size_hint=(None, None),
+                                size=(self._trap_plate_width(), dp(40)),
+                                padding=(dp(6), 0))
+                with box.canvas.before:
+                    Color(0, 0, 0, 1)
+                    self._trap_plate = Rectangle(pos=(0, 0), size=(0, 0))
+
+                def _on_tracker(*_a):
+                    # The Tracker tab draws its own header right where the
+                    # overlay sits, so the plate is suppressed there. A tab that
+                    # is not current is off the widget tree entirely, so having a
+                    # root window IS "this tab is showing".
+                    tab = getattr(self, "_tracker_tab", None)
+                    return tab is not None and tab.get_root_window() is not None
+
+                def _plate(*_a):
+                    # Sized to zero while hidden -- a stale plate behind blank
+                    # labels would read as a rendering bug on a trapless seed.
+                    show = getattr(self, "_trap_visible", False) and not _on_tracker()
+                    box.opacity = 1 if show else 0
+                    if show:
+                        self._trap_plate.pos = box.pos
+                        self._trap_plate.size = box.size
+                    else:
+                        self._trap_plate.size = (0, 0)
+                box.bind(pos=_plate, size=_plate)
+                self._trap_plate_sync = _plate
+                # Tab switches do not touch the overlay's pos/size, so nothing
+                # else would re-run _plate: poll at the same cadence the Boost
+                # tab already uses for its own visibility edge.
+                Clock.schedule_interval(_plate, 0.25)
+
+                def _lbl():
+                    w = Label(text="", markup=True, halign="right",
+                              valign="middle", font_size=dp(12),
+                              shorten=True, shorten_from="right",
+                              size_hint_y=None, height=dp(20))
+                    w.bind(size=w.setter("text_size"))
+                    return w
+
+                self._trap_count_label = _lbl()
+                self._trap_next_label = _lbl()
+                box.add_widget(self._trap_count_label)
+                box.add_widget(self._trap_next_label)
+                root.add_widget(box)
+
+                def _reposition(*_a):
+                    box.right = root.right
+                    box.top = self.tabs.y if getattr(self, "tabs", None) else root.top
+                if getattr(self, "tabs", None) is not None:
+                    self.tabs.bind(pos=_reposition, size=_reposition)
+                root.bind(size=_reposition)
+                Clock.schedule_once(lambda _dt: _reposition())
+                return root
+            except Exception as ex:
+                logger.warning(f"Trap overlay unavailable: {ex}")
+                return main_content
+
+        @staticmethod
+        def _trap_plate_width():
+            """Widest line the overlay can ever show, +10% slack.
+
+            Measured, not guessed: trap names are built from the ability table
+            (`trap_name`), so a new ability renames a trap and a hardcoded width
+            would silently start eating characters via `shorten`. Falls back to
+            the old fixed width if text measurement is unavailable.
+            """
+            try:
+                from kivy.core.text import Label as CoreLabel
+                # Retired kinds are registered in no item table, so they can
+                # never reach the queue -- measuring them would only pad.
+                from ..trap_data import TRAP_ITEM_NAMES
+                lines = [f"Next Trap: {n}" for n in TRAP_ITEM_NAMES]
+                # The count line can out-run a short trap name; two digits is
+                # well past any queue a player accumulates.
+                lines.append("Traps in Queue: 88")
+                core = CoreLabel(font_size=dp(12), bold=True)
+                widest = 0
+                for text in lines:
+                    core.text = text
+                    core.refresh()
+                    widest = max(widest, core.texture.size[0])
+                # padding=(dp(6), 0) is applied on both sides.
+                return widest * 1.10 + dp(12)
+            except Exception as ex:
+                logger.warning(f"Trap plate measurement failed: {ex}")
+                return dp(190)
+
+        def update_trap_status(self, queue_size, next_trap_name):
+            """Thread-safe entry point; the client calls it from its asyncio
+            loop, so every widget touch is marshalled onto the Kivy thread."""
+            def _apply(_dt):
+                try:
+                    self._trap_visible = queue_size > 0
+                    if not self._trap_visible:
+                        self._trap_count_label.text = ""
+                        self._trap_next_label.text = ""
+                    else:
+                        c = self._TRAP_COLOR
+                        self._trap_count_label.text = (
+                            f"[b][color={c}]Traps in Queue: {queue_size}"
+                            f"[/color][/b]")
+                        self._trap_next_label.text = (
+                            f"[b][color={c}]Next Trap: {next_trap_name}"
+                            f"[/color][/b]")
+                    sync = getattr(self, "_trap_plate_sync", None)
+                    if sync is not None:
+                        sync()
+                except Exception as ex:
+                    logger.warning(f"Trap overlay repaint failed: {ex}")
+            Clock.schedule_once(_apply, 0)
 
         def on_stop(self, *args):
             # The window is going away NOW. Arm the hard-exit backstop from the

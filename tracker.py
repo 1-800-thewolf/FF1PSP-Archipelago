@@ -1129,7 +1129,7 @@ BESTIARY_COLOR_UNLOCK = 0.5
 _BESTIARY_KIND_ORDER = {
     "scripted": 0, "dlc_boss": 0,
     "cave": 2, "hd": 2, "cf": 2, "ff": 2,
-    "ow": 3, "ow_harder": 3, "forest": 4,
+    "ow": 3, "ow_harder": 3, "forest": 4, "forest_harder": 4,
     "desert": 5, "desert_harder": 5, "t4": 6, "t4_harder": 6,
     "ocean": 7, "oc": 7, "river": 8, "rr": 8,
     "dlc": 9,
@@ -1156,27 +1156,11 @@ def _bestiary_cls(flags):
     return "filler"
 
 
-def _bestiary_display_sources(mon, opts, ow_sources=None):
-    """Sources worth SHOWING for a monster under the seed's options: every
-    guaranteed-active source (logic.bestiary_source_rule), plus this seed's own
-    overworld places. The harder-dungeon cave reroll is unknowable per seed and
-    never shown.
-
-    The baked ('ow', ...) / ('ow_harder', ...) entries are DROPPED: the overworld
-    table is re-rolled every seed, so those describe the vanilla game and sent
-    players hunting where the monster cannot spawn (Cobra, live 2026-08-31).
-    ow_sources -- logic.overworld_sources() over the seed's rolled table -- is
-    the real answer; with none supplied the tab simply lists no overworld place
-    rather than an invented one."""
-    out = []
-    for src in LOGIC.BESTIARY_SOURCES.get(mon, ()):
-        kind, _key = src
-        if kind in ("minion", "cameo", "ow", "ow_harder"):
-            continue
-        if LOGIC.bestiary_source_rule(src, opts) is not None:
-            out.append(src)
-    out += sorted((ow_sources or {}).get(mon, ()))
-    return out
+def _bestiary_display_sources(mon, opts, ow_sources=None, cave_sources=None):
+    """Places to SHOW for a monster. Thin alias for logic.bestiary_place_sources
+    -- the tab and the seed's logic must answer "where can I meet this monster"
+    from one function, not two filters that can drift."""
+    return LOGIC.bestiary_place_sources(mon, opts, ow_sources, cave_sources)
 
 
 def _bestiary_minion_places(minion_plan, opts):
@@ -1239,15 +1223,37 @@ def _bestiary_progress_text(found, unlock_at):
 
 
 def _bestiary_merge_labels(labels):
-    """One header for several places holding the same monsters. Labels sharing a
-    trailing "(...)" keep it once -- "Desert (Cornelia)" + "Grass
-    (Cornelia)" reads "Desert / Grass (Cornelia)", not the suffix twice."""
+    """One header for several places holding the same monsters, factoring out
+    whatever the labels share so the row stays one line wide.
+
+      same "(...)"   -> "Desert (Cornelia)" + "Grass (Cornelia)"
+                        reads "Desert / Grass (Cornelia)"
+      same stem      -> "Forests (Western Keep, Mount Duergar)" + "Forests
+                        (Western Keep, by ship)" reads
+                        "Forests (Western Keep, Mount Duergar / by ship)"
+
+    Without the second case that header ran to 71 characters, wrapped to two
+    lines inside a fixed-height header row, and the player saw only its tail --
+    a group titled "ship)" (live 2026-09-01). The header row grows now too, but
+    a shorter label is the real fix: the repeated words carried no information.
+    """
     if len(labels) == 1:
         return labels[0]
     parts = [_BESTIARY_SUFFIX_RE.match(lb) for lb in labels]
-    if all(parts) and len({m.group(2) for m in parts}) == 1:
-        return (" / ".join(dict.fromkeys(m.group(1) for m in parts))
-                + f" ({parts[0].group(2)})")
+    if all(parts):
+        heads = list(dict.fromkeys(m.group(1) for m in parts))
+        tails = list(dict.fromkeys(m.group(2) for m in parts))
+        if len(tails) == 1:
+            return " / ".join(heads) + f" ({tails[0]})"
+        if len(heads) == 1:
+            # One place kind, several sub-places. Factor a shared leading
+            # comma-part ("Western Keep") out of the sub-places too.
+            stems = {t.split(", ", 1)[0] for t in tails}
+            if len(stems) == 1 and all(", " in t for t in tails):
+                rest = dict.fromkeys(t.split(", ", 1)[1] for t in tails)
+                return (f"{heads[0]} ({stems.pop()}, "
+                        + " / ".join(rest) + ")")
+            return f"{heads[0]} (" + " / ".join(tails) + ")"
     return " / ".join(dict.fromkeys(labels))
 
 
@@ -1278,8 +1284,8 @@ def _bestiary_source_open(src, mon, opts, tokens, party_cap):
 
 
 def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
-                  tokens=None, party_cap=0, section_logic=None,
-                  ow_sources=None):
+                  tokens=None, party_cap=0, ow_sources=None,
+                  cave_sources=None):
     """Payload for the Bestiary tab.
 
     bst           -- slot_data "bestiary" dict (None/falsy = off)
@@ -1293,13 +1299,10 @@ def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
                      zones_overworld (slot_data["shuffle_tables"]), or None.
                      The overworld table is re-rolled EVERY seed, so without
                      this the tab has no honest overworld place to name.
-    section_logic -- {section key: TrackerState.section_in_logic(section)}, or
-                     None. When given it DRIVES the strip's in_logic for every
-                     geographic section: the tab lights when the REGION is open,
-                     not when some roaming monster listed there happens to be
-                     fightable somewhere else (a Cornelia-and-Gulg Ogre used to
-                     light Fire on turn 1). Bosses has no Tracker counterpart
-                     and keeps its own per-fight rule either way.
+    cave_sources  -- logic.cave_sources() over this seed's zones_caves, the
+                     same idea for dungeons. That table only ships when a
+                     harder toggle is on; None means the caves are vanilla and
+                     the baked rows already describe them.
 
     Returns {"enabled", "done", "total", "progression_on", "sections": [...]},
     each section {"key", "display", "rgb", "dark_text", "remaining", "groups":
@@ -1332,7 +1335,8 @@ def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
     place_open = {}
     for mon in monsters:
         places = []
-        for kind, key in _bestiary_display_sources(mon, opts, ow_sources):
+        for kind, key in _bestiary_display_sources(mon, opts, ow_sources,
+                                                   cave_sources):
             section = LOGIC.BESTIARY_SOURCE_SECTION.get((kind, key))
             if section is None:
                 continue
@@ -1378,14 +1382,18 @@ def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
         if tokens is None:
             in_logic = shine = None
         else:
-            if section_logic is not None and skey != BESTIARY_BOSSES:
-                # Mirror the Tracker: the tab follows its REGION, and a section
-                # with nothing left to hunt never lights regardless.
-                in_logic = bool(section_logic.get(skey)) and tot > got
-            else:
-                in_logic = bool(sec_open.get(skey))
-            # Shine stays a BESTIARY measure: in logic with no monster check
-            # found in this tab yet, not "no location found in the region".
+            # The tab answers ITS OWN question: is a monster filed here
+            # fightable, at a place filed here, right now. It deliberately does
+            # NOT mirror TrackerState.section_in_logic -- that measures chests,
+            # NPCs and shops, so an Elfheim with no openable chest left read as
+            # out-of-logic while its forests were full of huntable monsters
+            # (user report 2026-09-01). The two strips are allowed to disagree
+            # on a region; they are not counting the same things.
+            #
+            # sec_open is already per-PLACE, so a monster that roams several
+            # sections only lights the ones the player can actually walk to
+            # (verified: turn 1 lights cornelia + bosses and nothing else).
+            in_logic = bool(sec_open.get(skey))
             shine = in_logic and got == 0
         strip[skey] = {"total": tot, "found": got, "remaining": tot - got,
                        "in_logic": in_logic, "shine": shine}

@@ -918,16 +918,22 @@ EVENTS = [
 # ff1psp/bestiary_data.py (re_only/gen_bestiary_areas.py) filtered by the
 # seed's encounter options + the boss_minions plan.
 #
-# GUARANTEED vs DRAWN sources: most encounter surfaces are exact tables
-# (vanilla rows, authored option pools, scripted fights, minion plans), but two
-# are per-seed RNG draws whose pools do not guarantee any single member appears:
-# harder_overworld's land-zone reroll (_OW_HARDER_POOL) and harder_dungeons'
-# cave rerolls (rando.shuffle_zones_caves). Those two NEVER grant a location or
-# satisfy logic here -- a monster only findable through a drawn pool that seed
-# is simply not a check. The Bestiary tab may still show drawn pools as hints.
-from .bestiary_data import (ACCESS_CLASSES,
+# NO SOURCE IS "DRAWN" ANY MORE (2026-09-01). Both per-seed encounter rerolls
+# used to be written off as unknowable pools, so a monster living only there was
+# not a check and the Bestiary tab could not say where it was. Both tables are
+# in fact reproducible: zones_overworld rolls off a derived rng
+# (rando.overworld_zone_tables -> overworld_sources) and zones_caves does the
+# same (rando.cave_zone_table -> cave_sources), and both ship in slot_data, so
+# generation and client read the SAME bytes the player's game runs. A place is
+# named only when the monster is really there.
+#
+# One carve-out: with harder_dungeons on, the six AUTHORED dungeons
+# (AUTHORED_HARDER_DUNGEONS) ignore zones_caves entirely -- iso_patcher detours
+# the table read for them -- so their places come from the hd/cf/ff rows.
+from .bestiary_data import (ACCESS_CLASSES, AUTHORED_HARDER_DUNGEONS,
                             BESTIARY_ELIGIBLE, BESTIARY_SOURCES, SOURCE_LABELS,
-                            CAVE_MAP_DUNGEON, DUNGEON_MONSTERS, HARDER_TARGET,
+                            CAVE_MAP_DUNGEON, CHAOS_FLOOR_MAP, DUNGEON_MONSTERS,
+                            HARDER_TARGET, SOURCE_GATE, SOURCE_KEY_GATE,
                             DUNGEON_DISPLAY, FORMATION_MONSTERS, ZONE_ACCESS,
                             SOURCE_SECTION as BESTIARY_SOURCE_SECTION)
 from .client.monster_names import MONSTER_NAME as BESTIARY_MONSTER_NAME
@@ -1131,58 +1137,89 @@ PARTY_TOKENS = {2: "Party of 2", 3: "Party of 3", 4: "Party of 4"}
 
 def bestiary_source_rule(source, opts):
     """OR-of-AND access alternatives for one bestiary_data source under the
-    seed's options, or None if the source is inactive OR drawn (never counts).
-    opts: dict with harder_ow, harder_dungeons, forests, ocean, river
-    (bools) and bonus_excluded (bool)."""
+    seed's options, or None when that source is not live this seed.
+
+    TWO SEPARATE QUESTIONS, deliberately kept apart:
+
+      IS IT LIVE?  Pure option bookkeeping, and NOT written here -- it is
+                   SOURCE_GATE, emitted by gen_bestiary_areas.py right beside
+                   the rows it gates. A source kind therefore cannot exist
+                   without a gate, and a gate cannot drift from the feature
+                   that bakes it. Hand-written gates are what let the two
+                   dangerous-forest pools both go live at once, and what left
+                   Chaos' floor named as a place with its encounters off
+                   (both 2026-09-01).
+
+      HOW DO YOU GET THERE?  Geography, which genuinely differs per kind and
+                   stays below.
+
+    opts: the seed's bestiary opts dict (see __init__._bestiary_setup)."""
     kind, key = source
-    if kind in ("minion", "cameo", "ow_harder"):
-        return None                       # plan-driven / drawn -- handled apart
+    # KeyError here is the point: a kind the generator emitted without a gate
+    # must fail loudly rather than default to always-on.
+    if not _gate_open(SOURCE_GATE[kind], opts):
+        return None
+    if not _gate_open(SOURCE_KEY_GATE.get(source, ()), opts):
+        return None
     if kind == "cave":
-        if opts.get("harder_dungeons"):
-            return None                   # rerolled per seed -> drawn
+        if opts.get("harder_dungeons") and not opts.get("cave_exact"):
+            # The one condition that is not a plain option gate: harder
+            # dungeons REROLL the cave table, so a baked row is only a real
+            # place when the caller hands in the seed's own table (cave_exact,
+            # via cave_sources). Without it, stay conservative rather than
+            # quote the vanilla rows the reroll replaced.
+            return None
         return _BESTIARY_DUNGEON_RULES[CAVE_MAP_DUNGEON[key]]
-    if kind == "ow":
-        # Always exact: the caller derived this key from the seed's own rolled
-        # table (overworld_sources), so there is nothing left to be unsure of.
+    if kind in ("ow", "desert", "t4", "desert_harder", "t4_harder",
+                "forest", "forest_harder"):
         return _bestiary_access_for(key, opts)
-    if kind in ("desert", "t4"):
-        if opts.get("harder_ow"):
-            return None                   # vanilla tables replaced
-        return _bestiary_access_for(key, opts)
-    if kind in ("desert_harder", "t4_harder"):
-        return _bestiary_access_for(key, opts) if opts.get("harder_ow") else None
-    if kind == "forest":
-        return _bestiary_access_for(key, opts) if opts.get("forests") else None
     if kind == "ocean":
+        # regional_ocean re-pools only the four outer quadrants; the starting
+        # sea keeps these vanilla rows, so this is unconditional.
         return [[SHIP]]
     if kind == "oc":
-        return [[SHIP, CANAL]] if opts.get("ocean") else None
+        return [[SHIP, CANAL]]
     if kind == "river":
+        # northern_river re-pools only the northern continent; every other
+        # river keeps these rows.
         return [[SHIP, CANOE], [AIRSHIP, CANOE]]
     if kind == "rr":
-        return ([[SHIP, CANAL, CANOE], [AIRSHIP, CANOE]]
-                if opts.get("river") else None)
+        return [[SHIP, CANAL, CANOE], [AIRSHIP, CANOE]]
     if kind == "scripted":
         return _BESTIARY_SCRIPTED_RULES[key]
     if kind in ("hd", "cf", "ff"):
-        # authored override rows (key = dungeon name); chaos_floor_pools
-        # bakes with harder_dungeons (see __init__ on_disc), so all three
-        # kinds ride that flag.
-        if not opts.get("harder_dungeons"):
-            return None
-        return _BESTIARY_DUNGEON_RULES[key]
+        return _BESTIARY_DUNGEON_RULES[key]     # authored rows, keyed by dungeon
     if kind == "dlc":
         # key = dungeon index * 10 + floor band (bestiary_data groups the
         # shared DLC rows per dungeon), so the gate is that ONE dungeon.
-        if opts.get("bonus_excluded"):
-            return None
         return _BESTIARY_BONUS_RULES[key // 10]
     if kind == "dlc_boss":
-        if opts.get("bonus_excluded"):
-            return None
         mon = 0x80 + (key - 0x100)
         return _BESTIARY_BONUS_RULES[BESTIARY_DLC_BOSS_BAND[mon]]
     raise KeyError(f"unknown bestiary source kind {kind!r}")
+
+
+def bestiary_place_sources(mon, opts, ow_sources=None, cave_sources=None):
+    """Every (kind, key) that is a REAL place for this monster in this seed.
+
+    THE single answer to "where can I meet this monster", shared by the logic
+    that decides whether it is a check (bestiary_rule_alts) and by the tab that
+    tells the player where to go (tracker._bestiary_display_sources). They used
+    to filter the source list separately and had already drifted apart.
+
+    Sources whose gate is shut drop out. The per-seed rerolled tables REPLACE
+    their baked counterparts rather than adding to them: those rows describe
+    the vanilla game and would send a player hunting where the monster cannot
+    spawn (the Cobra bug, 2026-08-31). With no table supplied the baked rows
+    still answer -- they are exactly right on a seed that rerolled nothing."""
+    drop = {"ow", "ow_harder"}
+    if cave_sources is not None:
+        drop.add("cave")
+    out = [src for src in BESTIARY_SOURCES.get(mon, ())
+           if src[0] not in drop and bestiary_source_rule(src, opts) is not None]
+    out += sorted((ow_sources or {}).get(mon, ()))
+    out += sorted((cave_sources or {}).get(mon, ()))
+    return out
 
 
 def bestiary_minion_monsters(minion_plan, bonus_excluded=False):
@@ -1243,9 +1280,55 @@ def overworld_sources(zones_overworld, ow_hi=None):
     return out
 
 
-def bestiary_rule_alts(mon, opts, minion_rules=None, ow_sources=None):
+# Options whose ABSENCE from a slot_data's bestiary opts must not read as
+# False. These keys shipped later than the option itself, so an older seed has
+# the option's own default, not "off". Everything else defaults False.
+_GATE_ABSENT_DEFAULT = {"chaos_floor": True}
+
+
+def _gate_open(gate, opts):
+    """Is a generated SOURCE_GATE satisfied? () = always, None = never."""
+    if gate is None:
+        return False
+    return all(bool((opts or {}).get(opt, _GATE_ABSENT_DEFAULT.get(opt, False)))
+               is want for opt, want in gate)
+
+
+def cave_sources(zones_caves, opts=None):
+    """{mon: {('cave', map_id), ...}} from a rolled zones_caves table.
+
+    zones_caves -- rando's cave table as shipped (8 slots per map id), or None.
+    opts        -- the seed's bestiary opts.
+
+    The cave twin of overworld_sources. Boss cameos need no special case: they
+    are stamped INTO this table (rando._stamp_boss_slots), so reading the bytes
+    finds them. Maps with no dungeon assignment are skipped -- they keep their
+    vanilla bytes and bestiary_data already names them."""
+    out = {}
+    if not zones_caves:
+        return out
+    harder = bool((opts or {}).get("harder_dungeons"))
+    for mid, name in CAVE_MAP_DUNGEON.items():
+        if harder and name in AUTHORED_HARDER_DUNGEONS:
+            continue                      # patcher detours the table for these
+        if not _gate_open(SOURCE_KEY_GATE.get(("cave", mid), ()), opts):
+            continue                      # e.g. Chaos' floor with its option off
+        base = mid * 8
+        if base + 8 > len(zones_caves):
+            continue
+        for slot in range(8):
+            for mon in FORMATION_MONSTERS.get(zones_caves[base + slot], ()):
+                out.setdefault(mon, set()).add(("cave", mid))
+    return out
+
+
+def bestiary_rule_alts(mon, opts, minion_rules=None, ow_sources=None,
+                       cave_sources=None):
     """All access alternatives for a monster under the seed's options; [] means
-    not guaranteed-huntable this seed (no location, no logic)."""
+    not huntable this seed (no location, no logic).
+
+    Places come from bestiary_place_sources, so what logic counts and what the
+    Bestiary tab shows can never disagree."""
     # Dedupe by CONTENT, not by list identity: the same requirement reaches
     # here in different token orders ([SHIP, CANAL] from a dungeon rule,
     # [CANAL, SHIP] from a generated access class) and an order-sensitive
@@ -1258,14 +1341,8 @@ def bestiary_rule_alts(mon, opts, minion_rules=None, ow_sources=None):
             seen.add(key)
             alts.append(alt)
 
-    sources = [s for s in BESTIARY_SOURCES.get(mon, ())
-               if s[0] not in ("ow", "ow_harder")]
-    sources += sorted((ow_sources or {}).get(mon, ()))
-    for source in sources:
-        rule = bestiary_source_rule(source, opts)
-        if rule is None:
-            continue
-        for alt in rule:
+    for source in bestiary_place_sources(mon, opts, ow_sources, cave_sources):
+        for alt in bestiary_source_rule(source, opts):
             _add(alt)
     if minion_rules:
         for alt in minion_rules.get(mon, ()):

@@ -1002,6 +1002,33 @@ def _draw_pool(rng, pool):
     return ok[rng.randrange(len(ok))]
 
 
+def cave_zone_table(seed, player, *, dungeon_harder=False,
+                    overworld_harder=False):
+    """This slot's FINAL zones_caves table, off a DERIVED rng, or None when the
+    seed ships no cave table at all.
+
+    The cave twin of overworld_zone_tables, and for the same reason: the
+    bestiary has to know the seed's real dungeon encounters during
+    create_regions/set_rules, long before _seed_shuffle can run. Boss cameos are
+    stamped here too, so what logic gated on is byte-for-byte what the player's
+    game runs -- build_shuffle_tables takes this table as `cv_table` instead of
+    rolling its own.
+
+    Returns None when neither harder toggle is set: the caves are then plain
+    vanilla and bestiary_data's baked rows already describe them exactly."""
+    if not (dungeon_harder or overworld_harder):
+        return None
+    import random as _random
+    rng = _random.Random(f"{seed}-{player}-cavezones")
+    cv = (shuffle_zones_caves(rng, RD.VANILLA["zones_caves"], harder=True)
+          if dungeon_harder else bytearray(RD.VANILLA["zones_caves"]))
+    if overworld_harder:
+        cv = _stamp_boss_slots(cv, _ONRAC_BOSS_SLOTS)   # Onrac routes via cave map 0x28
+    if dungeon_harder:
+        cv = _stamp_boss_slots(cv, _DUNGEON_BOSS_SLOTS)
+    return bytes(cv)
+
+
 def shuffle_zones_caves(rng, block, harder=False):
     """Reroll each dungeon map's 8 slots from its own dungeon's vanilla formation
     pool (harder: from the next dungeon up the progression chain instead). Maps
@@ -1887,7 +1914,7 @@ def shuffle_shop_items(rng, block, tier=SHOP_TIER_OVERWORLD, ap_slots=False,
     `force_item_ids` are consumable ids that MUST end up on the Cornelia item
     shop's shelf whatever the draw rolled (starting_party_members == 1 forces
     ANTIDOTE_ID there -- a solo character has nobody to cure their Poison).
-    Unlike the _CURE_IDS guarantee below it is unconditional."""
+    Unlike the Gold Needle guarantee below it is unconditional."""
     out = bytearray(block)
     vanilla_ids = _vanilla_shop_ids(block)      # BEFORE the relayout moves lists
     blocked_ids = (ap_blocked if ap_blocked is not None
@@ -2015,20 +2042,40 @@ def shuffle_shop_items(rng, block, tier=SHOP_TIER_OVERWORLD, ap_slots=False,
                 set_shop_width(out, idx, k + res)
                 plan[idx] = (list_off, k + res)
 
-    # guarantee: a status-cure item is always buyable somewhere (Remedy/Gold
-    # Needle must never be locked out of the whole world). Checks EVERY store,
-    # not just the two starting towns, and overwrites a slot whose id is stocked
-    # more than once so the guarantee can never be what creates a duplicate.
-    if not (_stocked_item_ids(out, plan) & set(_CURE_IDS)):
-        idx = _DEF_IDX[(0, 2)]                           # Cornelia item shop
+    # guarantee: Gold Needle is always buyable in one of the two STARTING towns
+    # (Cornelia / Pravoka). Remedy no longer satisfies this, and a Gold Needle
+    # stocked in a later town does not either -- Petrify must be curable from the
+    # shops the player can reach at the start. Overwrites a slot whose id is
+    # stocked more than once so the guarantee can never be what creates a
+    # duplicate.
+    _start_idx = [_DEF_IDX[(0, 2)], _DEF_IDX[(1, 2)]]      # Cornelia, Pravoka
+    if rng.random() < 0.5:                                 # town picked per seed
+        _start_idx.reverse()
+    _start_idx = [i for i in _start_idx if i in plan]
+
+    def _needle_spot(idx, stock_only):
+        """Row of store `idx` to stamp the Gold Needle into, or None. With
+        `stock_only` the reserved AP tail is off limits (overwriting it would
+        drop an offer); without it the whole list is fair game."""
         list_off, size = plan[idx]
-        # Stock rows only: overwriting a reserved AP row would drop an offer.
-        stock = size - min(reserve.get(idx, 0), max(0, size - 1))
-        spot = next((list_off + k for k in range(stock)
+        rows = (size - min(reserve.get(idx, 0), max(0, size - 1))
+                if stock_only else size)
+        if rows <= 0:
+            return None
+        return next((list_off + k for k in range(rows)
                      if used[2].get(out[list_off + k], 0) > 1), list_off)
-        used[2][out[spot]] = max(0, used[2].get(out[spot], 1) - 1)
-        out[spot] = _CURE_IDS[1]                         # Gold Needle
-        used[2][_CURE_IDS[1]] = used[2].get(_CURE_IDS[1], 0) + 1
+
+    if not any(out[plan[i][0] + k] == GOLD_NEEDLE_ID
+               for i in _start_idx for k in range(plan[i][1])):
+        # Prefer a plain stock row in either town; only if BOTH are full of
+        # reserved AP rows do we spend one -- the Needle must land regardless.
+        spot = next((s for stock_only in (True, False) for i in _start_idx
+                     for s in (_needle_spot(i, stock_only),) if s is not None),
+                    None)
+        if spot is not None:
+            used[2][out[spot]] = max(0, used[2].get(out[spot], 1) - 1)
+            out[spot] = GOLD_NEEDLE_ID
+            used[2][GOLD_NEEDLE_ID] = used[2].get(GOLD_NEEDLE_ID, 0) + 1
 
     # Unconditionally forced Cornelia item-shop stock (`force_item_ids`). Runs
     # BEFORE placeholders are picked, and placeholders are drawn from ids the
@@ -2054,19 +2101,10 @@ def shuffle_shop_items(rng, block, tier=SHOP_TIER_OVERWORLD, ap_slots=False,
     return out
 
 
-_CURE_IDS = (0x0a, 0x0c)                 # Remedy, Gold Needle
+GOLD_NEEDLE_ID = 0x0c                    # the guaranteed starting-town cure
+REMEDY_ID = 0x0a                         # ordinary stock, guarantees nothing
+_CURE_IDS = (REMEDY_ID, GOLD_NEEDLE_ID)  # both status cures (naming/tests only)
 ANTIDOTE_ID = 0x0b                       # vanilla Cornelia item-shop stock
-
-
-def _stocked_item_ids(block, plan):
-    """Every consumable id stocked by a town item store in `plan`."""
-    out = set()
-    for (city, row), idx in _DEF_IDX.items():
-        if row != 2 or idx not in plan:
-            continue
-        list_off, size = plan[idx]
-        out |= {block[list_off + k] for k in range(size)}
-    return out
 
 
 # Caravan slot split: 2 ids drawn from the selected tier, 3 from ONE tier above it
@@ -3378,7 +3416,7 @@ def gear_auto_sell_value(block, gid, jobs):
     return gear_sell_value(block, gid)
 
 
-def gear_equip_state(block, gid, jobs, rune_ok=True):
+def gear_equip_state(block, gid, jobs, rune_ok=True, future_jobs=()):
     """Can this party use that piece of gear? "now" / "later" / "never", for the
     Shops tab's usability shading.
 
@@ -3395,7 +3433,13 @@ def gear_equip_state(block, gid, jobs, rune_ok=True):
     usable as a battle item by anyone, so it never returns "never". `rune_ok` is
     the equipment_runes gate -- False means the gate is on and the Rune Key is
     not assembled yet, so activation is greyed out for now => "later". The True
-    default is "no gate", which is what every pre-rune caller means."""
+    default is "no gate", which is what every pre-rune caller means.
+
+    `future_jobs` are party members this seed has not handed over yet
+    (starting_party_members): their class is known from the plan but they are
+    not in the party, so they can only ever push a row to "later" -- both mask
+    halves count for them, since their promotion is as inevitable as their
+    arrival."""
     rec = (gid - 1) * _GEAR_STRIDE
     if gid <= 0 or rec + 4 > len(block):
         return "never"
@@ -3413,12 +3457,18 @@ def gear_equip_state(block, gid, jobs, rune_ok=True):
             now = True
         elif e2 & bit:
             later = True                # unlocks at the class change
+    for j in future_jobs or ():
+        if j is None:
+            continue
+        if (e1 | e2) & (1 << (j % _PROMO_MIN)):
+            later = True                # unlocks when that member joins
     if not now and gear_is_activatable(block, gid):
         return "now" if rune_ok else "later"
     return "now" if now else ("later" if later else "never")
 
 
-def spell_learn_state(magic_learn, magic_info, idx, jobs, magic_levels=None):
+def spell_learn_state(magic_learn, magic_info, idx, jobs, magic_levels=None,
+                      future_jobs=()):
     """Can this party learn spell `idx` (0..63)? "now" / "later" / "never".
 
     Mirrors the game's own teach gate (iso_patcher._tome_validity_handler): the
@@ -3426,7 +3476,13 @@ def spell_learn_state(magic_learn, magic_info, idx, jobs, magic_levels=None):
     is the party's live P_MAGICLV per member; pass None (or None entries) when
     the game is not attached -- an unknown magic level is treated as high enough,
     so nothing is faded on a guess. A base-class member whose PROMOTION carries
-    the learn bit reads "later"."""
+    the learn bit reads "later".
+
+    `future_jobs` are members this seed has not handed over yet
+    (starting_party_members): known class, not in the party, so they can only
+    reach "later". Their magic level is NOT checked -- they join at a rolled
+    level and keep levelling, so the class bit alone (theirs or their
+    promotion's) is the whole test."""
     rec = magic_learn[idx * 2] | (magic_learn[idx * 2 + 1] << 8)
     level = magic_info[idx * 14 + 9]
     now = later = False
@@ -3441,6 +3497,12 @@ def spell_learn_state(magic_learn, magic_info, idx, jobs, magic_levels=None):
                 later = True            # right class, magic level too low yet
         elif j < _PROMO_MIN and rec & (1 << can_learn_bit(j + _PROMO_MIN)):
             later = True                # unlocks at the class change
+    for j in future_jobs or ():
+        if j is None:
+            continue
+        if rec & (1 << can_learn_bit(j)) or (
+                j < _PROMO_MIN and rec & (1 << can_learn_bit(j + _PROMO_MIN))):
+            later = True                # unlocks when that member joins
     return "now" if now else ("later" if later else "never")
 
 
@@ -3548,7 +3610,7 @@ def build_shuffle_tables(rng, *, shop_tier=SHOP_TIER_UNSHUFFLED, magic_shops=Fal
                          block_mana_items=False,
                          shop_extra_slots=_EXTRA_SLOTS_DEFAULT,
                          shared_tails=False, force_shop_item_ids=(),
-                         ow_tables=None):
+                         ow_tables=None, cv_table=None):
     """Assemble the enabled Tier-A shuffles into per-physical-table patched bytes.
     Multiple features can touch the same table (e.g. equip_perms + item_prices
     both edit `weapons`); they are layered onto one bytearray so a single
@@ -3865,12 +3927,19 @@ def build_shuffle_tables(rng, *, shop_tier=SHOP_TIER_UNSHUFFLED, magic_shops=Fal
         # together; do not make this conditional on any(ow_hi).
         result["zones_overworld_hi"] = ow_hi
     if overworld_harder or dungeon_harder:
-        cv = (shuffle_zones_caves(rng, V["zones_caves"], harder=True)
-              if dungeon_harder else bytearray(V["zones_caves"]))
-        if overworld_harder:
-            cv = _stamp_boss_slots(cv, _ONRAC_BOSS_SLOTS)   # Onrac routes via cave map 0x28
-        if dungeon_harder:
-            cv = _stamp_boss_slots(cv, _DUNGEON_BOSS_SLOTS)
+        # Same deal as ow_tables above: the caller hands in the table set_rules
+        # already gated the bestiary on, so the shipped bytes and the bytes
+        # logic reasoned about cannot drift. A local roll keeps every other
+        # caller (parity harnesses, tests) working unchanged.
+        if cv_table is not None:
+            cv = bytearray(cv_table)
+        else:
+            cv = (shuffle_zones_caves(rng, V["zones_caves"], harder=True)
+                  if dungeon_harder else bytearray(V["zones_caves"]))
+            if overworld_harder:
+                cv = _stamp_boss_slots(cv, _ONRAC_BOSS_SLOTS)   # Onrac routes via cave map 0x28
+            if dungeon_harder:
+                cv = _stamp_boss_slots(cv, _DUNGEON_BOSS_SLOTS)
         result["zones_caves"] = bytes(cv)
     return result
 
