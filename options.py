@@ -716,6 +716,23 @@ class NorthernDocks(DefaultOnToggle):
     display_name = "Northern Docks"
 
 
+class UnlockableNorthernFootTrails(Toggle):
+    """🌉 Adds three AP items that reshape the northern map. 
+      • Lufenian Bridge: bridges Pravoka to the Lufenian landmass
+      • Lufenian Nitro Powder: blasts the boulder between Lufenia and Gaia
+      • Gaian Nitro Powder: blasts the boulder between Gaia and Mirage Desert
+    """
+    internal_name = "unlockable_northern_foot_trails"
+    display_name = "Unlockable Northern Foot Trails"
+
+
+class MountGulgKey(Toggle):
+    """🌋 Seals Mount Gulg's entrance until you find the Mount Gulg Key.
+    """
+    internal_name = "mount_gulg_key"
+    display_name = "Mount Gulg Key"
+
+
 class LootInNormallyEmptyChests(DefaultOnToggle):
     """📦 Puts real loot in the chests that are empty in vanilla.
 
@@ -763,7 +780,7 @@ class MessageSpeed(Choice):
     option_medium = 1
     option_fast = 2
     option_instant = 3
-    default = 2
+    default = 3
 
 
 class CursorMode(Choice):
@@ -1343,6 +1360,7 @@ ff1psp_option_groups = [
     ]),
     OptionGroup("World", [
         OpenProgression, NorthernDocks,
+        UnlockableNorthernFootTrails, MountGulgKey,
         LevistoneShardsRequired, LevistoneShardsPercentage, LevistoneShardsExtra,
         LootInNormallyEmptyChests,
     ]),
@@ -1462,6 +1480,8 @@ class FF1PSPOptions(PerGameCommonOptions):
     auto_sell_unusable_items: AutoSellUnusableItems
     open_progression: OpenProgression
     northern_docks: NorthernDocks
+    unlockable_northern_foot_trails: UnlockableNorthernFootTrails
+    mount_gulg_key: MountGulgKey
     loot_in_normally_empty_chests: LootInNormallyEmptyChests
     exclude_bonus_dungeons: ExcludeBonusDungeons
     earthgift_ap_locations: EarthgiftApLocations

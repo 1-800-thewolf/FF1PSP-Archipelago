@@ -197,6 +197,26 @@ def bestiary_loc_id(mon):        return BASE + BESTIARY_OFF + mon
 def is_bestiary_loc(lid):        return BASE + BESTIARY_OFF <= lid < BASE + BESTIARY_OFF + 0x100
 def bestiary_loc_mon(lid):       return lid - BASE - BESTIARY_OFF
 
+# --- world-changing items: REAL pool items (found anywhere in the multiworld)
+# that have no in-game existence at all -- no key-item bit, no inventory slot,
+# no function bit. What they change is the OVERWORLD MAP: the client paints a
+# gated set of grid cells once one is held (openworld_data's
+# LUFENIAN_BRIDGE_BUILT / *_BOULDER_OPEN / GULG_SEAL tables). So the client
+# treats them counter-only, exactly like an event token, but unlike an event
+# token the world PLACES them in the pool rather than precollecting them.
+# n = a small stable ordinal (see ff1psp.__init__.WORLD_ITEM_NAMES).
+WORLD_OFF = 0x00110000
+# Ordinals are FROZEN -- they are the datapackage ids. Appending is safe;
+# reordering renumbers live seeds. Single-sourced here because BOTH the world
+# (ff1psp.__init__, by name) and the client (ApClient._openworld_loop, by id)
+# have to agree on which item is which.
+WORLD_LUFENIAN_BRIDGE = 0
+WORLD_LUFENIAN_NITRO  = 1
+WORLD_GAIAN_NITRO     = 2
+WORLD_MOUNT_GULG_KEY  = 3
+def world_item_id(n):            return BASE + WORLD_OFF + n
+def is_world_item(iid):          return BASE + WORLD_OFF <= iid < BASE + WORLD_OFF + 0x100
+
 # --- event (gate) items: synthetic progression tokens (Bridge, Canal, ...) the
 # world precollects / places at event locations. They are NOT game items; the
 # client treats them as counter-only. Range must match ff1psp.__init__._EVENT_BASE.

@@ -39,7 +39,6 @@ import struct
 from . import wp16
 from . import job_sprites as JS
 from .ms2_bake import DPK_ISO_OFF, _read_index, _read_pack, _write_record
-from .ms2_bake import _donor_pool, reserved_names
 
 # every dpk pack that carries main JOBxx.GIM sheets
 PACKS = ("JOB_NORMAL.PCK", "M_JOB_NORMAL.PCK",
@@ -66,93 +65,18 @@ def _patch_pack(blob, pals):
     return bytes(out), done
 
 
-class _Space:
-    """Best-fit extent pool over freed pack runs + donor records.
-
-    Donor allocations are reported by NAME so the caller can reserve them from
-    ms2_bake; space freed by a pack we are relocating carries no name (ms2's
-    donor pool never contains JOB_* records, so it cannot hand that space out).
-    Adjacent extents merge only across gaps proven to be 16-align padding: at
-    most COALESCE_GAP bytes AND no live record starting inside the gap.
-
-    Reporting is done from the ORIGINAL donor segments, not from the merged
-    extent's name: the J1/J2 pairs are adjacent on disc, so coalescing routinely
-    builds one run out of two-to-four donor records and a single-name extent
-    under-reports every donor but the first. Live 2026-08-31: JOB_NORMAL landed
-    across FM_DBG_CAMPJ1/J2 + FM_CAMPJ1/J2 and M_JOB_NORMAL across
-    FM_GARELLY_LGJ1/J2; only one name of each group reached ms2_bake's reserved
-    set, so MS2_07B and MS2_102 were parked on top of the sprite packs -- 57
-    overlapping dpk records, and a new game died in the class-sprite load with
-    "CPU Jump to 00000000", RA 0x088fba28 (the dpk-dead-space-ownership
-    signature)."""
-
-    def __init__(self, live_offsets):
-        self._free = []                      # [off, size, donor name | None]
-        self._segs = []                      # (off, size, name) as handed in
-        self._offsets = sorted(live_offsets)
-        self.donors_used = set()
-
-    def free(self, off, size, name=None):
-        self._free.append([off, size, name])
-        if name:
-            self._segs.append((off, size, name))
-
-    def coalesce(self):
-        self._free.sort(key=lambda e: e[0])
-        merged = []
-        for ext in self._free:
-            if merged:
-                prev = merged[-1]
-                gap = ext[0] - (prev[0] + prev[1])
-                inside = any(prev[0] + prev[1] <= o < ext[0]
-                             for o in self._offsets)
-                if 0 <= gap <= COALESCE_GAP and not inside:
-                    prev[1] = ext[0] + ext[1] - prev[0]
-                    prev[2] = prev[2] or ext[2]
-                    continue
-            merged.append(list(ext))
-        self._free = merged
-
-    def alloc(self, size):
-        """Smallest extent that fits, PREFERRING space we freed ourselves.
-
-        The packs only grow by ~112-238 bytes each, so nearly all of them fit
-        back into the runs their vanilla copies vacated; without this
-        preference a plain best-fit spends coalesced donor runs (~150KB of
-        FM_* dead space measured) that ms2_bake needs for boss packs at the
-        higher minion tiers. Residual goes back on the free list."""
-        fits = [e for e in self._free if e[1] >= size and not e[2]]
-        if not fits:
-            fits = [e for e in self._free if e[1] >= size]
-        if not fits:
-            raise RuntimeError(
-                "no dpk space for a %d-byte job sprite pack" % size)
-        ext = min(fits, key=lambda e: e[1])
-        off = ext[0]
-        # every donor record this allocation actually touches, not just the
-        # name the merged extent happens to carry
-        for s_off, s_size, s_name in self._segs:
-            if s_off < off + size and off < s_off + s_size:
-                self.donors_used.add(s_name)
-        ext[0] += size
-        ext[1] -= size
-        if ext[1] == 0:
-            self._free.remove(ext)
-        return off
-
-
-def bake_job_palettes(iso_path: str, extern_active: bool = True,
-                      caravan_active: bool = False) -> set:
+def bake_job_palettes(iso_path: str, pool) -> None:
     """Write every shipped class's merged palette into all dpk packs that carry
-    its sheet. Returns the set of donor record names consumed, which the caller
-    MUST reserve from ms2_bake (one region, one owner)."""
+    its sheet. Grown packs relocate into `pool` (the DonorPool patch_iso shares
+    with every dpk baker), preferring the runs their own vanilla copies vacate
+    so donor space is left for later bakers."""
     pals = {}
     for cls in range(JS.CLASS_COUNT):
         art = JS.sheet(cls)
         if art:
             pals[cls] = art[0]
     if not pals:
-        return set()
+        return
     with open(iso_path, "r+b") as f:
         recs = _read_index(f)
         # PASS 1 -- build every patched pack before writing anything, so the
@@ -166,23 +90,19 @@ def bake_job_palettes(iso_path: str, extern_active: bool = True,
             if done:
                 built[pk] = wp16.compress(patched)
         if not built:
-            return set()
+            return
         # PASS 2 -- place them. A pack that still fits its own record stays put;
         # everything else is relocated out of the pool of freed pack runs plus
         # donor extents.
-        space = _Space(r["off"] for r in recs.values())
         moving = {pk: blob for pk, blob in built.items()
                   if len(blob) > recs[pk]["csz"]}
         for pk in moving:
-            space.free(recs[pk]["off"], recs[pk]["csz"])
-        for d in _donor_pool(recs, reserved_names(extern_active,
-                                                  caravan_active)):
-            space.free(d["off"], d["csz"], d["name"])
-        space.coalesce()
+            pool.free(recs[pk]["off"], recs[pk]["csz"], own=True)
+        pool.coalesce()
         # biggest first: a large pack has the fewest extents that can hold it
         for pk in sorted(moving, key=lambda p: -len(built[p])):
             blob = built[pk]
-            off = space.alloc(len(blob))
+            off = pool.alloc(len(blob), pk, prefer_own=True)
             f.seek(DPK_ISO_OFF + off)
             f.write(blob)
             _write_record(f, recs[pk], off, len(blob), recs[pk]["dsz"])
@@ -216,4 +136,3 @@ def bake_job_palettes(iso_path: str, extern_active: bool = True,
                         seen += 1
             if not seen:
                 raise RuntimeError("%s: no job palette baked" % pk)
-    return space.donors_used

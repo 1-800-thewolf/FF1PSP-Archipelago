@@ -12,9 +12,8 @@ _openworld_loop): EARLY_GRID_EDITS (early_open_progression) = Cornelia->Duergar 
 pass + Gulg/Crescent<->Ice canoe river; EXTENDED_GRID_EDITS (extended_open_progression)
 = Duergar->Western Keep foot trail + Duergar<->Melmond canoe river. CANAL_ATT
 (the canal's centre cell, walk+sail) is applied ALWAYS -- the canal is blown
-normally; we only make the open canal walkable. CANAL_BRIDGE_GRID_EDITS draws the
-bridge there once it is open (the canal ids' own art is ANM-driven and cannot be
-baked). See memories open-progression-rework, canal-shallows-plan.
+normally; we only make the open canal walkable. Its bridge art is BAKED (see
+map_bake), never poked. See memories open-progression-rework, canal-shallows-plan.
 """
 
 ANCHOR_OFF = 132 * 510 + 155 * 2          # 0x1082E
@@ -249,3 +248,183 @@ CANAL_BRIDGE_GRID_EDITS = {
 # raw it is always 0x00 and the bridge is withheld forever (bug, 2026-07-29).
 CANAL_OPEN_ADDR_SA = 0x08D1151D
 CANAL_OPEN_BIT = 0x08
+
+# ---- world-changing AP items (2026-09-03) -----------------------------------
+# Authored in re_only/ap_world_item_edits.py; see that module's docstring for the
+# design and the measured connectivity of every state. RUNTIME-ONLY: the paint
+# depends on which AP items the player holds, so none of this can be baked.
+#
+# unlockable_northern_foot_trails, painted with the option on and NO item held:
+#     TRAILS_BASE_GRID_EDITS  (bridge stub + corridor + both boulders, 113 cells)
+# ...then one overlay per AP item actually held:
+#     LUFENIAN_BRIDGE_BUILT_GRID_EDITS   "Lufenian Bridge"
+#     LUFENIAN_BOULDER_OPEN_GRID_EDITS   "Lufenian Nitro Powder"
+#     GAIAN_BOULDER_OPEN_GRID_EDITS      "Gaian Nitro Powder"
+#
+# mount_gulg_key: GULG_SEAL_GRID_EDITS walls the overworld entrance while the key
+# is NOT held (inverted gate); GULG_SEAL_CLEARED_GRID_EDITS puts those cells back
+# to vanilla once it is.
+LUFENIAN_BRIDGE_BASE_GRID_EDITS = {
+    (222, 117): 388,
+    (221, 118): 387,
+    (222, 118): 369,
+    (223, 118): 389,
+    (220, 119): 31,
+    (221, 119): 384,
+    (222, 119): 385,
+    (223, 119): 386,
+    (221, 120): 18,
+}
+LUFENIAN_BRIDGE_BUILT_GRID_EDITS = {
+    (222, 112): 79,
+    (221, 113): 62,
+    (222, 113): 353,
+    (222, 114): 369,
+    (222, 115): 369,
+    (222, 116): 369,
+    (222, 117): 369,
+}
+NORTHERN_TRAIL_GRID_EDITS = {
+    (204, 27): 145,
+    (205, 27): 162,
+    (206, 27): 193,
+    (207, 27): 225,
+    (205, 28): 101,
+    (206, 28): 141,
+    (207, 28): 225,
+    (208, 28): 156,
+    (204, 29): 189,
+    (205, 29): 225,
+    (206, 29): 103,
+    (207, 29): 200,
+    (208, 29): 185,
+    (204, 30): 173,
+    (205, 30): 141,
+    (206, 30): 194,
+    (207, 30): 156,
+    (208, 30): 186,
+    (204, 31): 203,
+    (205, 31): 141,
+    (206, 31): 202,
+    (207, 31): 114,
+    (200, 32): 50,
+    (201, 32): 200,
+    (202, 32): 497,
+    (203, 32): 85,
+    (204, 32): 141,
+    (205, 32): 141,
+    (206, 32): 67,
+    (200, 33): 38,
+    (201, 33): 202,
+    (202, 33): 502,
+    (203, 33): 101,
+    (204, 33): 105,
+    (205, 33): 141,
+    (206, 33): 202,
+    (202, 34): 203,
+    (203, 34): 204,
+    (204, 34): 127,
+    (202, 35): 201,
+    (203, 35): 104,
+    (204, 35): 104,
+    (205, 35): 48,
+    (206, 35): 31,
+    (207, 35): 141,
+    (208, 35): 356,
+    (209, 35): 32,
+    (202, 36): 85,
+    (203, 36): 140,
+    (204, 36): 200,
+    (205, 36): 69,
+    (206, 36): 48,
+    (207, 36): 58,
+    (202, 37): 173,
+    (203, 37): 224,
+    (204, 37): 83,
+    (205, 37): 185,
+    (206, 37): 68,
+    (207, 37): 69,
+    (208, 37): 32,
+    (201, 38): 100,
+    (202, 38): 101,
+    (203, 38): 103,
+    (204, 38): 202,
+    (205, 38): 145,
+    (206, 38): 177,
+    (207, 38): 101,
+    (208, 38): 51,
+    (203, 39): 204,
+    (204, 39): 205,
+    (205, 39): 188,
+    (201, 40): 67,
+    (202, 40): 201,
+    (203, 40): 96,
+    (204, 40): 98,
+    (205, 40): 99,
+    (200, 41): 425,
+    (201, 41): 99,
+    (202, 41): 145,
+    (203, 41): 201,
+    (204, 41): 219,
+    (205, 41): 102,
+    (206, 41): 202,
+    (207, 41): 101,
+    (201, 42): 409,
+    (203, 42): 129,
+    (204, 42): 69,
+    (207, 42): 225,
+    (204, 43): 208,
+    (205, 43): 160,
+    (206, 43): 161,
+    (207, 43): 193,
+    (204, 44): 186,
+    (205, 44): 178,
+    (206, 44): 203,
+    (207, 44): 204,
+    (205, 45): 204,
+    (206, 45): 71,
+    (205, 46): 81,
+    (206, 46): 82,
+}
+LUFENIAN_BOULDER_CLOSED_GRID_EDITS = {
+    (205, 42): 192,
+    (206, 42): 193,
+}
+LUFENIAN_BOULDER_OPEN_GRID_EDITS = {
+    (205, 42): 103,
+    (206, 42): 225,
+}
+GAIAN_BOULDER_CLOSED_GRID_EDITS = {
+    (201, 39): 192,
+    (202, 39): 193,
+}
+GAIAN_BOULDER_OPEN_GRID_EDITS = {
+    (201, 39): 216,
+    (202, 39): 141,
+}
+GULG_SEAL_GRID_EDITS = {
+    (178, 197): 136,
+    (179, 197): 135,
+    (180, 197): 99,
+    (181, 197): 100,
+    (182, 197): 101,
+    (183, 197): 139,
+    (180, 198): 120,
+    (182, 198): 121,
+}
+GULG_SEAL_CLEARED_GRID_EDITS = {
+    (178, 197): 240,
+    (179, 197): 147,
+    (180, 197): 315,
+    (181, 197): 316,
+    (182, 197): 317,
+    (183, 197): 135,
+    (180, 198): 134,
+    (182, 198): 149,
+}
+
+# Everything the trails option paints before any of its items are found.
+TRAILS_BASE_GRID_EDITS = {**LUFENIAN_BRIDGE_BASE_GRID_EDITS,
+                          **NORTHERN_TRAIL_GRID_EDITS,
+                          **LUFENIAN_BOULDER_CLOSED_GRID_EDITS,
+                          **GAIAN_BOULDER_CLOSED_GRID_EDITS}

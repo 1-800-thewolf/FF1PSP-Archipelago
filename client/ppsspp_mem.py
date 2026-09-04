@@ -32,6 +32,8 @@ import time
 
 import logging
 logger = logging.getLogger("Client")
+# Diagnostic tier; never reaches the client window. See ApClient.dlog.
+dlog = logging.getLogger("FF1PSP")
 
 # PSP address window served by this transport (RAM incl. our cave/tag).
 PSP_RAM_LO = 0x08000000
@@ -239,7 +241,7 @@ class HybridPSP:
         ok = self.mem.attached
         if ok is not self._mode_logged:
             self._mode_logged = ok
-            logger.info("  [bridge] memory I/O via %s",
+            dlog.info("  [bridge] memory I/O via %s",
                         "direct process memory" if ok else "WS debugger (fallback)")
         return ok
 

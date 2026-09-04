@@ -1062,10 +1062,13 @@ class TrackerMixin:
         # window width and wraps to as many rows as it needs.
         grid = GridLayout(cols=_STRIP_COLS, spacing=dp(2), size_hint_y=None)
         grid.bind(minimum_height=grid.setter("height"))
-        for name, label in TR.STRIP_ITEMS:
-            chip = _KeyItemChip(label)
-            self._chips[name] = chip
-            grid.add_widget(chip)
+        # Which chips exist depends on slot_data (the world-changing items only
+        # appear when their option is on), which is not in yet at build time --
+        # so build the option-independent baseline and let _paint_inner rebuild
+        # the grid once the seed's own row list arrives.
+        self._strip_grid = grid
+        self._strip_rows = list(TR.STRIP_ITEMS)
+        self._fill_key_strip(self._strip_rows)
         box.add_widget(grid)
         # Totals line: "Checks x/y ..." on the left, then right-aligned
         # "Crystals x/n", "Lute Tablets x/n" and "Runes x/n" gate readouts. One
@@ -1167,7 +1170,23 @@ class TrackerMixin:
         except Exception as ex:
             logger.warning(f"Tracker repaint failed: {ex}")
 
+    def _fill_key_strip(self, rows):
+        """(Re)populate the strip grid with exactly `rows`."""
+        self._strip_grid.clear_widgets()
+        self._chips = {}
+        for name, label in rows:
+            chip = _KeyItemChip(label)
+            self._chips[name] = chip
+            self._strip_grid.add_widget(chip)
+
     def _paint_inner(self, state):
+        # The seed's own strip (world-changing chips are option-gated). Rebuilt
+        # only when it actually changes -- normally once, on the first paint
+        # after slot_data lands.
+        rows = list(getattr(state, "strip_rows", None) or TR.STRIP_ITEMS)
+        if rows != self._strip_rows:
+            self._strip_rows = rows
+            self._fill_key_strip(rows)
         for name, chip in self._chips.items():
             chip.set_state(name in state.tokens, name in state.unused)
 
@@ -2628,7 +2647,19 @@ def make_manager(base_cls):
         def build(self):
             """Wrap the stock window in a FloatLayout so the trap panel can be
             pinned over it. Everything else is the base build, untouched."""
-            main_content = super().build()
+            # kvui's build() fires "/help" here, which opens the window on ~66
+            # lines of command docstrings. Suppress that ONE dump (see
+            # FF1PSPCommandProcessor.get_help_text); typing /help still works.
+            # Fails open: if a future AP build moves the call out of build(),
+            # the player just gets the long listing back.
+            ctx = getattr(self, "ctx", None)
+            if ctx is not None:
+                ctx._help_dump_suppressed = True
+            try:
+                main_content = super().build()
+            finally:
+                if ctx is not None:
+                    ctx._help_dump_suppressed = False
             try:
                 root = FloatLayout()
                 root.add_widget(main_content)

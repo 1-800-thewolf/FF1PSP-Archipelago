@@ -515,14 +515,39 @@ EARNED_GATE_ITEMS = [
     (LOGIC.AIRSHIP, "AIRSHIP"), (LOGIC.BLACK_ORB_DESTROYED, "CHAOS"),
 ]
 
+# World-changing items (2026-09-03). Shown ONLY when their yaml option is on --
+# a seed without the option has no such item in the pool, and a permanently dark
+# chip reads as "not found yet" rather than "not in this seed".
+WORLD_GATE_ITEMS = {
+    "northern_foot_trails": [(LOGIC.LUFENIAN_BRIDGE, "LUF BRIDGE"),
+                             (LOGIC.LUFENIAN_NITRO, "LUF NITRO"),
+                             (LOGIC.GAIAN_NITRO, "GAIA NITRO")],
+    "mount_gulg_key": [(LOGIC.MOUNT_GULG_KEY, "GULG KEY")],
+}
+
 # Everything shown in the strip, in order. Its names are also the universe over
 # which the green "unspent" flag is computed -- only chips the player can see.
+# (Option-independent baseline; strip_items(slot_data) is what the GUI calls.)
 STRIP_ITEMS = POOL_GATE_ITEMS + EARNED_GATE_ITEMS
+
+
+def strip_items(slot_data=None):
+    """STRIP_ITEMS plus whichever world-changing chips this seed enabled."""
+    sd = slot_data or {}
+    extra = []
+    for key, rows in WORLD_GATE_ITEMS.items():
+        if sd.get(key):
+            extra += rows
+    if not extra:
+        return list(STRIP_ITEMS)
+    return POOL_GATE_ITEMS + extra + EARNED_GATE_ITEMS
 
 # Long token name -> the short label used on tiles' "needs:" line. Kept COMPLETE
 # (every gate, including the ones the strip hides) so a dim tile's "needs: CANAL"
 # still renders a short label rather than the full token string.
 SHORT_TOKEN = {n: s for n, s in POOL_GATE_ITEMS}
+for _rows in WORLD_GATE_ITEMS.values():
+    SHORT_TOKEN.update(dict(_rows))
 SHORT_TOKEN.update({
     LOGIC.CANAL: "CANAL", LOGIC.AIRSHIP: "AIRSHIP",
     LOGIC.GARLAND_DEFEATED: "GARLAND", LOGIC.VAMPIRE_DEFEATED: "VAMPIRE",
@@ -805,10 +830,14 @@ class TrackerState:
                  "tablets_have", "tablets_need",
                  "runes_have", "runes_need",
                  "shards_have", "shards_need",
-                 "members_have", "members_need")
+                 "members_have", "members_need", "strip_rows")
 
     def __init__(self):
         self.areas = {}        # area key -> AreaState
+        # (name, label) rows the key strip should show for THIS seed -- the
+        # world-changing chips only exist when their yaml option is on, so the
+        # GUI rebuilds its grid when this changes. See strip_items().
+        self.strip_rows = list(STRIP_ITEMS)
         self.tokens = set()    # items + derived event tokens
         self.owned = set()     # items only (no derived tokens)
         self.unused = set()    # held gates whose unlocks are all still unchecked
@@ -865,7 +894,11 @@ class TrackerState:
         return any_in_logic
 
 
-STRIP_GATES = [n for n, _s in STRIP_ITEMS]
+# Every chip name that can ever appear on a strip, option-on or not -- this is
+# the universe _unused_gates counts over, so it must be a SUPERSET of any one
+# seed's strip_items(); a name missing here could never be flagged unspent.
+STRIP_GATES = [n for n, _s in STRIP_ITEMS] + [
+    n for _rows in WORLD_GATE_ITEMS.values() for n, _s in _rows]
 
 
 def _unused_gates(st, locs, region_rules, crystals_needed=4,
@@ -956,11 +989,16 @@ def evaluate(item_names, pool_loc_ids, checked_loc_ids, slot_data=None,
     early = bool(sd.get("early_open_progression"))
     extended = bool(sd.get("extended_open_progression"))
     docks = bool(sd.get("northern_docks"))
+    trails = bool(sd.get("northern_foot_trails"))
+    gulg_key = bool(sd.get("mount_gulg_key"))
 
-    region_rules = LOGIC.region_rules_for(early, extended, docks)
-    shop_overrides = LOGIC.shop_rules_for(early, extended, docks)
+    region_rules = LOGIC.region_rules_for(early, extended, docks,
+                                          trails, gulg_key)
+    shop_overrides = LOGIC.shop_rules_for(early, extended, docks,
+                                          trails, gulg_key)
 
     st = TrackerState()
+    st.strip_rows = strip_items(sd)
     st.owned = set(item_names)
     # lute_tablets: the Lute is never a pool item -- it DERIVES from holding
     # lute_tablets_required tablets (mirrors __init__.set_rules' count rule on

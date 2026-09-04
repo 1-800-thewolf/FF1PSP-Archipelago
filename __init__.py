@@ -163,6 +163,23 @@ for _kname, _kgid, _kcls in (
 ITEM_NAME_TO_ID[LOGIC.EXCALIBUR] = ID.item_id(2, 39)
 ITEM_NAME_TO_CLASS[LOGIC.EXCALIBUR] = ItemClassification.useful
 
+# World-changing items (2026-09-03): REAL pool items with no in-game existence.
+# The client never grants them anything -- it paints overworld grid cells while
+# one is held (see logic.WORLD_ITEMS / ids.WORLD_OFF / openworld_data). Two yaml
+# options decide whether they enter the POOL, but they are registered
+# unconditionally so the datapackage never shifts with a yaml.
+WORLD_ITEM_ORDINAL = {
+    LOGIC.LUFENIAN_BRIDGE: ID.WORLD_LUFENIAN_BRIDGE,
+    LOGIC.LUFENIAN_NITRO:  ID.WORLD_LUFENIAN_NITRO,
+    LOGIC.GAIAN_NITRO:     ID.WORLD_GAIAN_NITRO,
+    LOGIC.MOUNT_GULG_KEY:  ID.WORLD_MOUNT_GULG_KEY,
+}
+WORLD_ITEM_NAMES = tuple(LOGIC.WORLD_ITEMS)
+assert set(WORLD_ITEM_NAMES) == set(WORLD_ITEM_ORDINAL),     "logic.WORLD_ITEMS and WORLD_ITEM_ORDINAL disagree"
+for _wname, _wi in WORLD_ITEM_ORDINAL.items():
+    ITEM_NAME_TO_ID[_wname] = ID.world_item_id(_wi)
+    ITEM_NAME_TO_CLASS[_wname] = ItemClassification.progression
+
 # Event (gate) items are not real game items: synthetic ids (precollected ones
 # DO reach the client as starting inventory, which treats them counter-only via
 # ids.is_event). They exist so the AP fill graph is connected. id space must
@@ -536,6 +553,13 @@ def _build_item_name_groups():
             _group_add(g, "Assembly Pieces", name)
             if ID.is_shard(iid):
                 _group_add(g, "Vehicles", name)
+        elif ID.is_world_item(iid):
+            # Lufenian Bridge / the nitro powders / Mount Gulg Key: no inventory
+            # record at all -- they repaint the overworld -- but the player
+            # reasons about them exactly like key items, and hinting for one by
+            # group is the natural thing to do.
+            _group_add(g, "Key Items", name)
+            _group_add(g, "World Changes", name)
         elif ID.is_vehicle(iid):
             # Ship: granted by a story-flag write rather than an inventory record,
             # but the player reasons about it exactly like a key item.
@@ -1484,6 +1508,9 @@ class FF1PSPWorld(World):
                     "early": _sop >= OpenProgression.option_early,
                     "extended": _sop >= OpenProgression.option_extended,
                     "northern_docks": bool(self.options.northern_docks.value),
+                    "northern_foot_trails": bool(
+                        self.options.unlockable_northern_foot_trails.value),
+                    "mount_gulg_key": bool(self.options.mount_gulg_key.value),
                     # zones_caves ships whenever either harder toggle is on, so
                     # the client can name dungeon places exactly too. Absent on
                     # pre-2026-09-01 seeds, where logic.bestiary_source_rule
@@ -1556,6 +1583,12 @@ class FF1PSPWorld(World):
             "extended_open_progression":
                 self.options.open_progression.value >= OpenProgression.option_extended,
             "northern_docks": bool(self.options.northern_docks.value),
+            # World-changing AP items. The client paints their overworld cells
+            # only while the matching option is on AND the item is held; with the
+            # option off it writes none of those tables at all.
+            "northern_foot_trails": bool(
+                self.options.unlockable_northern_foot_trails.value),
+            "mount_gulg_key": bool(self.options.mount_gulg_key.value),
             # Per-dungeon dynamic-chest caps (dungeon index -> count of the FIRST opens
             # that become AP checks). The client arms its map-gated chest bp and, for the
             # first `cap` opens in each bonus dungeon, strips the native loot + delivers
@@ -1852,6 +1885,9 @@ class FF1PSPWorld(World):
             "early": _op >= OpenProgression.option_early,
             "extended": _op >= OpenProgression.option_extended,
             "northern_docks": bool(self.options.northern_docks.value),
+            "northern_foot_trails": bool(
+                self.options.unlockable_northern_foot_trails.value),
+            "mount_gulg_key": bool(self.options.mount_gulg_key.value),
             # The seed's own zones_caves is in hand (_cave_zone_table), so a
             # harder-dungeon cave is an exact place, not a pool to write off.
             "cave_exact": True,
@@ -1881,6 +1917,22 @@ class FF1PSPWorld(World):
         chosen = sorted(self.random.sample(hunt, min(k, len(hunt))))
         self._bestiary_cache = (chosen, rules)
         return self._bestiary_cache
+
+    def _world_items(self):
+        """The world-changing pool items this seed's yaml enables.
+
+        These are SILENT-LOSS progression, exactly like the party-member items:
+        every rule that names one is an EXTRA alternative beside the airship, so
+        dropping one does not fail the beatability check -- it just deletes the
+        route. That is why they ride high in the swap_in order and share the
+        party items' hard assert instead of being allowed to overflow.
+        """
+        names = []
+        if self.options.unlockable_northern_foot_trails.value:
+            names += list(LOGIC.TRAIL_ITEMS)
+        if self.options.mount_gulg_key.value:
+            names.append(LOGIC.MOUNT_GULG_KEY)
+        return names
 
     def create_items(self) -> None:
         # one item token per real chest = the vanilla contents multiset (a shuffle).
@@ -1915,6 +1967,11 @@ class FF1PSPWorld(World):
         _party_items = [PARTY_MEMBER_ITEM_NAMES[_job]
                         for _row, _job, _lvl in self._missing_members()]
         swap_in += _party_items
+        # World-changing items next, for the same reason: no logic rule REQUIRES
+        # one (each is an alternative to the airship), so a starved copy would
+        # silently delete its route instead of failing generation.
+        _world_items = self._world_items()
+        swap_in += _world_items
         # Lute Tablets next (progression -- must never be starved out of the
         # filler slots by tomes/scrolls). The tablet count is n_tab: one copy
         # balances the Princess NPC location below (seat of the removed Lute),
@@ -1982,8 +2039,9 @@ class FF1PSPWorld(World):
         # Party-member items are swap_in[0:len(_party_items)]; nothing
         # downstream detects their loss (no logic gate), so a shortfall is a
         # hard failure, never a silent drop.
-        assert len(fillers) >= len(_party_items), \
-            f"party-member items don't fit the {len(fillers)} filler slots"
+        assert len(fillers) >= len(_party_items) + len(_world_items), \
+            (f"party-member + world-changing items do not fit the "
+             f"{len(fillers)} filler slots")
         for k, ji in enumerate(swap_in):
             if k < len(fillers):
                 pool[fillers[k]] = ji
@@ -2131,8 +2189,12 @@ class FF1PSPWorld(World):
         early = op >= OpenProgression.option_early
         extended = op >= OpenProgression.option_extended
         docks = bool(self.options.northern_docks.value)
-        region_rules = LOGIC.region_rules_for(early, extended, docks)
-        shop_overrides = LOGIC.shop_rules_for(early, extended, docks)
+        trails = bool(self.options.unlockable_northern_foot_trails.value)
+        gulg_key = bool(self.options.mount_gulg_key.value)
+        region_rules = LOGIC.region_rules_for(early, extended, docks,
+                                              trails, gulg_key)
+        shop_overrides = LOGIC.shop_rules_for(early, extended, docks,
+                                              trails, gulg_key)
 
         # bonus_dungeon_crystals: a bonus dungeon's chests must gate on FIEND access
         # (not the crystal), because the crystal now comes from clearing that dungeon
@@ -2327,8 +2389,11 @@ class FF1PSPWorld(World):
         # it). Keep those two out of their consumer's map entirely. This is a PLACEMENT
         # fix only: an item sent by another world while the player already stands in the
         # room still needs a room re-entry.
-        # NOT applicable to the Mystic Key -- locked doors read the function bit at
-        # interaction time, not map load, so same-map use is vanilla-correct there.
+        # This once claimed the Mystic Key was exempt because locked doors read the
+        # function bit at interaction time. That is WRONG -- measured 2026-09-04: a Key
+        # taken from a Mount Duergar chest would not open the door on that same screen.
+        # Doors drop/latch their record at map load like every other NPC gate, so the
+        # Key gets the same treatment as the rest of this table.
         # Prefixes lost their " - " in the 2026-08-07 uniform location rename, so they
         # are now "<Place> " and match both "<Place> Chest #N" and "<Place> NPC: Who".
         # One deliberate change of coverage: the chest formerly named "Mount Duergar -
@@ -2367,6 +2432,20 @@ class FF1PSPWorld(World):
             # need the Mystic Key, the Key needs the Tonic) but a multiworld Key
             # from another sphere reopens the hole.
             "Jolt Tonic":   ("Elven Castle ",),
+            # Mystic Key doors latch at map load (see the note above this table). Ban
+            # the Key from every map that HOLDS a key door. Whole-map for the four
+            # that mix chests and an NPC on one screen -- Mount Duergar (Nerrick's
+            # door), Chaos Shrine F1, Elven Castle (treasury doors; this also takes
+            # the Key off the Elf Prince, its vanilla giver), Western Keep (Astos).
+            # Marsh Cave is named exactly instead: only B3 holds the door, and B1/B2
+            # North/B2 South are separate maps that reload on the way down. The
+            # Piscodemon chest is on B3 but has no "B3" in its name.
+            "Mystic Key":   ("Mount Duergar ",
+                             "Chaos Shrine F1 ",
+                             "Elven Castle ",
+                             "Western Keep ",
+                             "Marsh Cave B3 ",
+                             "Marsh Cave Piscodemon Chest"),
         }
         for item_name, loc_prefixes in SAME_MAP_TURNIN.items():
             code = ITEM_NAME_TO_ID[item_name]

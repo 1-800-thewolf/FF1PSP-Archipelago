@@ -57,6 +57,19 @@ from .. import logic as LOGIC
 from .. import rando as RANDO
 from .. import tracker as TRACKER
 
+# Diagnostic tier. kvui binds the client WINDOW to the "Client" logger only
+# (logging_pairs), so records sent here never reach the player's screen -- but
+# they still propagate to root, which is where Utils.init_logging hangs the
+# FF1PSPClient_*.txt handler and where debug_bundle hangs its breadcrumb ring.
+# So /logs ships them exactly as before, tagged "[FF1PSP at ...]" and still
+# interleaved with the [Client]/[FileLog]/kivy records in one timeline.
+#
+# The split follows the two-space indent this file already used by convention:
+# "  [tag] ..." is telemetry, an unindented message is addressed to the player.
+# Roughly 30 indented messages ARE for the player (delivery stalls, DeathLink,
+# traps, PPSSPP failures) and deliberately stay on `logger`; see git log.
+dlog = logging.getLogger("FF1PSP")
+
 
 async def _clear_breakpoints_fresh():
     """Open a SHORT-LIVED debugger connection, drop our chest breakpoints and unhalt
@@ -260,6 +273,20 @@ class FF1PSPCommandProcessor(ClientCommandProcessor):
 
     def get_help_text(self) -> str:
         """Upstream listing minus DEPRECATED_ALIASES."""
+        # kvui's GameManager.build() fires "/help" so the window opens on the
+        # full listing. Our commands carry multi-line docstrings, so that is ~66
+        # lines -- the entire first screen -- before the player has done
+        # anything, and it buries the connection banner underneath itself.
+        # ApGui sets this flag around that one call only; typing /help by hand
+        # still prints everything.
+        if getattr(self.ctx, "_help_dump_suppressed", False):
+            return ("Type  /help  for this client's commands.\n"
+                    "To get started, input the server address in the top "
+                    "bar (e.g. archipelago.gg:12345) and hit Connect\n"
+                    "Then type in your slot name at the bottom "
+                    "(e.g. Player1) and hit Enter\n"
+                    "Something looking wrong?  Run  /logs  and send "
+                    "the zip it makes.\n")
         # Shadow the class-level dict on the instance for the duration of
         # the call: CommandProcessor reads self.commands, and mutating the
         # class attribute would hide the alias from dispatch too.
@@ -574,6 +601,42 @@ class FF1PSPCommandProcessor(ClientCommandProcessor):
         to type it keeps working; /help lists the short name only."""
         self._cmd_logs()
 
+    def _cmd_verbose(self, setting: str = ""):
+        """Show this client's internal diagnostics in the window as they happen.
+        They are ALWAYS written to the log file and always included by /logs --
+        this only decides whether they are also on screen. Handy when someone is
+        helping you debug live. No argument toggles.
+        Usage: /verbose on | off"""
+        dl = logging.getLogger("FF1PSP")
+        # Attach the very handler kvui built for the "Client" logger, rather
+        # than making a second one: it already knows this build's UILog panel,
+        # formatting and markup rules.
+        def _ui(lg):
+            return [h for h in lg.handlers if h.__class__.__name__ == "LogtoUI"]
+        live = _ui(dl)
+        if setting:
+            want = setting.strip().lower() in ("on", "1", "true", "yes")
+        else:
+            want = not live
+        if want == bool(live):
+            self.output(f"Diagnostics are already {'on' if want else 'off'}.")
+            return
+        if want:
+            src_handlers = _ui(logging.getLogger("Client"))
+            if not src_handlers:
+                self.output("No window log to attach to (text-only client?). "
+                            "The diagnostics are in the log file regardless.")
+                return
+            for h in src_handlers:
+                dl.addHandler(h)
+            self.output("Diagnostics ON -- this window now also shows the "
+                        "client's internal telemetry. /verbose off to stop.")
+        else:
+            for h in live:
+                dl.removeHandler(h)
+            self.output("Diagnostics off. They are still written to the log "
+                        "file and still included by /logs.")
+
     def _cmd_purge_ff1psp_setup(self, confirm: str = ""):
         """Forget this machine's FF1 PSP setup so the next connect behaves like a
         brand-new install: clears the saved PPSSPP exe path, the FF1 ISO path and
@@ -690,6 +753,8 @@ class FF1PSPContext(CommonContext):
         self._key_names = {}             # key item id -> AP name @ its granting loc
         self._keybox_extra = {}          # non-key obtain-box subject (lower) -> AP name
         self._citadel_orig = {}          # (bank_addr, entry_off) -> vanilla slot bytes
+        self._dlog_last = {}             # dlog_edge key -> last value logged
+        self._grant_hold = None          # which _grant_safe gate held delivery
         self._hold_oos = {}              # map-scoped hold -> consecutive out-of-scope ticks
         self._hold_spent_seen = set()    # map-scoped hold rows whose item is spent (sticky)
         self._sm_canary_warned = False   # slot_magic guard-band alarm (once)
@@ -737,8 +802,6 @@ class FF1PSPContext(CommonContext):
         self._rp_mb = None                # cached RPMK mailbox addr (reduced party
                                           # held-row mask; armed by _member_loop)
         self._steal_icon_mb = None        # cached SPRB mailbox addr (steal-cue icon)
-        self._sng_mb = None               # cached SNGD mailbox addr (null-holder
-                                          # guard skip counter, u32 at +4)
         self._steal_icon_restore = None   # (entry addr, saved bytes) of borrowed def 19
         self._steal_icon_task = None      # pending fade-out task for the loot cue
         self._steal_arm_task = None       # pending DELAYED-arm task for the loot cue
@@ -953,6 +1016,20 @@ class FF1PSPContext(CommonContext):
         self._npc_reset_entryclears = {}
 
     # ---------------- save-block base resolution ----------------
+    def dlog_edge(self, key, value, msg):
+        """Diagnostic log line, but only when `value` differs from the last value
+        logged under `key`.
+
+        Several of these loops re-assert the same state every tick or every map
+        edge and logged unconditionally, so a 20-minute session carried 74
+        identical "bank patches ready" lines and 15 identical cameo-boss id
+        dumps. Deduping at the call site rather than filtering afterwards keeps
+        the FIRST occurrence and every real CHANGE, which is what the line was
+        for; the bundle gets smaller AND more readable."""
+        if self._dlog_last.get(key) != value:
+            self._dlog_last[key] = value
+            dlog.info(msg)
+
     def sa(self, addr):
         """Canonical save-block address -> this session's live address."""
         return addr + (self.save_delta or 0)
@@ -1153,7 +1230,7 @@ class FF1PSPContext(CommonContext):
             t = asyncio.create_task(self._guard(fn, name))
             self._oneshot_tasks[name] = t
             self._tasks.append(t)       # so shutdown() still cancels them
-        logger.info("  [newgame] another New Game on this session -> re-armed "
+        dlog.info("  [newgame] another New Game on this session -> re-armed "
                     f"{', '.join(dead)}")
 
     async def _init_marker_tick(self):
@@ -1169,7 +1246,7 @@ class FF1PSPContext(CommonContext):
                 a = self.sa(D.AP_INIT_MARKER_SA)
                 if (await self.psp.read(a, 1))[0] != 0:
                     await self.psp.write(a, b"\x00")
-                    logger.info("  [newgame] NG+ carried snapshot on screen -> "
+                    dlog.info("  [newgame] NG+ carried snapshot on screen -> "
                                 "cleared the carried init marker")
             except Exception:
                 pass
@@ -1235,10 +1312,10 @@ class FF1PSPContext(CommonContext):
             d = await self._resolve_save_delta()
             if d != self.save_delta:
                 if d is None:
-                    logger.info("  [save] block lost (title screen?) -- "
+                    dlog.info("  [save] block lost (title screen?) -- "
                                 "grants paused")
                 else:
-                    logger.info(f"  [save] block located: delta {d:+#x}")
+                    dlog.info(f"  [save] block located: delta {d:+#x}")
                     # a save (re)load can spawn a fresh copy of the heap name
                     # banks (the shop UI reads it) -- rescan and patch it
                     self._float_rescan = True
@@ -1301,7 +1378,7 @@ class FF1PSPContext(CommonContext):
                 try:
                     done(f.result())
                 except Exception as ex:
-                    logger.info(f"  [gui] action failed: {ex!r}")
+                    dlog.info(f"  [gui] action failed: {ex!r}")
             fut.add_done_callback(_cb)
         return fut
 
@@ -1933,7 +2010,7 @@ class FF1PSPContext(CommonContext):
                     continue                # datapackage already names it
                 extra[LOGIC.dyn_chest_location_name(dname, o)] = lid
             if ambiguous:
-                logger.info(f"  [dyn_names] {ambiguous} dynamic-chest id(s) are "
+                dlog.info(f"  [dyn_names] {ambiguous} dynamic-chest id(s) are "
                             f"claimed by two dungeons at these caps and stay "
                             f"unnamed")
             if not extra:
@@ -1949,11 +2026,11 @@ class FF1PSPContext(CommonContext):
                 return
             merged.update(added)
             self.location_names.update_game(game, merged)
-            logger.info(f"  [dyn_names] named {len(added)} dynamic-chest "
+            dlog.info(f"  [dyn_names] named {len(added)} dynamic-chest "
                         f"locations the datapackage does not carry (bonus "
                         f"dungeon caps exceed the registered floor counts)")
         except Exception as e:
-            logger.info(f"  [dyn_names] {e!r} -- dynamic chests past a "
+            dlog.info(f"  [dyn_names] {e!r} -- dynamic chests past a "
                         f"dungeon's floor count will keep showing as "
                         f"'Unknown location' in hints")
 
@@ -2188,7 +2265,7 @@ class FF1PSPContext(CommonContext):
             found = []
         for ip, p in found:
             if ip == host:
-                logger.info(f"  [remote] match server reports {host}:{p}")
+                dlog.info(f"  [remote] match server reports {host}:{p}")
                 return p
         return DEBUG_PORT
 
@@ -2228,7 +2305,7 @@ class FF1PSPContext(CommonContext):
                     game = await self.psp.game_status()
                     logger.info(f"PPSSPP connected (remote {host}:{port}), "
                                 f"game={game}")
-                    logger.info("  [bridge] memory I/O via WS debugger "
+                    dlog.info("  [bridge] memory I/O via WS debugger "
                                 "(remote mode)")
                     return True
                 self.psp = await PPSSPP.connect(local_only=True)
@@ -2316,7 +2393,7 @@ class FF1PSPContext(CommonContext):
         try:
             addr, mask = D.key_item_bit(item_id)
         except ValueError as e:
-            logger.info(f"  [skip] {e}")
+            dlog.info(f"  [skip] {e}")
             return False
         addr = self.sa(addr)
         cur = (await self.psp.read(addr, 1))[0]
@@ -2348,7 +2425,7 @@ class FF1PSPContext(CommonContext):
                 await self.psp.write(saddr, bytes([snew]))
         if not quiet:
             name = D.KEY_ITEMS.get(item_id, f"id{item_id}")
-            logger.info(f"  {'granted' if present else 'stripped'} key item {name}")
+            dlog.info(f"  {'granted' if present else 'stripped'} key item {name}")
         # Tell the NPC map-entry native-refresh detector this rise was OUR write,
         # not the NPC firing -- a save-reload re-grant while standing in the NPC's
         # map false-fired the robot check (live 2026-07-13). The npc loop consumes
@@ -2361,7 +2438,7 @@ class FF1PSPContext(CommonContext):
         if category == D.CAT_KEY:
             return await self.grant_key_item(item_id)
         if category not in (D.CAT_ITEM, D.CAT_WEAPON, D.CAT_ARMOR):
-            logger.info(f"  [skip] cat {category} grant unsupported (spell TBD)")
+            dlog.info(f"  [skip] cat {category} grant unsupported (spell TBD)")
             return False
         base = self.sa(D.INVENTORY_BASE_SA)
         blob = bytearray(await self.psp.read(base, D.INV_RECORD_SIZE * 0x80))
@@ -2487,7 +2564,7 @@ class FF1PSPContext(CommonContext):
             if any(bit(bf, i) for i in hi) or pop > 250:
                 if not self._chest_bf_warned:
                     self._chest_bf_warned = True
-                    logger.warning("  [chest_poll] implausible bitfield "
+                    dlog.warning("  [chest_poll] implausible bitfield "
                                    f"(pop={pop}) -- address may be wrong; poll idle")
                 self._chest_bf_prev = None
                 return
@@ -2504,7 +2581,7 @@ class FF1PSPContext(CommonContext):
             if await self._carried_save_snapshot():
                 if self._chest_carryin_skips == 0:
                     self._chest_carryin_skips = 1
-                    logger.info("  [chest_poll] completed-save snapshot loaded "
+                    dlog.info("  [chest_poll] completed-save snapshot loaded "
                                 "(NG+ char-creation?) -- deferring baseline until commit")
                 return
             self._chest_carryin_skips = 0
@@ -2525,7 +2602,7 @@ class FF1PSPContext(CommonContext):
                     if idx in self._own_chest_idxs:
                         self._opened_own_locs.add(ID.loc_id(idx))
                 await self._send_chest_checks(opened)
-                logger.info(f"  [chest_poll] baseline: {len(opened)} chest(s) "
+                dlog.info(f"  [chest_poll] baseline: {len(opened)} chest(s) "
                             f"already open")
                 self._chest_bf_prev = bytes(bf)
                 return
@@ -2535,7 +2612,7 @@ class FF1PSPContext(CommonContext):
             # many new bits at once means the field slipped (bad read/relocation)
             # -> don't send, re-baseline from the current field.
             if len(newly) > 12:
-                logger.warning(f"  [chest_poll] {len(newly)} chests in one tick -- "
+                dlog.warning(f"  [chest_poll] {len(newly)} chests in one tick -- "
                                f"treating as noise, re-baselining")
                 self._chest_bf_prev = bytes(bf)
                 return
@@ -2550,7 +2627,7 @@ class FF1PSPContext(CommonContext):
                 if fillers:
                     await self._remove_filler(fillers)
                 for idx in newly:
-                    logger.info(f"Chest idx={idx} -> check "
+                    dlog.info(f"Chest idx={idx} -> check "
                                 f"({self.idx_desc.get(idx, '?')})")
             self._chest_bf_prev = bytes(bf)
 
@@ -2599,11 +2676,11 @@ class FF1PSPContext(CommonContext):
                 fset = bool((await self.psp.read(self.sa(fb[0]), 1))[0] & fb[1]) if fb else False
                 if owned or fset:
                     await self.grant_key_item(key_id, present=False, quiet=True)
-                    logger.info(f"  [event-key] stripped native "
+                    dlog.info(f"  [event-key] stripped native "
                                 f"{D.KEY_ITEMS.get(key_id, key_id)} (chest idx {idx}; "
                                 f"AP item delivered via the grant loop)")
             except Exception as e:
-                logger.info(f"  [event-key] {e!r}")
+                dlog.info(f"  [event-key] {e!r}")
 
     # ---------------- shared poll-loop skeleton ----------------
     async def _poll(self, interval, name, tick):
@@ -2618,14 +2695,14 @@ class FF1PSPContext(CommonContext):
                 if await tick() is False:
                     return
             except Exception as e:
-                logger.info(f"  [{name}] {e!r}")
+                dlog.info(f"  [{name}] {e!r}")
                 # First occurrence of each distinct failure gets a traceback --
                 # a bare repr() hid the _npc_loop `_s.unpack` NameError (2026-08-07)
                 # behind an anonymous 2s-repeating one-liner for a whole seed.
                 key = (name, repr(e))
                 if key not in self._loop_err_seen:
                     self._loop_err_seen.add(key)
-                    logger.info(f"  [{name}] first occurrence:\n"
+                    dlog.info(f"  [{name}] first occurrence:\n"
                                 f"{traceback.format_exc()}")
             await asyncio.sleep(interval)
 
@@ -2650,7 +2727,7 @@ class FF1PSPContext(CommonContext):
             key = (name, repr(e))
             if key not in self._loop_err_seen:
                 self._loop_err_seen.add(key)
-                logger.info(f"  [stage:{name}] FAILED (isolated -- other stages "
+                dlog.info(f"  [stage:{name}] FAILED (isolated -- other stages "
                             f"still ran): {e!r}\n{traceback.format_exc()}")
 
     # ---------------- goal ----------------
@@ -2697,6 +2774,12 @@ class FF1PSPContext(CommonContext):
             # grant. Counter-only; the missing-member loop matches received
             # copies against slot_data "missing_party" and revives the row.
             return (None, None, 0)
+        if ID.is_world_item(iid):
+            # World-changing item (Lufenian Bridge / the nitro powders / Mount
+            # Gulg Key): no inventory slot, no key-item bit, no function bit.
+            # What it does is change the OVERWORLD GRID -- _openworld_loop reads
+            # the received set and repaints. Counter-only here.
+            return (None, None, 0)
         if ID.is_job_item(iid) or ID.is_event(iid) or ID.is_vehicle(iid):
             # Event gate tokens are logic-graph markers, not game items at
             # all; vehicle items (Ship) reconcile via _npc_loop's flag write.
@@ -2723,13 +2806,17 @@ class FF1PSPContext(CommonContext):
             inventory write can be clobbered; a won item simply waits for the field.
         Fail-safe: any read error -> False (skip the tick), never grant blind."""
         if self.psp is None or self.save_delta is None:
+            self._grant_hold = "loading"
             return False
         if not self._synced():
+            self._grant_hold = "server"
             return False
         try:
             if await self._in_battle():
+                self._grant_hold = "battle"
                 return False
         except Exception:
+            self._grant_hold = "loading"
             return False
         return True
 
@@ -2739,7 +2826,18 @@ class FF1PSPContext(CommonContext):
     # reason already in the log.
     GRANT_STALL_WARN_S = 20.0
 
-    async def _note_grant_stall(self, why):
+    # What a held delivery looks like from the player's chair. The gate names
+    # are ours; these are not. A stalled grant is nearly always a battle, which
+    # is benign and clears itself -- so this says the reassuring thing and the
+    # 350-character diagnosis goes to the log where it belongs.
+    _GRANT_HOLD_PLAYER = {
+        "battle": "You'll get your item after battle ends",
+        "loading": "Your items will arrive once your save is loaded",
+        "server": "Waiting on the server -- your items will arrive shortly",
+        "unstable": "You'll get your item shortly",
+    }
+
+    async def _note_grant_stall(self, why, hold=None):
         """Say WHY a grant tick bailed, once per stall, when items are actually
         waiting. Both early returns in _grant_pending used to be silent, so a
         stuck delivery left no trace at all: the 2026-08-09 report (Ice Cave
@@ -2759,7 +2857,11 @@ class FF1PSPContext(CommonContext):
         _why, since, warned = prev
         if not warned and now - since >= self.GRANT_STALL_WARN_S:
             nxt = self.items_received[self.received_count or 0]
-            logger.warning(
+            # INFO, not warning: in the battle case nothing is wrong. The
+            # technical twin below stays a warning so it still leads report.txt.
+            logger.info("  [grant] " + self._GRANT_HOLD_PLAYER.get(
+                hold, "Your items will arrive shortly"))
+            dlog.warning(
                 f"  [grant] {pending} item(s) waiting for {now - since:.0f}s -- "
                 f"delivery held by: {why}. Next up: "
                 f"{self.item_names.lookup_in_game(nxt.item)}. This clears "
@@ -2832,7 +2934,7 @@ class FF1PSPContext(CommonContext):
                     # a genuine NG+ carry-in (348 live 2026-07-23) or a same-delta
                     # clear-slot reload reads far above hw and still resets.
                     if c0 and c0 > self._counter_hw:   # stable + ahead -> carried junk
-                        logger.info(f"  [grant] carried NG+ counter {c0} on a fresh "
+                        dlog.info(f"  [grant] carried NG+ counter {c0} on a fresh "
                                     f"new game (pre-sync) -> resetting to 0")
                         await self._reset_carried_counter()
             # SAFE-STATE GATE: only read/act on the counter when the save struct is
@@ -2840,7 +2942,8 @@ class FF1PSPContext(CommonContext):
             # the old (save_delta is None) + _synced() checks and adds not-in-battle.
             if not await self._grant_safe():
                 await self._note_grant_stall("unsafe frame (battle / save block "
-                                             "not resolved / server not synced)")
+                                             "not resolved / server not synced)",
+                                             self._grant_hold)
                 return
             # A save (re)load/relocation flagged by _save_delta_loop means the
             # counter may LEGITIMATELY roll back with the reloaded save. Consume the
@@ -2852,7 +2955,7 @@ class FF1PSPContext(CommonContext):
             if c is None:
                 # unstable read -> wait for a calm frame
                 await self._note_grant_stall("received-counter read unstable "
-                                             "(two reads disagreed)")
+                                             "(two reads disagreed)", "unstable")
                 return
             self._grant_stall = None         # made it past every silent gate
             action, repair_to = GP.grant_decision(
@@ -2876,7 +2979,7 @@ class FF1PSPContext(CommonContext):
                 # (c == hw -> not carried), while a genuine NG+ carry-in (348 live
                 # 2026-07-23) reads far above a session hw of 0 and still resets.
                 if c > self._counter_hw and await self._newgame_block_live():
-                    logger.info(f"  [grant] carried NG+ counter {c} on a fresh new "
+                    dlog.info(f"  [grant] carried NG+ counter {c} on a fresh new "
                                 f"game -> resetting to 0 so items can grant")
                     await self._reset_carried_counter()
                     return                   # next tick delivers from 0
@@ -2886,7 +2989,7 @@ class FF1PSPContext(CommonContext):
                 # silent loss). Never grant on a bad counter; warn once so a bad slot
                 # is loud, not silent.
                 if not self._warned_bad_counter:
-                    logger.warning(f"  [grant] counter {c} > received {total}; not "
+                    dlog.warning(f"  [grant] counter {c} > received {total}; not "
                                    f"granting. If persistent, RECEIVED_COUNTER_ADDR_SA "
                                    f"is wrong/unverified.")
                     self._warned_bad_counter = True
@@ -2920,7 +3023,7 @@ class FF1PSPContext(CommonContext):
                                           self._repair_streak,
                                           GRANT_INPLACE_RELOAD_TICKS)
                 if corroborated:
-                    logger.warning(f"  [grant] counter held at {c} < delivered "
+                    dlog.warning(f"  [grant] counter held at {c} < delivered "
                                    f"{repair_to} for {self._repair_streak} ticks with "
                                    f"no block move -- a genuine in-place reload (game "
                                    f"over?), NOT a glitch; re-granting items[{c}:"
@@ -2931,7 +3034,7 @@ class FF1PSPContext(CommonContext):
                     # fall through to the DELIVER loop below (re-grants items[c:total])
                 else:
                     if not self._warned_glitch_counter:
-                        logger.warning(f"  [grant] counter {c} < delivered {repair_to} "
+                        dlog.warning(f"  [grant] counter {c} < delivered {repair_to} "
                                        f"with no save reload seen -- holding "
                                        f"({self._repair_streak}/"
                                        f"{GRANT_INPLACE_RELOAD_TICKS}) to tell a "
@@ -2989,7 +3092,7 @@ class FF1PSPContext(CommonContext):
                     # which is correct (the EXP was lost with the rolled-back save).
                     if qty > 0:
                         await self.grant_exp(qty)
-                        logger.info(f"  [grant] +{qty} EXP to all party members")
+                        dlog.info(f"  [grant] +{qty} EXP to all party members")
                 elif cat is None:
                     # Gil (qty = amount): an OWN GIL CHEST grants natively (the
                     # real amount is baked into the treasure table and the open-
@@ -3003,7 +3106,7 @@ class FF1PSPContext(CommonContext):
                               getattr(it, "location", None) in self._opened_own_locs)
                     if qty > 0 and not native:
                         await self.grant_gil(qty)
-                        logger.info(f"  [grant] +{qty} gil (non-chest gil item)")
+                        dlog.info(f"  [grant] +{qty} gil (non-chest gil item)")
                 elif getattr(it, "location", None) in self._opened_own_locs:
                     # Own item in an own chest the poll saw OPENED: the game's
                     # native grant already put it in the (saved) inventory, so
@@ -3082,7 +3185,7 @@ class FF1PSPContext(CommonContext):
             await self.psp.write(self.sa(D.SPELL_SLOTS_SPENT_BASE_SA),
                                  bytes(0x30))
             await self.psp.write(self.sa(D.AP_INIT_MARKER_SA), bytes([keep]))
-            logger.info("  [slot_magic] NG+ carried charge state cleared "
+            dlog.info("  [slot_magic] NG+ carried charge state cleared "
                         "(spent + CW pool -> fresh)")
         except Exception:
             pass
@@ -3102,9 +3205,9 @@ class FF1PSPContext(CommonContext):
                     g = await self.read_gil()
                     if g > D.GIL_MAX:
                         await self.psp.write_u32(self.sa(D.GIL_ADDR_SA), D.GIL_MAX)
-                        logger.info(f"  [grant] gil {g} over cap -> {D.GIL_MAX}")
+                        dlog.info(f"  [grant] gil {g} over cap -> {D.GIL_MAX}")
             except Exception as e:
-                logger.info(f"  [grant failed] {e!r}")
+                dlog.info(f"  [grant failed] {e!r}")
             try:
                 await asyncio.wait_for(self.watcher_event.wait(), 1.0 / GRANT_POLL_HZ)
                 self.watcher_event.clear()
@@ -3159,7 +3262,7 @@ class FF1PSPContext(CommonContext):
                 await self.send_msgs([{"cmd": "LocationScouts",
                                        "locations": wanted, "create_as_hint": 0}])
             except Exception as e:
-                logger.info(f"  [scout] send failed ({e!r}); retrying")
+                dlog.info(f"  [scout] send failed ({e!r}); retrying")
                 await asyncio.sleep(1.0)
                 continue
             # 3. poll for the LocationInfo reply; a mid-wait drop restarts the round
@@ -3172,7 +3275,7 @@ class FF1PSPContext(CommonContext):
                 await asyncio.sleep(0.2)
                 deadline -= 0.2
             got = sum(1 for lid in wanted if lid in self.locations_info)
-            logger.info(f"  [scout] attempt {r + 1}/{rounds}: "
+            dlog.info(f"  [scout] attempt {r + 1}/{rounds}: "
                         f"{got}/{len(wanted)} locations resolved -- retrying")
         return all(lid in self.locations_info for lid in wanted)
 
@@ -3244,7 +3347,7 @@ class FF1PSPContext(CommonContext):
         if known:
             phantom = [lid for lid in wanted if lid not in known]
             if phantom:
-                logger.info(f"  [scout] dropping {len(phantom)} location(s) not in "
+                dlog.info(f"  [scout] dropping {len(phantom)} location(s) not in "
                             f"this seed (e.g. phantom chests): {sorted(phantom)[:5]}")
                 wanted = [lid for lid in wanted if lid in known]
         # CommonContext fills self.locations_info on the LocationInfo reply.
@@ -3280,7 +3383,7 @@ class FF1PSPContext(CommonContext):
             # Item-level shop contents SPOIL the seed for anyone watching the
             # console -- keep the full stock dump for troubleshooting (visible at
             # --loglevel debug) but off the normal log.
-            logger.debug("AP shop stock: " + "; ".join(
+            dlog.debug("AP shop stock: " + "; ".join(
                 f"shop {s}: " + ", ".join(
                     self.shop_desc.get((s, k), f"offer {k}")
                     for k in range(len(prices)))
@@ -3470,11 +3573,11 @@ class FF1PSPContext(CommonContext):
         if self._key_names:
             # This mapping reveals which AP item hides behind every key-item
             # location -- a direct seed spoiler. Debug-only, like the shop dump.
-            logger.debug("Key-item box names: " + "; ".join(
+            dlog.debug("Key-item box names: " + "; ".join(
                 f"{D.KEY_ITEMS.get(k, k)} -> {v}"
                 for k, v in sorted(self._key_names.items())))
         base_tag = "base 107 +tomes" if tomes_on else "base 43 no-tomes"
-        logger.info(f"Chests: {n_own} own (native name), {n_remote} remote "
+        dlog.info(f"Chests: {n_own} own (native name), {n_remote} remote "
                     f"(on-disc AP names via {len(self._remote_names)} deduped "
                     f"bank entries, {base_tag})"
                     + (f"; {len(self._event_key_natives)} event-key "
@@ -3729,7 +3832,7 @@ class FF1PSPContext(CommonContext):
             await self.send_msgs([{"cmd": "Get", "keys": [key]},
                                   {"cmd": "SetNotify", "keys": [key]}])
         except Exception as e:
-            logger.info(f"  [hint] could not read purchased hints ({e!r}) -- "
+            dlog.info(f"  [hint] could not read purchased hints ({e!r}) -- "
                         f"rows bought earlier may reappear on the shelf")
 
     async def _hint_store_add(self, shop, k):
@@ -3741,7 +3844,7 @@ class FF1PSPContext(CommonContext):
                 "want_reply": True,
                 "operations": [{"operation": "add", "value": [f"{shop}:{k}"]}]}])
         except Exception as e:
-            logger.info(f"  [hint] could not persist the purchase ({e!r})")
+            dlog.info(f"  [hint] could not persist the purchase ({e!r})")
 
     # ---------------- bestiarysanity: kill-count checks ----------------
     def _bestiary_key(self):
@@ -3753,7 +3856,7 @@ class FF1PSPContext(CommonContext):
             await self.send_msgs([{"cmd": "Get", "keys": [self._bestiary_key()]},
                                   {"cmd": "SetNotify", "keys": [self._bestiary_key()]}])
         except Exception as e:
-            logger.info(f"  [bestiary] baseline read failed ({e!r})")
+            dlog.info(f"  [bestiary] baseline read failed ({e!r})")
 
     def _bestiary_apply_base(self, value):
         self._bestiary_base_known = True
@@ -3771,7 +3874,7 @@ class FF1PSPContext(CommonContext):
                 "default": [int(c) for c in counts], "want_reply": True,
                 "operations": [{"operation": "default", "value": 0}]}])
         except Exception as e:
-            logger.info(f"  [bestiary] baseline store failed ({e!r})")
+            dlog.info(f"  [bestiary] baseline store failed ({e!r})")
 
     async def _bestiary_loop(self):
         """Poll the save-resident bestiary kill counts (u16[203] @ save+0x1198,
@@ -3801,7 +3904,7 @@ class FF1PSPContext(CommonContext):
                 self.refresh_bestiary()
             if self._bestiary_baseline is None:
                 if stable["prev"] == counts:
-                    logger.info(f"  [bestiary] baseline stored "
+                    dlog.info(f"  [bestiary] baseline stored "
                                 f"({sum(1 for c in counts if c)}/{D.BESTIARY_KILLS_N} "
                                 f"entries pre-filled)")
                     await self._bestiary_store_base(counts)
@@ -3821,7 +3924,7 @@ class FF1PSPContext(CommonContext):
                 if counts[mon] > base[mon]:
                     self.sent_locations.add(lid)
                     lids.append(lid)
-                    logger.info(f"  [bestiary] {MON_NAME.get(mon, hex(mon))} "
+                    dlog.info(f"  [bestiary] {MON_NAME.get(mon, hex(mon))} "
                                 f"defeated -> check")
             if lids:
                 await self.check_locations(lids)
@@ -4114,8 +4217,9 @@ class FF1PSPContext(CommonContext):
                 patches.append(cls(f"shopname:{key}", payload,
                                             bytes(patched)))
         if patches:
-            logger.info(f"  [shop] item-name bank patches ready: "
-                        f"{', '.join(p.name for p in patches)}")
+            names = ", ".join(p.name for p in patches)
+            self.dlog_edge("shop:name-banks", names,
+                           f"  [shop] item-name bank patches ready: {names}")
         return patches
 
     @staticmethod
@@ -4371,7 +4475,7 @@ class FF1PSPContext(CommonContext):
                     break
                 ents[ei] = ents[ei][:-2] + bytes([NB.TERM])
             if sum(map(len, ents)) > capacity:
-                logger.info(f"  [shop] desc bank {key}: over budget, skipped")
+                dlog.info(f"  [shop] desc bank {key}: over budget, skipped")
                 continue
             new_offs, p = [], 0x10 + count * 4
             for e in ents:
@@ -4383,8 +4487,9 @@ class FF1PSPContext(CommonContext):
             assert len(new_payload) == len(payload)
             patches.append(BP.ShopBankPatch(f"shopdesc:{key}", payload, new_payload))
         if patches:
-            logger.info(f"  [shop] item-desc bank patches ready: "
-                        f"{', '.join(p.name for p in patches)}")
+            names = ", ".join(p.name for p in patches)
+            self.dlog_edge("shop:desc-banks", names,
+                           f"  [shop] item-desc bank patches ready: {names}")
         return patches
 
     @staticmethod
@@ -4412,7 +4517,7 @@ class FF1PSPContext(CommonContext):
             if not bad:
                 if not announced:
                     announced = True
-                    logger.info(f"  [chests] treasure table verified "
+                    dlog.info(f"  [chests] treasure table verified "
                                 f"({len(self.tt_values)} AP entries)")
                 return
             if len(bad) > 8:                       # bulk revert -> one block write
@@ -4423,7 +4528,7 @@ class FF1PSPContext(CommonContext):
             else:
                 for i, v in bad:
                     await self.psp.write_u32(base + i * 4, v)
-            logger.info(f"  [chests] healed {len(bad)} treasure entries "
+            dlog.info(f"  [chests] healed {len(bad)} treasure entries "
                         f"(stale save state or no bake)")
 
         await self._poll(TT_VERIFY_S, "table_loop", tick)
@@ -4725,7 +4830,7 @@ class FF1PSPContext(CommonContext):
             # than leave a vanilla item name asserting something false.
             enc, authored = b"", ""
         if ap_name not in authored:                  # a rung BELOW the full name
-            logger.info(f"  [{tag}] {ap_name!r} does not fit the "
+            dlog.info(f"  [{tag}] {ap_name!r} does not fit the "
                         f"{budget}-glyph slot -> {authored!r}")
         return enc, authored
 
@@ -4884,7 +4989,7 @@ class FF1PSPContext(CommonContext):
                 orig = self._citadel_orig.pop(key)
                 if bytes(body) != orig:
                     await self.psp.write(text_addr + a, orig)
-                    logger.info("  [citadel] vanilla line restored")
+                    dlog.info("  [citadel] vanilla line restored")
             elif not crown:
                 norm = " ".join(re.sub(r"[^a-z ]+", " ", txt.lower()).split())
                 repl = next((r for p, r in self._MAPMSG_GATE if p in norm), None)
@@ -4911,7 +5016,7 @@ class FF1PSPContext(CommonContext):
                     enc = enc[:budget] + pad * (budget - len(enc)) + term
                     if bytes(body[:len(enc)]) != enc:
                         await self.psp.write(text_addr + a, enc)
-                        logger.info(f"  [citadel] gated line authored "
+                        dlog.info(f"  [citadel] gated line authored "
                                     f"(entry @{a:#x}, break {brk:#04x}"
                                     f"{' DERIVED' if brk != self._MAPMSG_GATE_BREAK else ''}"
                                     f"): {repl!r}")
@@ -4925,7 +5030,7 @@ class FF1PSPContext(CommonContext):
                     orig = self._lute_slab_orig.pop(key)
                     if bytes(body) != orig:
                         await self.psp.write(text_addr + a, orig)
-                        logger.info("  [lute-slab] vanilla inscription restored")
+                        dlog.info("  [lute-slab] vanilla inscription restored")
                 elif not lute_owned and self._MAPMSG_LUTE_SLAB in lnorm:
                     self._lute_slab_orig.setdefault(key, bytes(body))
                     brk = self._mapmsg_break(body[:-1], inv,
@@ -4939,7 +5044,7 @@ class FF1PSPContext(CommonContext):
                     enc = enc[:budget] + pad * (budget - len(enc)) + term
                     if bytes(body[:len(enc)]) != enc:
                         await self.psp.write(text_addr + a, enc)
-                        logger.info("  [lute-slab] gated inscription authored")
+                        dlog.info("  [lute-slab] gated inscription authored")
                     continue
 
             # --- Crescent Lake giver-sage boxes (talk-detect, 2026-07-24) -----
@@ -4952,7 +5057,7 @@ class FF1PSPContext(CommonContext):
                 orig = self._sage_orig.pop(key)
                 if bytes(body) != orig:
                     await self.psp.write(text_addr + a, orig)
-                    logger.info("  [sage-box] vanilla lore restored")
+                    dlog.info("  [sage-box] vanilla lore restored")
             elif not sage_done and sage_name:
                 snorm = " ".join(re.sub(r"[^a-z ]+", " ", txt.lower()).split())
                 budget = b - a - 1
@@ -4986,7 +5091,7 @@ class FF1PSPContext(CommonContext):
                         # showing "authored but no check" cannot say WHERE the
                         # talk latch should have pointed, which is what made
                         # this class need a live session every single time.
-                        logger.info(f"  [sage-box] authored: {authored!r} "
+                        dlog.info(f"  [sage-box] authored: {authored!r} "
                                     f"at {text_addr + a:#x} ({len(enc)}B)")
                     continue
             mo = self._MAPMSG_OBTAIN.match(txt)
@@ -5010,7 +5115,7 @@ class FF1PSPContext(CommonContext):
             enc = (enc[:budget] + pad * (budget - len(enc)) + term)
             if bytes(body[:len(enc)]) != enc:
                 await self.psp.write(text_addr + a, enc)
-                logger.info(f"  [keybox] authored obtain box: "
+                dlog.info(f"  [keybox] authored obtain box: "
                             f"{mo.group(1)} -> {authored}")
         return True
 
@@ -5151,10 +5256,10 @@ class FF1PSPContext(CommonContext):
                     try:
                         addrs = await p.locate_in(self.psp, blob, base=start)
                         if addrs:
-                            logger.info(f"  patched {p.name} @ "
+                            dlog.info(f"  patched {p.name} @ "
                                         f"{', '.join(hex(a) for a in addrs)}")
                     except Exception as e:
-                        logger.info(f"  [boot_patch locate {p.name}] {e!r}")
+                        dlog.info(f"  [boot_patch locate {p.name}] {e!r}")
                 # after the first window a rescan-all is done: any extra copy
                 # lives in the home region; later windows only chase patches
                 # still located nowhere.
@@ -5174,7 +5279,7 @@ class FF1PSPContext(CommonContext):
                     if await p.reconcile(self.psp) and not p.fixed:
                         need_scan = True
                 except Exception as e:
-                    logger.info(f"  [boot_patch reconcile {p.name}] {e!r}")
+                    dlog.info(f"  [boot_patch reconcile {p.name}] {e!r}")
                 # spread the per-table reads so the pass never bursts the emu
                 await asyncio.sleep(RECONCILE_SPACING_S)
             force = self._float_rescan
@@ -5185,7 +5290,7 @@ class FF1PSPContext(CommonContext):
                 await scan_floating(rescan_all=force)
             if not announced and all(p.addrs for p in active):
                 announced = True
-                logger.info(f"  [boot_patch] all {len(active)} tables in force "
+                dlog.info(f"  [boot_patch] all {len(active)} tables in force "
                             f"({'baked on-disc' if self.bake_ok else 'runtime fallback'})")
             await asyncio.sleep(BOOT_RECONCILE_S)
 
@@ -5234,7 +5339,7 @@ class FF1PSPContext(CommonContext):
                     everywhere, _homes, map_soft = plan
                     if not everywhere and not map_soft:
                         return          # nothing soft in this seed -> strict no-op
-                    logger.info(
+                    dlog.info(
                         f"  [cameo bosses] softening to "
                         f"{BP._cameo_mult(self.boss_mult):.0%} power "
                         f"(boss difficulty {self.boss_mult:.0%}): "
@@ -5250,7 +5355,7 @@ class FF1PSPContext(CommonContext):
                 if await self._set_cameo_soft(RANDO.boss_soft_ids(plan, key)):
                     cur_key = key
             except Exception as e:
-                logger.info(f"  [cameo_boss_loop] {e!r}")
+                dlog.info(f"  [cameo_boss_loop] {e!r}")
 
     async def _write_monster_rewards(self, soft_ids):
         """Put the monster_stats block into the variant that scales rewards by the
@@ -5310,7 +5415,7 @@ class FF1PSPContext(CommonContext):
         # it actually changes (boss entered/left a soft zone) instead of per-map.
         key = frozenset(soft_ids)
         if soft_ids and key != self._last_soft_log:
-            logger.info(f"  [cameo bosses] softened "
+            dlog.info(f"  [cameo bosses] softened "
                         f"{', '.join(f'{i:#04x}' for i in sorted(soft_ids))}")
         self._last_soft_log = key
         return True
@@ -5334,9 +5439,9 @@ class FF1PSPContext(CommonContext):
         try:
             ok = await self._write_monster_rewards(self._cameo_soft)
         except Exception as e:
-            logger.info(f"  [scaling] live write failed: {e!r}")
+            dlog.info(f"  [scaling] live write failed: {e!r}")
             return False
-        logger.info(f"  [scaling] xp x{self.xp_mult}, gil x{self.gil_mult}, "
+        dlog.info(f"  [scaling] xp x{self.xp_mult}, gil x{self.gil_mult}, "
                     f"monster x{self.monster_mult}, boss x{self.boss_mult} "
                     f"({'live' if ok else 'queued for next boot'})")
         return ok
@@ -5374,10 +5479,10 @@ class FF1PSPContext(CommonContext):
             await self.psp.write(addr, new_bytes)
             back = await self.psp.read(addr, len(new_bytes))
         except Exception as e:
-            logger.info(f"  [encounters] live write failed: {e!r}")
+            dlog.info(f"  [encounters] live write failed: {e!r}")
             return False
         ok = back == new_bytes
-        logger.info(f"  [encounters] set x{mult} @ {addr:#x} "
+        dlog.info(f"  [encounters] set x{mult} @ {addr:#x} "
                     f"({'verified' if ok else 'READ-BACK MISMATCH'})")
         return ok
 
@@ -5403,7 +5508,7 @@ class FF1PSPContext(CommonContext):
 
         Runs even with auto_dash off: dash is then left at its vanilla value
         while the message-speed and cursor defaults still land."""
-        logger.info(f"  [config] new-game defaults loop start "
+        dlog.info(f"  [config] new-game defaults loop start "
                     f"(auto_dash={self.auto_dash}, "
                     f"message_speed={self.message_speed}, "
                     f"cursor_mode={self.cursor_mode})")
@@ -5420,7 +5525,7 @@ class FF1PSPContext(CommonContext):
                     if await self._carried_save_snapshot():
                         await asyncio.sleep(0.5)
                         continue
-                    logger.info("  [movement] game underway -> leaving Dash "
+                    dlog.info("  [movement] game underway -> leaving Dash "
                                 "to the player")
                     return
                 if state != "fresh":
@@ -5446,14 +5551,14 @@ class FF1PSPContext(CommonContext):
                     await self.psp.write(addr, bytes([new]))
                 await self.psp.write(self.sa(D.MSG_SPEED_MIRROR_ADDR_SA),
                                      bytes([1 << speed]))
-                logger.info(f"  [config] new-game defaults: dash "
+                dlog.info(f"  [config] new-game defaults: dash "
                             f"{'on' if self.auto_dash else 'vanilla'}, cursor "
                             f"{'memory' if self.cursor_mode else 'default'}, "
                             f"message speed {speed} ({addr:#x}: {cur:#04x} -> "
                             f"{new:#04x}) -- all yours to change from here on")
                 return
             except Exception as e:
-                logger.info(f"  [movement] {e!r}")
+                dlog.info(f"  [movement] {e!r}")
                 await asyncio.sleep(0.5)
 
     # ---------------- always-set save flags (bridge, cutscene skips) ----------------
@@ -5475,11 +5580,11 @@ class FF1PSPContext(CommonContext):
                 cur = span[addr - lo]
                 if (cur & mask) != mask:
                     await self.psp.write(self.sa(addr), bytes([cur | mask]))
-                    logger.info(f"  [flags] {label} "
+                    dlog.info(f"  [flags] {label} "
                                 f"({self.sa(addr):#x}: {cur:#04x} -> {cur | mask:#04x})")
                     announced.add(label)
                 elif label not in announced:
-                    logger.info(f"  [flags] {label}: already set")
+                    dlog.info(f"  [flags] {label}: already set")
                     announced.add(label)
             # Chaos-defeated -> auto-report the AP goal. 0x11520 b6 is set on
             # Chaos's death (live-verified 2026-07-07, persists past the cutscene);
@@ -5533,7 +5638,7 @@ class FF1PSPContext(CommonContext):
                                         "carried/ahead (reloaded beaten save?) -- NOT "
                                         "auto-reporting; use /goal for a real victory")
                     else:
-                        logger.info("  [goal] Chaos defeated flag detected "
+                        dlog.info("  [goal] Chaos defeated flag detected "
                                     f"({self.sa(D.CHAOS_DEFEATED_ADDR):#x} b6) -> reporting goal")
                         await self.send_goal()
                 elif not self._chaos_carryin_logged:
@@ -5560,7 +5665,7 @@ class FF1PSPContext(CommonContext):
         broadcasting to all players' chat -- change to 1 to broadcast)."""
         entries = [(c, a, m) for (c, a, m) in D.TOWN_MAP_FLAGS if a is not None]
         if not entries:
-            logger.info("  [shop-hint] no town map-reveal flags mapped -- loop idle "
+            dlog.info("  [shop-hint] no town map-reveal flags mapped -- loop idle "
                         "(capture with tools/capture_town_flags.py)")
             return
         lo = min(a for _c, a, _m in entries)
@@ -5617,10 +5722,10 @@ class FF1PSPContext(CommonContext):
                     await self.send_msgs([{"cmd": "LocationScouts",
                                            "locations": lids, "create_as_hint": 2}])
                     hinted.add(city)
-                    logger.info(f"  [shop-hint] entered {D.CITY_NAME.get(city, city)} "
+                    dlog.info(f"  [shop-hint] entered {D.CITY_NAME.get(city, city)} "
                                 f"-> hinted {len(lids)} shop offer(s)")
                 except Exception as e:
-                    logger.info(f"  [shop-hint] hint send failed ({e!r}); will retry")
+                    dlog.info(f"  [shop-hint] hint send failed ({e!r}); will retry")
 
         await self._poll(2.0, "shop_hint_loop", tick)
 
@@ -5671,7 +5776,7 @@ class FF1PSPContext(CommonContext):
             ((getattr(self, "_bake", None) or {}).get("features")
              or {}).get("_ow_map"))
         if ow_baked and grid_edits:
-            logger.info(f"  [openworld] {len(grid_edits)} grid edits are on "
+            dlog.info(f"  [openworld] {len(grid_edits)} grid edits are on "
                         f"disc (baked) -- skipping the runtime grid rescan")
             grid_edits = {}
         # Terrain-CLASS edits for the carved rivers. Overworld encounters ignore the
@@ -5701,6 +5806,44 @@ class FF1PSPContext(CommonContext):
         # this grid write. Gate = the canal-open tilemap bit (canal-flag-bit
         # memory); the AMD grid carries the canal ids in BOTH states, so an ungated
         # paint would hand the player a walkable bridge before Nerrick's event.
+        # ---- world-changing AP items (2026-09-03) -------------------------
+        # NEVER baked: what gets painted depends on which AP items are held, so
+        # these tables always ride the runtime path (ow_baked must not drop
+        # them). TRAILS_BASE is the option's own always-on paint -- the stub
+        # pier, the carved corridor and BOTH boulders -- and each held item
+        # then overlays its own opening. The Gulg seal is INVERTED: painted
+        # while the key is missing, reverted to vanilla once it arrives.
+        trails_on = bool(self.slot_data.get("northern_foot_trails"))
+        gulg_key_on = bool(self.slot_data.get("mount_gulg_key"))
+        _ow = lambda nm: dict(getattr(OW, nm, {}) or {})
+        trails_base = _ow("TRAILS_BASE_GRID_EDITS") if trails_on else {}
+        world_overlay = {
+            ID.WORLD_LUFENIAN_BRIDGE: _ow("LUFENIAN_BRIDGE_BUILT_GRID_EDITS"),
+            ID.WORLD_LUFENIAN_NITRO:  _ow("LUFENIAN_BOULDER_OPEN_GRID_EDITS"),
+            ID.WORLD_GAIAN_NITRO:     _ow("GAIAN_BOULDER_OPEN_GRID_EDITS"),
+        } if trails_on else {}
+        gulg_sealed = _ow("GULG_SEAL_GRID_EDITS") if gulg_key_on else {}
+        gulg_cleared = _ow("GULG_SEAL_CLEARED_GRID_EDITS") if gulg_key_on else {}
+
+        def world_edits(held):
+            """Cells the world-changing items paint for the CURRENT held set."""
+            e = dict(trails_base)
+            for ordinal, cells in world_overlay.items():
+                if ID.world_item_id(ordinal) in held:
+                    e.update(cells)
+            if gulg_key_on:
+                e.update(gulg_cleared
+                         if ID.world_item_id(ID.WORLD_MOUNT_GULG_KEY) in held
+                         else gulg_sealed)
+            return e
+
+        # Sticky: an item once seen is never un-seen, so a disconnect (which
+        # empties items_received) can never un-paint a bridge the player owns.
+        world_state = {"held": set(), "edits": world_edits(set())}
+        # Gulg hint: fires once per APPROACH (re-armed by walking out of the
+        # box) and then every 60 s while the player loiters inside it.
+        gulg_hint = {"inside": False, "last": 0.0}
+
         canal_bridge = getattr(OW, "CANAL_BRIDGE_GRID_EDITS", {})
         canal_open_addr_sa = getattr(OW, "CANAL_OPEN_ADDR_SA", D.CANAL_OPEN_ADDR_SA)
         canal_open_bit = getattr(OW, "CANAL_OPEN_BIT", 0x08)
@@ -5713,9 +5856,14 @@ class FF1PSPContext(CommonContext):
             canal_att = {}
         # The canal attr is always-on; the loop still runs with all toggles off to
         # maintain it. Bail only if there is genuinely nothing to write.
-        if not grid_edits and not canal_att and not canal_bridge and not class_edits:
+        if (not grid_edits and not canal_att and not canal_bridge
+                and not class_edits and not trails_on and not gulg_key_on):
             return
-        logger.info(f"  [openworld] early={early} extended={extended} docks={docks} "
+        if trails_on or gulg_key_on:
+            dlog.info(f"  [openworld] world items: trails={trails_on} "
+                        f"({len(trails_base)} base cells) "
+                        f"gulg_key={gulg_key_on} ({len(gulg_sealed)} seal cells)")
+        dlog.info(f"  [openworld] early={early} extended={extended} docks={docks} "
                     f"({len(grid_edits)} grid edits, {len(class_edits)} river-class "
                     f"cells; canal attr always-on)")
         grid_base = None
@@ -5738,8 +5886,20 @@ class FF1PSPContext(CommonContext):
             cur["canary"] = canary
             cur["val"] = edits[canary] if canary is not None else None
 
-        set_edits(dict(grid_edits))
         canal_state = {"open": False}
+
+        def compose():
+            """The full live edit set: toggle edits + the canal bridge once the
+            canal is open + whatever the world-changing items currently paint.
+            One composer so the canal edge and the world-item edge can never
+            clobber each other's cells."""
+            e = dict(grid_edits)
+            if canal_state["open"]:
+                e.update(canal_bridge)
+            e.update(world_state["edits"])
+            return e
+
+        set_edits(compose())
         att_canary = min(canal_att) if canal_att else None
         loop = asyncio.get_event_loop()
         # Miss-backoff: consecutive failed rescans stretch the narrow-window
@@ -5812,7 +5972,7 @@ class FF1PSPContext(CommonContext):
                     start, size, breathe=SCAN_BREATHE_S)
                 dt = loop.time() - t0
                 if dt > 1.0:
-                    logger.info(f"  [openworld] rescan {size >> 20}MB "
+                    dlog.info(f"  [openworld] rescan {size >> 20}MB "
                                 f"@{start:#x} took {dt:.1f}s")
                 grid_bases = []
                 i = blob.find(OW.ANCHOR)
@@ -5881,7 +6041,7 @@ class FF1PSPContext(CommonContext):
                 # Far visual-only edits (the northern docks) do not repaint until
                 # the chunk scrolls out and back, so a repair here can be silent
                 # in game -- log it or the next report is unfalsifiable again.
-                logger.info(f"  [openworld] re-applied edits to {repaired} arena "
+                dlog.info(f"  [openworld] re-applied edits to {repaired} arena "
                             f"cop{'y' if repaired == 1 else 'ies'} that read vanilla")
             if not wrote:
                 return False
@@ -5897,7 +6057,7 @@ class FF1PSPContext(CommonContext):
             bases = tuple(grid_bases or [grid_base])
             if bases != applied_log["bases"]:
                 applied_log["bases"] = bases
-                logger.info(f"  [openworld] map edits applied @ "
+                dlog.info(f"  [openworld] map edits applied @ "
                             f"{', '.join(hex(b) for b in bases)}")
             return True
 
@@ -5924,6 +6084,53 @@ class FF1PSPContext(CommonContext):
             if await self._in_battle():
                 map_state["away"] = True
                 return
+            # Mount Gulg hint. The seal is silent by design -- the cave mouth
+            # is simply not there -- so a player who has never seen an unsealed
+            # Gulg has no way to know the wall is a gate rather than the map.
+            # Log it while they are next to it and still keyless.
+            if (gulg_key_on
+                    and ID.world_item_id(ID.WORLD_MOUNT_GULG_KEY)
+                    not in world_state["held"]):
+                gx, gy, gr = D.GULG_TILE
+                px = py = None
+                try:
+                    fbase = struct.unpack("<I", await self.psp.read(
+                        D.FIELD_STRUCT_PTR, 4))[0]
+                    if 0x08000000 <= fbase < 0x0A000000:
+                        px = struct.unpack("<H", await self.psp.read(
+                            fbase + D.FIELD_PARTY_X_OFF, 2))[0]
+                        py = struct.unpack("<H", await self.psp.read(
+                            fbase + D.FIELD_PARTY_Y_OFF, 2))[0]
+                except Exception:
+                    px = py = None
+                near = (px is not None
+                        and abs(px - gx) <= gr and abs(py - gy) <= gr)
+                now_t = loop.time()
+                if near and (not gulg_hint["inside"]
+                             or now_t - gulg_hint["last"] >= 60.0):
+                    gulg_hint["last"] = now_t
+                    logger.info("Mt. Gulg is locked until you find its key "
+                                "in the multiworld")
+                gulg_hint["inside"] = near
+            # World-changing items: repaint on the rising edge of "we now hold
+            # one we did not before". Sticky union of the sticky _ever_won and
+            # the live items_received -- the same pair the tracker uses, and for
+            # the same reason: items_received is emptied for the duration of a
+            # disconnect, which would rip up a bridge the player owns.
+            if trails_on or gulg_key_on:
+                held = {iid for iid in
+                        (set(self._ever_won) | {it.item for it in self.items_received})
+                        if ID.is_world_item(iid)}
+                if not held <= world_state["held"]:
+                    world_state["held"] |= held
+                    world_state["edits"] = world_edits(world_state["held"])
+                    set_edits(compose(),
+                              min(canal_bridge) if canal_state["open"] else None)
+                    dlog.info(f"  [openworld] world items now held: "
+                                f"{sorted(world_state['held'])} -> "
+                                f"{len(world_state['edits'])} cells painted")
+                    if grid_base is not None and not map_state["away"]:
+                        await apply()
             # Canal-open bit: while it is clear the canal is not dug and the bridge
             # must NOT be drawn (its tiles are walkable = a free crossing). On the
             # rising edge, fold the bridge cells into the live edit set and force an
@@ -5935,13 +6142,8 @@ class FF1PSPContext(CommonContext):
                                & canal_open_bit)
                 if is_open != canal_state["open"]:
                     canal_state["open"] = is_open
-                    edits = dict(grid_edits)
-                    if is_open:
-                        edits.update(canal_bridge)
-                        set_edits(edits, min(canal_bridge))
-                    else:
-                        set_edits(edits)
-                    logger.info(f"  [openworld] canal bridge "
+                    set_edits(compose(), min(canal_bridge) if is_open else None)
+                    dlog.info(f"  [openworld] canal bridge "
                                 f"{'drawn' if is_open else 'withheld (canal closed)'}")
                     if grid_base is not None and not map_state["away"]:
                         await apply()
@@ -6080,7 +6282,7 @@ class FF1PSPContext(CommonContext):
                    for r in range(D.PARTY_COUNT)):
             return False
         self._hold_spent_seen.add(name)
-        logger.info(f"  [{name.lower()}] spent (party promoted) -> function bit "
+        dlog.info(f"  [{name.lower()}] spent (party promoted) -> function bit "
                     f"held clear from now on (nothing reads it any more)")
         return True
 
@@ -6210,7 +6412,7 @@ class FF1PSPContext(CommonContext):
                     fcur = await snap.rd(fsa)
                     if (fcur & fmask) != fmask:
                         await snap.wr(fsa, fcur | fmask)
-                        logger.info(f"  [func-reassert] key {rk}: set function bits "
+                        dlog.info(f"  [func-reassert] key {rk}: set function bits "
                                     f"{faddr_raw:#x} |= {fmask:#04x} (won item, was "
                                     f"{fcur:#04x})")
                     # On-disc gate-split shadow flag (v260): on a baked ISO the
@@ -6225,7 +6427,7 @@ class FF1PSPContext(CommonContext):
                         scur = (await self.psp.read(ssa, 1))[0]
                         if (scur & smask) != smask:
                             await self.psp.write(ssa, bytes([scur | smask]))
-                            logger.info(f"  [func-reassert] key {rk}: set gate-split "
+                            dlog.info(f"  [func-reassert] key {rk}: set gate-split "
                                         f"shadow flag {sb[0]:#x} |= {smask:#04x} "
                                         f"(won item, was {scur:#04x})")
 
@@ -6245,7 +6447,7 @@ class FF1PSPContext(CommonContext):
                         if (cur & D.LUTE_KEYITEM_MASK) != D.LUTE_KEYITEM_MASK:
                             await snap.wr(self.sa(D.LUTE_KEYITEM_ADDR),
                                           cur | D.LUTE_KEYITEM_MASK)
-                            logger.info(f"  [lute-tablets] {self._tablet_hw}/{need} "
+                            dlog.info(f"  [lute-tablets] {self._tablet_hw}/{need} "
                                         f"tablets -> Lute assembled (possession bit set)")
                 else:
                     lute_won = lute_ap_iid in self._ever_won
@@ -6262,7 +6464,7 @@ class FF1PSPContext(CommonContext):
                     if (cur & D.RUNE_KEY_FLAG_MASK) != D.RUNE_KEY_FLAG_MASK:
                         await snap.wr(self.sa(D.RUNE_KEY_FLAG_ADDR),
                                       cur | D.RUNE_KEY_FLAG_MASK)
-                        logger.info(
+                        dlog.info(
                             f"  [equipment-runes] {self._rune_hw}/{rneed} runes -> "
                             f"Equipment Rune Key assembled (story flag 62 set; "
                             f"equipment activation unlocked)")
@@ -6280,7 +6482,7 @@ class FF1PSPContext(CommonContext):
                     # (or assembled from tablets -- lute_won covers both).
                     if not lute_won:
                         await snap.wr(self.sa(addr), cur & ~mask)
-                        logger.info("  [princess] stripped native Lute "
+                        dlog.info("  [princess] stripped native Lute "
                                     "(Lute is a randomized AP item)")
 
             with self._stage("npc-map-reset"):
@@ -6354,7 +6556,7 @@ class FF1PSPContext(CommonContext):
                                 where = ("in-map" if mid in hmaps
                                          else "at doorstep" if in_scope
                                          else "everywhere (item spent)")
-                                logger.info(f"  [{hname.lower()}] holding function "
+                                dlog.info(f"  [{hname.lower()}] holding function "
                                             f"bit clear {where} -> native content "
                                             f"stays available")
                             continue
@@ -6464,7 +6666,7 @@ class FF1PSPContext(CommonContext):
                                          else "at cave mouth")
                                 if gcur & gmask:
                                     await snap.wr(gsa, gcur & ~gmask)
-                                    logger.info(f"  [{rname.lower()}] prearmed gate "
+                                    dlog.info(f"  [{rname.lower()}] prearmed gate "
                                                 f"clear {where} -> NPC offers on "
                                                 f"entry")
                                 # See prearm_poss (ff1_data): the robot's already-
@@ -6474,7 +6676,7 @@ class FF1PSPContext(CommonContext):
                                 if prearm_poss:
                                     if pcur & pmask:
                                         await snap.wr(psa, pcur & ~pmask)
-                                        logger.info(f"  [{rname.lower()}] prearmed "
+                                        dlog.info(f"  [{rname.lower()}] prearmed "
                                                     f"possession clear {where}")
                                 elif not (pcur & pmask):
                                     # A won key whose row does NOT hide possession
@@ -6495,7 +6697,7 @@ class FF1PSPContext(CommonContext):
                                     # untouched, so the Ice Cavern pickup still
                                     # loads collectable.
                                     await snap.wr(psa, pcur | pmask)
-                                    logger.info(f"  [{rname.lower()}] won key "
+                                    dlog.info(f"  [{rname.lower()}] won key "
                                                 f"possession restored {where} "
                                                 f"(gate stays held for the check)")
                                 # A prearm_poss hold makes a WON key item
@@ -6535,7 +6737,7 @@ class FF1PSPContext(CommonContext):
                                 if spent:
                                     if pcur & pmask:
                                         await snap.wr(psa, pcur & ~pmask)
-                                        logger.info(
+                                        dlog.info(
                                             f"  [{rname.lower()}] spent (turn-in "
                                             f"done) -> possession stripped")
                                 elif not (pcur & pmask):
@@ -6568,7 +6770,7 @@ class FF1PSPContext(CommonContext):
                             seen = self._npc_reset_entryclears.get(rkid, 0) + 1
                             self._npc_reset_entryclears[rkid] = seen
                             if seen > 1:
-                                logger.warning(
+                                dlog.warning(
                                     f"  [{rname.lower()}] gate rose again "
                                     f"WITHOUT leaving the map ({seen} entry "
                                     f"clears in one stay) -- the entry edge-"
@@ -6584,7 +6786,7 @@ class FF1PSPContext(CommonContext):
                             await snap.wr(gsa, gcur & ~gmask)
                             if hold_poss and (pcur & pmask):
                                 await snap.wr(psa, pcur & ~pmask)
-                            logger.info(f"  [{rname.lower()}] cleared gate"
+                            dlog.info(f"  [{rname.lower()}] cleared gate"
                                         f"{'+possession' if hold_poss else ''} in-map "
                                         f"({'entry' if entered else 'own grant'})"
                                         f" -> NPC re-offers")
@@ -6600,7 +6802,7 @@ class FF1PSPContext(CommonContext):
                                 if pcur & pmask:
                                     await snap.wr(psa, pcur & ~pmask)
                                 await snap.wr(gsa, gcur & ~gmask)
-                                logger.info(f"  [{rname.lower()}] stripped native "
+                                dlog.info(f"  [{rname.lower()}] stripped native "
                                             f"{rname} (randomized AP item)")
                             continue
                         # Quiescent in-map: hold the gate clear so the NPC keeps
@@ -6612,7 +6814,7 @@ class FF1PSPContext(CommonContext):
                             await snap.wr(gsa, gcur & ~gmask)
                         if hold_poss and (pcur & pmask):
                             await snap.wr(psa, pcur & ~pmask)
-                            logger.info(f"  [{rname.lower()}] holding possession "
+                            dlog.info(f"  [{rname.lower()}] holding possession "
                                         f"clear in-map -> NPC re-offers")
                     self._npc_reset_lastmap = mid
 
@@ -6642,7 +6844,7 @@ class FF1PSPContext(CommonContext):
                         kcur = await snap.rd(self.sa(kaddr))
                         if kcur & kmask:
                             await snap.wr(self.sa(kaddr), kcur & ~kmask)
-                        logger.info("  [mystic key] stripped native Mystic Key "
+                        dlog.info("  [mystic key] stripped native Mystic Key "
                                     "(randomized AP item)")
                 elif not qset and qlid in self.sent_locations:
                     # Checked (this session or the server's list) but the save
@@ -6651,7 +6853,7 @@ class FF1PSPContext(CommonContext):
                     # re-run (no duplicate native key) and the healer/prince
                     # speak their post-quest lines.
                     await snap.wr(qsa, qcur | D.ELF_PRINCE_QUEST_MASK)
-                    logger.info("  [mystic key] quest flag re-asserted from "
+                    dlog.info("  [mystic key] quest flag re-asserted from "
                                 "checked location (save rollback)")
 
             with self._stage("consumed-keys"):
@@ -6674,7 +6876,7 @@ class FF1PSPContext(CommonContext):
                     if not (await snap.rd(self.sa(caddr_raw)) & cmask):
                         continue
                     await snap.wr(cpsa, cpcur & ~cpmask)
-                    logger.info(f"  [{D.KEY_ITEMS[ckid].lower()}] spent (turn-in "
+                    dlog.info(f"  [{D.KEY_ITEMS[ckid].lower()}] spent (turn-in "
                                 f"done) -> possession stripped")
 
             with self._stage("rats-tail"):
@@ -6697,7 +6899,7 @@ class FF1PSPContext(CommonContext):
                         for r in range(D.PARTY_COUNT))
                     if promoted:
                         await snap.wr(tpsa, tpcur & ~tpmask)
-                        logger.info("  [rat's tail] spent (party promoted) -> "
+                        dlog.info("  [rat's tail] spent (party promoted) -> "
                                     "possession stripped")
 
             # field_map_id/in_pravoka are produced here and consumed by
@@ -6746,13 +6948,13 @@ class FF1PSPContext(CommonContext):
                         logger.info("NPC (Bikke) legacy flag5 edge -> check")
                     if not (bcur & D.BIKKE_DEFEATED_MASK):
                         await snap.wr(baddr, bcur | D.BIKKE_DEFEATED_MASK)
-                        logger.info("  [bikke] defeated flag (id63) backfilled")
+                        dlog.info("  [bikke] defeated flag (id63) backfilled")
                     await snap.wr(saddr, scur & ~D.SHIP_FLAG_MASK)
-                    logger.info("  [bikke] stripped native ship "
+                    dlog.info("  [bikke] stripped native ship "
                                 "(Ship is a randomized AP item)")
                 elif ship_won and not (scur & D.SHIP_FLAG_MASK):
                     await snap.wr(saddr, scur | D.SHIP_FLAG_MASK)
-                    logger.info("  [ship] set flag5 -> ship spawns at Provoka")
+                    dlog.info("  [ship] set flag5 -> ship spawns at Provoka")
 
             with self._stage("sage-canoe"):
                 # Crescent Lake sage: natively gives the CANOE key item (0x08D11539 & 0x80),
@@ -6865,14 +7067,14 @@ class FF1PSPContext(CommonContext):
                                       ccur & ~D.CANOE_KEYITEM_MASK)
                         await snap.wr(self.sa(D.CANOE_FUNCTION_ADDR),
                                       fcur & ~D.CANOE_FUNCTION_MASK)
-                        logger.info("  [sage] stripped native Canoe (possession + "
+                        dlog.info("  [sage] stripped native Canoe (possession + "
                                     "sailing; Canoe is a randomized AP item)")
                 elif not sset and sage_lid in self.sent_locations:
                     # Checked, but the save under us says undone -- a rollback
                     # reload or a save from before this fix. Re-assert so his
                     # cutscene cannot re-run and hand out a second native canoe.
                     await snap.wr(ssa, scur | D.SAGE_QUEST_MASK)
-                    logger.info("  [sage] quest flag re-asserted from checked "
+                    dlog.info("  [sage] quest flag re-asserted from checked "
                                 "location (save rollback)")
 
                 # (v258: the doorstep prearm, in-town both-bits hold and the
@@ -6976,7 +7178,7 @@ class FF1PSPContext(CommonContext):
                             await snap.wr(faddr, fcur & ~fmask)
                             did_strip = True
                     if did_strip:
-                        logger.info(f"  [{kname.lower()}] stripped native {kname} "
+                        dlog.info(f"  [{kname.lower()}] stripped native {kname} "
                                     f"({kname} is a randomized AP item)")
 
             with self._stage("trade-chain"):
@@ -7034,7 +7236,7 @@ class FF1PSPContext(CommonContext):
                         fcur = await snap.rd(faddr)
                         if fcur & fmask:
                             await snap.wr(faddr, fcur & ~fmask)
-                    logger.info(f"  [{kname.lower()}] stripped native {kname} "
+                    dlog.info(f"  [{kname.lower()}] stripped native {kname} "
                                 f"({kname} is a randomized AP item)")
 
             with self._stage("smith"):
@@ -7093,7 +7295,7 @@ class FF1PSPContext(CommonContext):
                                 stripped = True
                                 break
                         if stripped:
-                            logger.info("  [smith] stripped native Excalibur "
+                            dlog.info("  [smith] stripped native Excalibur "
                                         "(Excalibur is a randomized AP item)")
 
             # --- Bahamut: NOT an AP location (removed 2026-08-27) ---------------
@@ -7185,7 +7387,7 @@ class FF1PSPContext(CommonContext):
                         if not wrote_once and await self._carried_save_snapshot():
                             await asyncio.sleep(0.5)
                             continue
-                        logger.info("  [party] game underway -> stop setting party")
+                        dlog.info("  [party] game underway -> stop setting party")
                         return        # battle fought; never touch again this run
                     await asyncio.sleep(0.5)
                     continue          # records not initialized yet; wait
@@ -7206,12 +7408,12 @@ class FF1PSPContext(CommonContext):
                     await self.psp.write(self.sa(D.class_addr_sa(row)), bytes([job]))
                 if not need_write and wrote_once:
                     self._party_applied = True
-                    logger.info(f"  [party] set jobs {self.party_jobs} "
+                    dlog.info(f"  [party] set jobs {self.party_jobs} "
                                 f"({[D.JOB_NAMES[j] if j is not None else 'vanilla' for j in self.party_jobs]}) -> stable, done")
                     return            # confirmed stable: stop polling, no more load
                 wrote_once = True
             except Exception as e:
-                logger.info(f"  [party_loop] {e!r}")
+                dlog.info(f"  [party_loop] {e!r}")
             await asyncio.sleep(0.5)
 
     # ---------------- starting gil ----------------
@@ -7245,7 +7447,7 @@ class FF1PSPContext(CommonContext):
                         await asyncio.sleep(0.5)
                         continue          # NG+ char-creation snapshot; wait it out
                     self._starting_gil_applied = True
-                    logger.info("  [starting_gil] game underway -> left alone")
+                    dlog.info("  [starting_gil] game underway -> left alone")
                     return
                 if state != "fresh":
                     # "uninit" (pre-creation / verdict not latched) or "loaded"
@@ -7259,12 +7461,12 @@ class FF1PSPContext(CommonContext):
                                  D.GIL_MAX))
                 await self.psp.write_u32(self.sa(D.GIL_ADDR_SA), new)
                 self._starting_gil_applied = True
-                logger.info(f"  [starting_gil] {cur} -> {new} "
+                dlog.info(f"  [starting_gil] {cur} -> {new} "
                             f"(yaml {self.starting_gil}, vanilla "
                             f"{D.VANILLA_START_GIL})")
                 return
             except Exception as e:
-                logger.info(f"  [starting_gil] {e!r}")
+                dlog.info(f"  [starting_gil] {e!r}")
             await asyncio.sleep(0.5)
 
     # ---------------- naked monks ----------------
@@ -7328,11 +7530,11 @@ class FF1PSPContext(CommonContext):
                         stripped += 1
                 if stripped:
                     await self.grant_gil(D.NAKED_MONK_GIL * stripped)
-                    logger.info(f"  [naked_monks] stripped {stripped} Monk(s) -> "
+                    dlog.info(f"  [naked_monks] stripped {stripped} Monk(s) -> "
                                 f"+{D.NAKED_MONK_GIL * stripped} gil")
                 return
             except Exception as e:
-                logger.info(f"  [naked_monks] {e!r}")
+                dlog.info(f"  [naked_monks] {e!r}")
             await asyncio.sleep(0.5)
 
     async def _strip_equipment(self, row):
@@ -7554,7 +7756,7 @@ class FF1PSPContext(CommonContext):
         msg = (await self._ninja_scroll_msg() if from_job == 1
                else self.SCROLL_EFFECT_MSG.get(from_job))
         if msg:
-            logger.info(f"  [grant] {name}: {msg}")
+            dlog.info(f"  [grant] {name}: {msg}")
 
     # --- class rename (job_scroll_boosts): custom class name per owned scroll ---
     _CLASSNAME_WINDOWS = ((0x09000000, 0x01000000),)   # heap region the bank lives in
@@ -7861,7 +8063,7 @@ class FF1PSPContext(CommonContext):
                 was = await set_bit(D.LUTE_TABLET_SLOT_ADDR,
                                     D.LUTE_TABLET_SLOT_MASK, not assembled)
                 if was == assembled:
-                    logger.info(f"  [keyratio] lute line "
+                    dlog.info(f"  [keyratio] lute line "
                                 f"{'cleared (assembled)' if assembled else 'shown'}")
                 if assembled:
                     label = "Lute"
@@ -7940,7 +8142,7 @@ class FF1PSPContext(CommonContext):
                                        f"Levi Shards {count} of {shard_need}",
                                        D.LUTE_TABLET_SLOT_GLYPHS)
                             if not have:
-                                logger.info(f"  [keyratio] shard line shown "
+                                dlog.info(f"  [keyratio] shard line shown "
                                             f"({count} of {shard_need})")
                         else:
                             # Restore the native name so the minigame -- or a
@@ -7949,7 +8151,7 @@ class FF1PSPContext(CommonContext):
                             if have:
                                 await show(slots, 4, "Energy Chip",
                                            D.LUTE_TABLET_SLOT_GLYPHS)
-                                logger.info(
+                                dlog.info(
                                     "  [keyratio] shard line released "
                                     + ("(Levistone assembled -- its own menu "
                                        "entry takes over)" if assembled
@@ -8047,7 +8249,7 @@ class FF1PSPContext(CommonContext):
                 # offset table freezes the menu).
                 await self._write_keydesc(desc)
                 if not have:
-                    logger.info("  [keyratio] rune line shown "
+                    dlog.info("  [keyratio] rune line shown "
                                 + ("(Rune Key -- assembled)" if assembled
                                    else f"({count} of {rune_need})"))
             else:
@@ -8258,157 +8460,6 @@ class FF1PSPContext(CommonContext):
 
         await self._poll(0.25, "jobsprite", tick)
 
-    # --- battle sprite holder watch (read-only diagnostic) -----------------
-    # An object of class D.SPRITE_VTBL_BATTLE that never obtained a holder ends
-    # its construction by jumping through the holder's null first word -- the
-    # "CPU Jump to 00000000" / RA 0x088fba28 freeze at battle intro. Proven
-    # against the frozen crash 2026-08-31: of 19 live objects of that class, the
-    # single one whose holder was D.SPRITE_HOLDER_FALLBACK is byte-for-byte the
-    # s1 in the crash registers. See the ff1_data block for the disassembly.
-    #
-    # Two signals, neither of which writes anything:
-    #   supply  -- live/free holder nodes in the arena (LEADING: the crash is a
-    #              request that found none), one 128KB read, every tick
-    #   demand  -- objects of the fatal class and how many are starved
-    #              (CONFIRMING), a 4MB sweep, battle edges only
-
-    async def _sprite_guard_fired(self):
-        """How many times the on-disc null-holder guard has skipped the call, or
-        None if this disc predates the guard. Non-zero means a battle-intro
-        freeze WAS averted -- the bug is live and the mitigation is carrying it,
-        which is exactly the state that must never look like a clean session."""
-        mb = await self._find_mailbox(b"SNGD", "_sng_mb", "holder")
-        if mb is None:
-            return None
-        try:
-            return await self.psp.read_u32(mb + 4)
-        except Exception:
-            return None
-
-    async def _sprite_nodes(self):
-        """(in use, free) holder nodes, or None. One bounded read."""
-        sig = struct.pack("<III", D.SPRITE_NODE_SIZE, 0x0C, D.SPRITE_OBJ_MAGIC)
-        try:
-            buf = await self.psp.read_chunked(
-                D.SPRITE_NODE_LO, D.SPRITE_NODE_HI - D.SPRITE_NODE_LO)
-        except Exception:
-            return None
-        used = free = 0
-        j = buf.find(sig)
-        while j >= 0:
-            k = j + D.SPRITE_NODE_HDR_SKIP + D.SPRITE_NODE_USED_OFF
-            if k + 4 <= len(buf):
-                if struct.unpack_from("<I", buf, k)[0]:
-                    used += 1
-                else:
-                    free += 1
-            j = buf.find(sig, j + 1)
-        return used, free
-
-    async def _sprite_objects(self):
-        """(rows, starved) for every object of the fatal class.
-
-        Starved == holder is the static fallback, which is exactly the state
-        that crashes. Objects of D.SPRITE_VTBL_OTHER share the block size and
-        sit on the fallback harmlessly, so they are not counted.
-
-        Each row carries the fields that separate a built object from a
-        stillborn one, measured against the 2026-08-31 crash: a healthy object
-        has dims 0x100 x 0x20, an asset pointer and count 1; the starved one had
-        0 x 0, asset 0, count 0 and its tail still reading raw heap fill. `kind`
-        is the object's type argument, which is what the caller varies per row --
-        recording it is how a future bundle names WHICH sprite failed to
-        resolve, rather than just that one did."""
-        pat = struct.pack("<II", D.SPRITE_OBJ_SIZE, D.SPRITE_OBJ_MAGIC)
-        rows = []
-        starved = []
-        addr = D.SPRITE_HEAP_LO
-        while addr < D.SPRITE_HEAP_HI:
-            size = min(0x100000, D.SPRITE_HEAP_HI - addr)
-            try:
-                buf = await self.psp.read_chunked(addr, size)
-            except Exception:
-                buf = b""
-            j = buf.find(pat)
-            while j >= 0:
-                obj = addr + j + D.SPRITE_OBJ_HDR_SKIP
-                try:
-                    vt = await self.psp.read_u32(obj + D.SPRITE_OBJ_VTBL_OFF)
-                    hold = await self.psp.read_u32(
-                        obj + D.SPRITE_OBJ_HOLDER_OFF)
-                except Exception:
-                    vt = hold = None
-                if vt == D.SPRITE_VTBL_BATTLE:
-                    row = {"obj": f"0x{obj:08x}",
-                           "holder": f"0x{hold:08x}" if hold else None}
-                    for lbl, off in (("kind", D.SPRITE_OBJ_KIND_OFF),
-                                     ("w", D.SPRITE_OBJ_W_OFF),
-                                     ("h", D.SPRITE_OBJ_H_OFF),
-                                     ("asset", D.SPRITE_OBJ_ASSET_OFF),
-                                     ("count", D.SPRITE_OBJ_COUNT_OFF)):
-                        try:
-                            row[lbl] = await self.psp.read_u32(obj + off)
-                        except Exception:
-                            row[lbl] = None
-                    row["starved"] = hold == D.SPRITE_HOLDER_FALLBACK
-                    rows.append(row)
-                    if row["starved"]:
-                        starved.append(obj)
-                j = buf.find(pat, j + 1)
-            addr += size
-            await asyncio.sleep(0)          # yield between 1MB chunks
-        return rows, starved
-
-    async def _sprite_holder_loop(self):
-        """Log holder supply whenever it MOVES, plus a full object census on
-        every battle edge. A session then reads as either a sawtooth (nodes
-        returned between fights) or a staircase (leak), and the line that sits
-        on each step names what consumed them."""
-        was_battle = None
-        last = None
-        fired = 0
-        async def tick():
-            nonlocal was_battle, last, fired
-            if self.save_delta is None:
-                return
-            got = await self._sprite_nodes()
-            if got is None:
-                return
-            used, free = got
-            if got != last:
-                warn = ("  <-- NO FREE HOLDERS: the next party-sprite build "
-                        "jumps to 0") if not free else ""
-                logger.info(f"  [holder] nodes in use={used} free={free}{warn}")
-                last = got
-            hits = await self._sprite_guard_fired()
-            # only an INCREASE is a real skip: the counter can be reset to 0 by
-            # hand to re-arm the forced-skip self-test, and announcing that as a
-            # guard hit would put a false positive in the evidence trail
-            if hits is not None and hits > fired:
-                logger.info(f"  [holder] NULL-HOLDER GUARD FIRED -- skips this "
-                            f"boot: {hits} (was {fired}). A battle-intro freeze "
-                            f"was averted; a sprite is missing instead.")
-                fired = hits
-            elif hits is not None:
-                fired = hits          # re-armed/reset: track it, do not announce
-            now = await self._in_battle()
-            if now == was_battle:
-                return
-            was_battle = now
-            rows, starved = await self._sprite_objects()
-            note = ""
-            if starved:
-                bad = [r for r in rows if r["starved"]]
-                note = ("  <-- STARVED: " + ", ".join(
-                    f"{r['obj']} kind={r['kind']} {r['w']}x{r['h']} "
-                    f"asset=0x{(r['asset'] or 0):08x}" for r in bad[:3]))
-            kinds = sorted({r["kind"] for r in rows if not r["starved"]})
-            logger.info(f"  [holder] battle {'START' if now else 'END  '} "
-                        f"nodes={used}/{used + free} sprite objects={len(rows)} "
-                        f"starved={len(starved)} guard_skips={fired} "
-                        f"built kinds={kinds}{note}")
-        await self._poll(0.5, "holder", tick)
-
     async def _in_battle(self):
         """True iff the player is NOT in normal field control right now.
 
@@ -8506,7 +8557,7 @@ class FF1PSPContext(CommonContext):
             except Exception as e:
                 self._battlemsg_bank = None      # stale cache -> rescan
                 if attempt:
-                    logger.info(f"  [steal-box] author skipped: {e!r}")
+                    dlog.info(f"  [steal-box] author skipped: {e!r}")
 
     async def _steal_box_author_once(self, prefix):
         base = await self._find_battlemsg_bank()
@@ -8606,7 +8657,7 @@ class FF1PSPContext(CommonContext):
                     if cur and cur[0] != D.SPELL_SLOTS_MARKER_VALUE:
                         await self.psp.write(
                             a, bytes([D.SPELL_SLOTS_MARKER_VALUE]))
-                        logger.info("  [slot_magic] save-file marker stamped")
+                        dlog.info("  [slot_magic] save-file marker stamped")
             except Exception:
                 pass
             # CANARY: the v193 home (save+0x808..0x83B) was chosen because it
@@ -8647,7 +8698,7 @@ class FF1PSPContext(CommonContext):
                 if cur == body:
                     continue                        # already ours
                 await self.psp.write(base + off8, body)
-                logger.info("  [slotbox] level-up line -> "
+                dlog.info("  [slotbox] level-up line -> "
                             f"'{self._SLOTBOX_TEXT}' @{base + off8:#x}")
             except Exception:
                 self._battlemsg_bank = None         # stale cache -> rescan
@@ -8819,7 +8870,7 @@ class FF1PSPContext(CommonContext):
                         # Every thief is out of action -- no steal possible this
                         # battle; surface it so the reduced/zero chance isn't a
                         # silent mystery.
-                        logger.info(f"  [thief-steal] no active thief"
+                        dlog.info(f"  [thief-steal] no active thief"
                                     f"{downed_note} -- no steal this battle")
                     handled = True
                     continue
@@ -8884,7 +8935,7 @@ class FF1PSPContext(CommonContext):
                 luck_hit = random.random() < luck_p
                 if not (agi_hit or luck_hit):
                     handled = True
-                    logger.info(f"  [thief-steal] {agi_note}, "
+                    dlog.info(f"  [thief-steal] {agi_note}, "
                                 f"LCK={thief_lck}{lck_note} (p={luck_p:.3f}) miss "
                                 f"({why}){downed_note}")
                     continue
@@ -9002,11 +9053,11 @@ class FF1PSPContext(CommonContext):
                     # Stealth Ninja Scroll. Restored when the battle ends.
                     steal_prefix = self._steal_box_prefix(classes)
                     await self._steal_box_author(steal_prefix)
-                    logger.info(f"  [thief-steal] {agi_note}, LCK={thief_lck}{lck_note} "
+                    dlog.info(f"  [thief-steal] {agi_note}, LCK={thief_lck}{lck_note} "
                                 f"HIT ({why}) -> {steal_prefix}{name}! "
                                 f"(drop slot{wrote} + custom box){downed_note}")
                     vb = await self.psp.read(dbase + wrote * 3, 3)
-                    logger.info(f"  [thief-steal] drop slot{wrote} verify = "
+                    dlog.info(f"  [thief-steal] drop slot{wrote} verify = "
                                 f"{vb[0]:02x} {vb[1]:02x} {vb[2]:02x} @0x{dbase + wrote * 3:08x}")
                     # Ground truth: what the game ACTUALLY put in the bag. The
                     # drop-record write is only a REQUEST -- the victory routine
@@ -9017,10 +9068,10 @@ class FF1PSPContext(CommonContext):
                     asyncio.create_task(self._steal_verify_grant(cat, iid, name))
                 else:
                     self._steal_drop = None
-                    logger.info(f"  [thief-steal] {agi_note}, LCK={thief_lck}{lck_note} "
+                    dlog.info(f"  [thief-steal] {agi_note}, LCK={thief_lck}{lck_note} "
                                 f"HIT ({why}) but no free drop slot -> skipped")
             except Exception as e:
-                logger.info(f"  [thief_steal_loop] {e!r} (will retry this battle)")
+                dlog.info(f"  [thief_steal_loop] {e!r} (will retry this battle)")
             await asyncio.sleep(0.5)
 
     async def _steal_drop_slot(self, bb, lst):
@@ -9087,12 +9138,12 @@ class FF1PSPContext(CommonContext):
         unclaimable = [i for i in free if risk[i] == 0]
         if unclaimable:
             pick = unclaimable[-1]
-            logger.info(f"  [thief-steal] no empty enemy row -- drop slot{pick} "
+            dlog.info(f"  [thief-steal] no empty enemy row -- drop slot{pick} "
                         f"(species {spec[pick]:02x} has no natural drop, so its "
                         f"slot is never stamped)")
             return pick
         pick = min(free, key=lambda i: (risk[i], -i))
-        logger.info(f"  [thief-steal] no empty enemy row and every free row can "
+        dlog.info(f"  [thief-steal] no empty enemy row and every free row can "
                     f"drop -- slot{pick} chosen as the least risky "
                     f"({risk[pick]}% chance its own drop replaces the steal; "
                     f"species {' '.join(f'{s:02x}' for s in spec)})")
@@ -9189,10 +9240,10 @@ class FF1PSPContext(CommonContext):
             if paid0 is not None and paid1 is not None and not ok:
                 tail += (f" [gil {paid1[0] - paid0[0]:+d}, "
                          f"party exp {paid1[1] - paid0[1]:+d}]")
-            logger.info(f"  [thief-steal] grant check: asked for {name} "
+            dlog.info(f"  [thief-steal] grant check: asked for {name} "
                         f"({cat},{iid}) -> inventory gained {got}" + tail)
         except Exception as e:
-            logger.info(f"  [thief-steal] grant check failed: {e!r}")
+            dlog.info(f"  [thief-steal] grant check failed: {e!r}")
 
     async def _battle_xp(self, bb):
         """Total vanilla XP this battle awards: decode the resolved-encounter
@@ -9344,7 +9395,7 @@ class FF1PSPContext(CommonContext):
                     dropped = max(0, pending - IP.SOS_RING)
                     pending = min(pending, IP.SOS_RING)
                     if dropped:
-                        logger.info(f"  [sos] {dropped} miss report(s) overran "
+                        dlog.info(f"  [sos] {dropped} miss report(s) overran "
                                     f"the ring and were dropped")
                     for k in range(pending):
                         slot = (wr - pending + k) % IP.SOS_RING
@@ -9352,7 +9403,7 @@ class FF1PSPContext(CommonContext):
                         await self._sos_report(ring[off:off + 4])
                     last_seq = wr
             except Exception as e:
-                logger.debug(f"  [sos] {e!r}")
+                dlog.debug(f"  [sos] {e!r}")
             await asyncio.sleep(0.2)
 
     async def _sos_report(self, rep):
@@ -9396,7 +9447,7 @@ class FF1PSPContext(CommonContext):
             # Say SOMETHING rather than vanishing: a silent return here is how the
             # first build hid a dead loop for a whole playtest. If this line shows
             # up, the unit -> monster walk is wrong, not the cave.
-            logger.info(f"  ?% {self._SOS_SPELLS[spell_id][0]} chance on enemy "
+            dlog.info(f"  ?% {self._SOS_SPELLS[spell_id][0]} chance on enemy "
                         f"unit {unit_raw - 4} (unresolved; slots={list(ids)} "
                         f"counts={list(cnts)})")
             return
@@ -9407,7 +9458,7 @@ class FF1PSPContext(CommonContext):
         pct = self._sos_chance(spell_id, mon_id, intel, gated, is_boss)
         name = self._SOS_SPELLS[spell_id][0]
         mon = MON_NAME.get(mon_id, f"monster {mon_id:#04x}")
-        logger.info(f"  {pct:.0f}% {name} chance on {mon}")
+        dlog.info(f"  {pct:.0f}% {name} chance on {mon}")
 
     # ---------------- job-scroll boosts (Red Wizard / Master / WW+BW mailbox) --------
     # Client legs of job_scroll_boosts (the WW/BW legs are on-disc caves gated by
@@ -9483,7 +9534,7 @@ class FF1PSPContext(CommonContext):
         while i >= 0:
             if i % 4 == 0 and (verify is None or verify(buf, i)):
                 setattr(self, attr, IP.BAKE_TAG_ADDR + i)
-                logger.info(f"  [{tag}] mailbox @0x{getattr(self, attr):08x}")
+                dlog.info(f"  [{tag}] mailbox @0x{getattr(self, attr):08x}")
                 return getattr(self, attr)
             i = buf.find(magic, i + 1)
         # An ENABLED feature whose mailbox never turns up is otherwise invisible:
@@ -9492,7 +9543,7 @@ class FF1PSPContext(CommonContext):
         n = self._mb_miss.get(tag, 0) + 1
         self._mb_miss[tag] = n
         if n == self._MB_MISS_WARN:
-            logger.warning(f"  [{tag}] mailbox NOT found in the cave segment "
+            dlog.warning(f"  [{tag}] mailbox NOT found in the cave segment "
                            f"({self._MB_SCAN_LEN:#x} bytes scanned) -- that "
                            f"feature's on-disc half will do nothing")
         return None
@@ -9533,7 +9584,7 @@ class FF1PSPContext(CommonContext):
                                            soft_ids=soft_ids,
                                            monster_mult=self.monster_mult)
         except Exception as e:
-            logger.info(f"  [magic_power] table build failed: {e!r}")
+            dlog.info(f"  [magic_power] table build failed: {e!r}")
             return False
         if tables == self._mp_tables:
             return True
@@ -9547,7 +9598,7 @@ class FF1PSPContext(CommonContext):
                 return False        # pre-v228 bake, or tail not reserved
             await self.psp.write(base, eff + van + shr)
         except Exception as e:
-            logger.info(f"  [magic_power] table write failed: {e!r}")
+            dlog.info(f"  [magic_power] table write failed: {e!r}")
             return False
         self._mp_tables = tables
         return True
@@ -9646,7 +9697,7 @@ class FF1PSPContext(CommonContext):
             hdr = await self.psp.read(oti, 8)
             want = (PB.DEF_COUNT_NEW, 4 + 4 * PB.DEF_COUNT_NEW)
             if struct.unpack_from("<II", hdr)[:2] != want:
-                logger.info(f"  [steal-icon] resident OTI header mismatch "
+                dlog.info(f"  [steal-icon] resident OTI header mismatch "
                             f"(want {want}) -- cue skipped")
                 return None
             return oti
@@ -9724,13 +9775,13 @@ class FF1PSPContext(CommonContext):
             # a NEW battle relocated the context -> our bb is stale
             cur = await self.psp.read_u32(self.sa(D.BATTLE_ACTOR_OBJ_PTR_SA))
             if cur != bb:
-                logger.info(f"  [steal-icon] fade: battle base moved 0x{bb:08x}"
+                dlog.info(f"  [steal-icon] fade: battle base moved 0x{bb:08x}"
                             f" -> 0x{cur:08x} -- drop rewrite skipped")
                 return False
             # the map changed under us -> the block was torn down
             mid = await self.psp.read_u32(self.sa(D.FIELD_MAP_ID_SA))
             if map0 is not None and mid != map0:
-                logger.info(f"  [steal-icon] fade: map changed {map0} -> {mid}"
+                dlog.info(f"  [steal-icon] fade: map changed {map0} -> {mid}"
                             f" -- drop rewrite skipped")
                 return False
             # torn-down / unmapped memory reads back all-0xff. Probe the
@@ -9742,12 +9793,12 @@ class FF1PSPContext(CommonContext):
                 bb + self._SLOT_BASE0
                 + self._STEAL_SLOT_SCAN_LO * self._SLOT_STRIDE, 64)
             if probe.count(0xFF) == len(probe):
-                logger.info(f"  [steal-icon] fade: block at 0x{bb:08x} reads "
+                dlog.info(f"  [steal-icon] fade: block at 0x{bb:08x} reads "
                             f"all-0xff (torn down) -- drop rewrite skipped")
                 return False
             return True
         except Exception as e:
-            logger.info(f"  [steal-icon] fade: liveness check failed ({e!r})"
+            dlog.info(f"  [steal-icon] fade: liveness check failed ({e!r})"
                         f" -- drop rewrite skipped")
             return False
 
@@ -9763,7 +9814,7 @@ class FF1PSPContext(CommonContext):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.info(f"  [steal-icon] fade FAILED: {e!r} -- def borrow left "
+            dlog.info(f"  [steal-icon] fade FAILED: {e!r} -- def borrow left "
                         f"to the battle-end restore")
 
     async def _steal_icon_fadeout_inner(self, mb, bb):
@@ -9823,7 +9874,7 @@ class FF1PSPContext(CommonContext):
                     await self.psp.write(
                         base + rec + self._STEAL_SLOT_ACTIVE_OFF, b"\x00")
                     cleared_n += 1
-                    logger.info(f"  [steal-icon] fade: cleared slot "
+                    dlog.info(f"  [steal-icon] fade: cleared slot "
                                 f"0x{lo + i:02x} (bb=0x{bb:08x})")
             # NEVER touch 0x68CA/0x68CB/0x68C3. They are a free-batch descriptor
             # -- free_range(0x888703C) clears `active` for count(0x68CA) slots
@@ -9838,12 +9889,8 @@ class FF1PSPContext(CommonContext):
             # descriptor itself; this task only clears our icon slots by KIND.
             if cleared_n:
                 cnt = (await self.psp.read(bb + 0x68CA, 1))[0]
-                logger.info(f"  [steal-icon] fade: cleared {cleared_n} slot(s); "
+                dlog.info(f"  [steal-icon] fade: cleared {cleared_n} slot(s); "
                             f"batch count 0x68ca reads {cnt} (never written)")
-                got = await self._sprite_nodes()
-                if got is not None:
-                    logger.info(f"  [holder] cue faded  nodes in use={got[0]} "
-                                f"free={got[1]}")
             if not cleared_n:
                 # Diagnostic: the icon is somewhere else -- dump every slot's
                 # kind byte so the real landing zone can be pinned from the log.
@@ -9851,7 +9898,7 @@ class FF1PSPContext(CommonContext):
                                            0x51 * self._SLOT_STRIDE)
                 kinds = [dump[i * self._SLOT_STRIDE +
                               self._STEAL_SLOT_KIND_OFF] for i in range(0x51)]
-                logger.info(f"  [steal-icon] fade: NOTHING in 0x{lo:02x}..0x{hi:02x}; "
+                dlog.info(f"  [steal-icon] fade: NOTHING in 0x{lo:02x}..0x{hi:02x}; "
                             f"kinds[0..0x50] = "
                             + " ".join(f"{k:02x}" for k in kinds))
         finally:
@@ -9865,12 +9912,12 @@ class FF1PSPContext(CommonContext):
                 # victory writer cannot claim (_steal_drop_slot).
                 dbase = bb + D.BATTLE_DROP_LIST_OFF
                 lst = await self.psp.read(dbase, 27)
-                logger.info("  [steal-icon] fade: drop list now = "
+                dlog.info("  [steal-icon] fade: drop list now = "
                             + " ".join(f"{lst[i*3]:02x}{lst[i*3+1]:02x}"
                                        for i in range(9)))
                 drop = getattr(self, "_steal_drop", None)
                 if drop is not None and pool_dead:
-                    logger.info(f"  [steal-icon] fade: pool at 0x{bb:08x} read "
+                    dlog.info(f"  [steal-icon] fade: pool at 0x{bb:08x} read "
                                 f"all-0xff in this task's scan -- drop rewrite "
                                 f"skipped (dead battle block)")
                 if (drop is not None and pool_dead is False
@@ -9884,7 +9931,7 @@ class FF1PSPContext(CommonContext):
                     free = await self._steal_drop_slot(bb, lst)
                     if not present and free is not None:
                         await self.psp.write(dbase + free * 3, drop)
-                        logger.info(f"  [steal-icon] fade: steal entry was wiped "
+                        dlog.info(f"  [steal-icon] fade: steal entry was wiped "
                                     f"by battle-start init -- rewrote to slot"
                                     f"{free} ({drop[0]:02x} {drop[1]:02x} "
                                     f"{drop[2]:02x})")
@@ -9980,10 +10027,6 @@ class FF1PSPContext(CommonContext):
                                                 random.choice(units)]))
             await self.psp.write(mb + 8, struct.pack("<H", se))
             await self.psp.write(mb + 4, bytes([1]))
-            got = await self._sprite_nodes()
-            if got is not None:
-                logger.info(f"  [holder] cue armed  nodes in use={got[0]} "
-                            f"free={got[1]}")
             # Fade the cue out after a couple seconds and hand def 19 back, so a
             # red insta-kill MISS!! later in the fight renders correctly (they
             # share def 19). Battle-end restore is the backstop if this doesn't
@@ -10189,7 +10232,7 @@ class FF1PSPContext(CommonContext):
                                                  na.to_bytes(2, "little"))
                             c["atkbonus"], c["atk"] = nb, na
                             atk_ours[row] = acc
-                            logger.info(
+                            dlog.info(
                                 f"  [scrolls] Master row{row}: restored +{back} "
                                 f"attack after KO (atkbonus {nb}, atk {na}, "
                                 f"acc {acc})")
@@ -10283,7 +10326,7 @@ class FF1PSPContext(CommonContext):
                         if gain_h > 0 or heal_h > 0:
                             mode = ("CAPPED" if atk_capped else
                                     "HPFULL" if hp_full else "growing")
-                            logger.info(
+                            dlog.info(
                                 f"  [scrolls] Master row{row}: took {dhp} "
                                 f"-> +{gain_h} maxHP, +{heal_h} HP "
                                 f"({mode} atk {matk[row]}/{IP.master_atk_cap(lvl)}"
@@ -10291,7 +10334,7 @@ class FF1PSPContext(CommonContext):
                                 f"mine hp+{hp_gain[row]}; field hp+{c['hpbonus']})")
                     prev[row] = c
             except Exception as e:
-                logger.info(f"  [scroll_battle_loop] {e!r}")
+                dlog.info(f"  [scroll_battle_loop] {e!r}")
                 prev = None
                 await asyncio.sleep(1.0)
 
@@ -10386,7 +10429,7 @@ class FF1PSPContext(CommonContext):
                                 await self.psp.write(
                                     self.sa(D.party_addr_sa(r, D.P_HP)),
                                     new_hp.to_bytes(2, "little"))
-                                logger.info(f"  [scrolls] Ninja floor row{r} "
+                                dlog.info(f"  [scrolls] Ninja floor row{r} "
                                             f"(x{ninjas}): {dmg} dmg -> "
                                             f"+{heal} HP back")
                                 hp[r] = new_hp
@@ -10403,7 +10446,7 @@ class FF1PSPContext(CommonContext):
                                 if spent[lv]:
                                     await self.psp.write(
                                         sa + lv, bytes([spent[lv] - 1]))
-                                    logger.info(
+                                    dlog.info(
                                         f"  [scrolls] Ninja floor row{r} "
                                         f"(x{ninjas}): +1 L{lv + 1} spell slot")
                                     break
@@ -10413,11 +10456,11 @@ class FF1PSPContext(CommonContext):
                                 await self.psp.write(
                                     self.sa(D.party_addr_sa(r, D.P_MP)),
                                     new_mp.to_bytes(2, "little"))
-                                logger.info(f"  [scrolls] Ninja floor row{r} "
+                                dlog.info(f"  [scrolls] Ninja floor row{r} "
                                             f"(x{ninjas}): +{new_mp - mp[r]} MP")
                 prev = hp
             except Exception as e:
-                logger.info(f"  [floor_damage_loop] {e!r}")
+                dlog.info(f"  [floor_damage_loop] {e!r}")
                 prev = None
                 await asyncio.sleep(1.0)
 
@@ -10461,7 +10504,7 @@ class FF1PSPContext(CommonContext):
                     if not (st & D.P_STATUS_KO):
                         await self.psp.write(self.sa(D.status_addr_sa(row)),
                                              bytes([st | D.P_STATUS_KO]))
-                        logger.info(f"  [ko_sync] row{row} was 0 HP without the KO "
+                        dlog.info(f"  [ko_sync] row{row} was 0 HP without the KO "
                                     "state (blood magic?) -- marked KO")
             except Exception:
                 # transient read failures (save block relocating) are expected
@@ -10665,7 +10708,7 @@ class FF1PSPContext(CommonContext):
                                 if r not in hold), None)
                     if tgt is not None:
                         await self._member_swap_rows(0, tgt)
-                        logger.info("  [party] leader normalization: moved the "
+                        dlog.info("  [party] leader normalization: moved the "
                                     f"missing member in slot 1 down to slot "
                                     f"{tgt + 1}")
                         continue        # rows moved; recompute next tick
@@ -10726,7 +10769,7 @@ class FF1PSPContext(CommonContext):
                         announced.add(pr)
                         jn = (D.JOB_NAMES[job]
                               if 0 <= job < len(D.JOB_NAMES) else f"job {job}")
-                        logger.info(
+                        dlog.info(
                             f"  [party] {jn} JOINS the party (member "
                             f"{pr + 1})! Lv {lvl} lands at the next "
                             "battle victory")
@@ -10910,7 +10953,7 @@ class FF1PSPContext(CommonContext):
                 self._field_all_dead = False   # a living member exists again
                 self._dl_limbo = True     # hold the send-guard: the game over that
                 self._dl_guard = True     # follows is the received death, not ours
-                logger.info(f"  [death_link] battle entered with the whole party "
+                dlog.info(f"  [death_link] battle entered with the whole party "
                             f"dead (no actor can act) -- revived row{row} at 1 HP "
                             "so the game can resolve the death natively")
             except Exception:
@@ -11077,11 +11120,11 @@ class FF1PSPContext(CommonContext):
             # again is the 5-sent-9-queued double count, not a second trap.
             return
         if kind in self._TRAP_RETIRED:
-            logger.info(f"  [trap] {self._TRAP_RETIRED[kind]} received -- that "
+            dlog.info(f"  [trap] {self._TRAP_RETIRED[kind]} received -- that "
                         f"trap has been retired; ignoring")
             return
         if kind not in self._TRAP_EFFECT:
-            logger.info(f"  [trap] unknown trap kind {kind} -- ignoring")
+            dlog.info(f"  [trap] unknown trap kind {kind} -- ignoring")
             return
         name = self._TRAP_NAMES.get(kind, f"Trap {kind}")
         self._trap_queue.append(TS.entry(kind, idx))
@@ -11329,7 +11372,7 @@ class FF1PSPContext(CommonContext):
             await self.send_msgs([{"cmd": "Get", "keys": [key]},
                                   {"cmd": "SetNotify", "keys": [key]}])
         except Exception as e:
-            logger.info(f"  [trap] could not read pending traps ({e!r}) -- "
+            dlog.info(f"  [trap] could not read pending traps ({e!r}) -- "
                         f"traps received before this session may be lost")
 
     def _trap_apply_stored(self, value):
@@ -11352,7 +11395,7 @@ class FF1PSPContext(CommonContext):
                 self._trap_seen_idx.add(int(e["idx"]))
         if restored:
             self._trap_queue += restored
-            logger.info(f"  [trap] {len(restored)} trap(s) received in an "
+            dlog.info(f"  [trap] {len(restored)} trap(s) received in an "
                         f"earlier session are still armed")
             # Restoring does not go through _trap_store_save (the stored value
             # is what we just read), so the overlay needs telling directly or a
@@ -11380,7 +11423,7 @@ class FF1PSPContext(CommonContext):
                     "default": [], "want_reply": False,
                     "operations": [{"operation": "replace", "value": state}]}])
             except Exception as e:
-                logger.info(f"  [trap] could not persist pending traps ({e!r})")
+                dlog.info(f"  [trap] could not persist pending traps ({e!r})")
         try:
             asyncio.create_task(push())
         except RuntimeError:
@@ -11458,12 +11501,12 @@ class FF1PSPContext(CommonContext):
                     # name-bank build style flipped (re-layout <-> fixed-budget
                     # fallback) between connect and refresh; sizes differ, so
                     # in-place mutation is impossible -- keep the stale name.
-                    logger.info(f"  [shop] {np.name}: refresh size mismatch, "
+                    dlog.info(f"  [shop] {np.name}: refresh size mismatch, "
                                 f"kept previous")
                     continue
                 await self._patch_mutate(p, np.patched)
         except Exception as e:
-            logger.info(f"  [shop] bank refresh failed: {e!r}")
+            dlog.info(f"  [shop] bank refresh failed: {e!r}")
 
     async def _hint_purchase(self, patch, shop, k, qty, price):
         """Consume a bought HINT row and return the gil refund owed.
@@ -11481,12 +11524,12 @@ class FF1PSPContext(CommonContext):
         if self._hint_done(shop, k):
             # Stale shop menu (the row was already gone) or a tile that emptied
             # while the list was open -- nothing left to reveal, refund the lot.
-            logger.info(f"  [hint] shop {shop} hint {k} already spent -- "
+            dlog.info(f"  [hint] shop {shop} hint {k} already spent -- "
                         f"refunding {qty * price}")
             return qty * price
         wanted = self._hint_unhinted(shop, k)
         if not wanted:
-            logger.info(f"  [hint] {label}: nothing left to reveal -- "
+            dlog.info(f"  [hint] {label}: nothing left to reveal -- "
                         f"refunding {qty * price}")
             self._hint_bought.add((shop, k))
             await self._shop_render(patch, shop)
@@ -11495,7 +11538,7 @@ class FF1PSPContext(CommonContext):
             await self.send_msgs([{"cmd": "LocationScouts",
                                    "locations": wanted, "create_as_hint": 2}])
         except Exception as e:
-            logger.info(f"  [hint] {label}: hint send failed ({e!r}) -- "
+            dlog.info(f"  [hint] {label}: hint send failed ({e!r}) -- "
                         f"refunding {qty * price}")
             return qty * price
         self._hint_bought.add((shop, k))
@@ -11505,7 +11548,7 @@ class FF1PSPContext(CommonContext):
         # the placeholder item (see SOLD_NAME).
         self._hint_sold_recent.add((shop, k))
         await self._hint_store_add(shop, k)
-        logger.info(f"  [hint] bought {HINTS.shelf_name(label)} for {price} gil "
+        dlog.info(f"  [hint] bought {HINTS.shelf_name(label)} for {price} gil "
                     f"-> hinted {len(wanted)} location(s) in {label}")
         # qty copies of ONE row: one hint, the rest refunded.
         await self._shop_render(patch, shop)
@@ -11581,7 +11624,7 @@ class FF1PSPContext(CommonContext):
             names = sorted(D.WEAPONS.get(g, f"w{g}") if c == D.CAT_WEAPON
                            else D.ARMOR.get(g, f"a{g}")
                            for c, g in restore & self._shop_equip_gids)
-            logger.info("  [shop] placeholder equip masks: "
+            dlog.info("  [shop] placeholder equip masks: "
                         + (f"restored {', '.join(names)}" if names
                            else "all zeroed (dupe guard)"))
 
@@ -11631,7 +11674,7 @@ class FF1PSPContext(CommonContext):
                 changed = True
         self._town_prices_stamped = self._cur_town
         if changed:
-            logger.info(f"  [shop] AP row prices stamped for town "
+            dlog.info(f"  [shop] AP row prices stamped for town "
                         f"{self._cur_town}")
 
     async def _in_bonus_dungeon(self):
@@ -11687,7 +11730,7 @@ class FF1PSPContext(CommonContext):
                 cur = await snap.rd(asa)
                 if not (cur & mask):
                     await snap.wr(asa, cur | mask)
-                    logger.info(f"  [veh-loan] loaned {label} for the bonus "
+                    dlog.info(f"  [veh-loan] loaned {label} for the bonus "
                                 f"dungeon ({addr:#x} |= {mask:#04x}) -- "
                                 f"returned on the overworld")
                 # Record the debt even when the bit was ALREADY set. A client
@@ -11709,14 +11752,14 @@ class FF1PSPContext(CommonContext):
         for row in sorted(self._veh_loan, key=lambda r: (r[0], r[1])):
             addr, mask, kid, label = row
             if self._key_won(kid):
-                logger.info(f"  [veh-loan] {label} kept -- key {kid} won while "
+                dlog.info(f"  [veh-loan] {label} kept -- key {kid} won while "
                             f"the loan was out")
                 continue
             asa = self.sa(addr)
             cur = await snap.rd(asa)
             if cur & mask:
                 await snap.wr(asa, cur & ~mask)
-                logger.info(f"  [veh-loan] returned {label} "
+                dlog.info(f"  [veh-loan] returned {label} "
                             f"({addr:#x} &= ~{mask:#04x})")
         self._veh_loan.clear()
 
@@ -11915,7 +11958,7 @@ class FF1PSPContext(CommonContext):
                                  in RANDO._DEF_IDX.items() if idx == sid), None)
                 if town is not None and town != self._cur_town:
                     self._cur_town = town
-                    logger.info(f"  [shop] town latch -> {town}")
+                    dlog.info(f"  [shop] town latch -> {town}")
                     await self._shop_refresh_banks()
                 # Stamp (or re-try, if the boot patches were not built at the
                 # edge) the standing town's row prices; no-op once stamped.
@@ -11933,7 +11976,7 @@ class FF1PSPContext(CommonContext):
                     self._shop_sold_recent.clear()
                     self._hint_sold_recent.clear()
                 await self._shop_refresh_banks()
-                logger.info("  [shop] shop item names "
+                dlog.info("  [shop] shop item names "
                             + ("held at vanilla" if want_vanilla
                                else "AP-authored (shop interior)"))
                 # entering/leaving town can load a bank copy the boot scan never
@@ -11981,7 +12024,7 @@ class FF1PSPContext(CommonContext):
                 state["head"] = head
                 return
             if head - last > IP.BUYMB_RING_ENTRIES:
-                logger.warning(f"  [shop] buy mailbox overflow ({head - last} "
+                dlog.warning(f"  [shop] buy mailbox overflow ({head - last} "
                                f"buys since last poll) -- oldest "
                                f"{head - last - IP.BUYMB_RING_ENTRIES} lost")
                 last = head - IP.BUYMB_RING_ENTRIES
@@ -12033,7 +12076,7 @@ class FF1PSPContext(CommonContext):
                     # Stale shop menu: the row was already bought and removed,
                     # but the open list still offered it. Refund the lot.
                     refund = qty * price
-                    logger.info(f"  [shop] shop {s} offer {k} already sold -- "
+                    dlog.info(f"  [shop] shop {s} offer {k} already sold -- "
                                 f"refunding {refund}")
                 else:
                     lid = ID.shop_loc_id(s, k)
@@ -12049,7 +12092,7 @@ class FF1PSPContext(CommonContext):
                     # charged exactly qty x this row's price -- no settling.
                     refund = (qty - 1) * price
                     bought = self.shop_desc.get((s, k), f"offer {k}")
-                    logger.info(f"  [shop] purchased {bought} -> 1 check sent"
+                    dlog.info(f"  [shop] purchased {bought} -> 1 check sent"
                                 + (f" (gil adjustment {refund:+d})" if refund else ""))
                     await self._shop_render(patch, s)
                     # that row's id has no buyable dupe left to guard
@@ -12178,7 +12221,7 @@ class FF1PSPContext(CommonContext):
             # saw it, then opened the nearby STATIC boss chest, reported the ring
             # as a lost item -- it was never opened at all (live 2026-08-08,
             # Prime). Say plainly that this is the name the next chest will show.
-            logger.info(f"  [bonus_dyn] next dynamic chest here will contain "
+            dlog.info(f"  [bonus_dyn] next dynamic chest here will contain "
                         f"{pair[0]} {pair[1]} (dungeon {dg}, chest {nxt + 1}) "
                         f"-- not received until you open it [slot {slot}]")
         return self._remote_base + len(self._remote_names) + slot
@@ -12259,7 +12302,7 @@ class FF1PSPContext(CommonContext):
                     dg = D.bonus_mapid_band(mid)   # special/ambiguous table
                 if dg is not None:
                     latched = dg
-                    logger.info(f"  [bonus_dyn] dungeon resolved: dg={dg} "
+                    dlog.info(f"  [bonus_dyn] dungeon resolved: dg={dg} "
                                 f"(band votes {votes}, live mapid 0x{mid:02x})")
             dbg["latched"] = latched
             return latched
@@ -12300,7 +12343,7 @@ class FF1PSPContext(CommonContext):
                 hits = diag[0]
                 if last_hits is not None and hits != last_hits:
                     li = await self.psp.read(mb + 40, 2)
-                    logger.info(f"  [bonus_dyn] cave hits {hits} "
+                    dlog.info(f"  [bonus_dyn] cave hits {hits} "
                                 f"(last idx {li[0] | li[1] << 8})")
                 last_hits = hits
                 # 1) consume stripped-chest ring entries (0xFFFF = empty slot)
@@ -12334,7 +12377,7 @@ class FF1PSPContext(CommonContext):
                         # like "the cave never fired": say it once, with the
                         # inputs that decide it.
                         dropped_warned = True
-                        logger.warning(
+                        dlog.warning(
                             f"  [bonus_dyn] stripped chest dropped with no "
                             f"check (dungeon {dg}, caps "
                             f"{dict(self.bonus_dyn_caps)}) -- that chest gave "
@@ -12352,7 +12395,7 @@ class FF1PSPContext(CommonContext):
                 await self.psp.write(mb + 4, bytes([remain]))
                 await self.psp.write(mb + 42, struct.pack("<H", sid))
                 if (remain > 0) != (armed_remain > 0):
-                    logger.info("  [bonus_dyn] mailbox "
+                    dlog.info("  [bonus_dyn] mailbox "
                                 + (f"armed (remaining {remain})" if remain
                                    else "disarmed"))
                 armed_remain = remain
@@ -12380,18 +12423,18 @@ class FF1PSPContext(CommonContext):
                         if dg is not None and cap and snap[5] >= cap:
                             # normal end-state, NOT a fault: every AP check for
                             # this dungeon is done, so further chests are vanilla
-                            logger.info(
+                            dlog.info(
                                 f"  [bonus_dyn] dungeon {dg} cap reached "
                                 f"({cap}/{cap}) -- further chests stay vanilla")
                         else:
-                            logger.info(
+                            dlog.info(
                                 f"  [bonus_dyn] not arming: map={snap[0]} "
                                 f"mapid={snap[1]} votes={snap[2]} "
                                 f"latch={snap[3]} dg={snap[4]} "
                                 f"checked={snap[5]} "
                                 f"caps={dict(self.bonus_dyn_caps)}")
             except Exception as e:
-                logger.info(f"  [bonus_dyn] {e!r} -- retrying next tick")
+                dlog.info(f"  [bonus_dyn] {e!r} -- retrying next tick")
 
     async def _bonus_crystal_loop(self):
         """bonus_dungeon_crystals: credit a dungeon's Crystal when its Soul-of-Chaos
@@ -12423,7 +12466,7 @@ class FF1PSPContext(CommonContext):
                 # new game and skip the assert (the byte is already 0 there).
                 if await self._newgame_block_live():
                     if beaten:
-                        logger.info("  [bonus_crystal] fresh new game -> clearing "
+                        dlog.info("  [bonus_crystal] fresh new game -> clearing "
                                     "carried crystal set")
                     beaten = set()
                     latched = None
@@ -12489,7 +12532,7 @@ class FF1PSPContext(CommonContext):
                                           | (buf[o + D.BU_STATUS + 1] << 8))
                                 if hp == 0 or (status & 0x03):
                                     beaten.add(dg)
-                                    logger.info(
+                                    dlog.info(
                                         f"  [bonus_crystal] dungeon {dg} superboss "
                                         f"(species 0x{sp:02x}) down -> crystal lit")
                                     break
@@ -12509,10 +12552,10 @@ class FF1PSPContext(CommonContext):
                 if want != cur:
                     await self.psp.write(
                         self.sa(D.BONUS_CRYSTAL_SHADOW_ADDR), bytes([want]))
-                    logger.info(f"  [bonus_crystal] shadow bits {sorted(beaten)} "
+                    dlog.info(f"  [bonus_crystal] shadow bits {sorted(beaten)} "
                                 f"(0x{cur:02x}->0x{want:02x})")
             except Exception as e:
-                logger.info(f"  [bonus_crystal] {e!r} -- retrying next tick")
+                dlog.info(f"  [bonus_crystal] {e!r} -- retrying next tick")
 
     async def _crystal_count_loop(self):
         """READ-ONLY: keep self._crystals_beaten equal to the crystals the game
@@ -12550,7 +12593,7 @@ class FF1PSPContext(CommonContext):
                     self._crystals_beaten = cnt
                     self.refresh_tracker()
             except Exception as e:
-                logger.info(f"  [crystal_count] {e!r} -- retrying next tick")
+                dlog.info(f"  [crystal_count] {e!r} -- retrying next tick")
 
     # ---------------- bridge orchestration ----------------
     async def _await_game_loaded(self, timeout=90.0):
@@ -12581,7 +12624,7 @@ class FF1PSPContext(CommonContext):
                 game = None
             if game:
                 if said:
-                    logger.info(f"  [bridge] game is up ({game}); reading the "
+                    dlog.info(f"  [bridge] game is up ({game}); reading the "
                                 f"seed tag now")
                 return True
             if not said:
@@ -12647,13 +12690,13 @@ class FF1PSPContext(CommonContext):
                 await asyncio.sleep(1.0)
                 continue
             if seen == want:
-                logger.info("  [bake] on-disc seed patch verified (tag match)")
+                dlog.info("  [bake] on-disc seed patch verified (tag match)")
                 return True
             if seen[:4] == IP.BAKE_TAG_MAGIC:
                 self._bake_mismatch = True
                 break                       # a real, different bake -> stop now
             await asyncio.sleep(1.0)        # no magic yet -> module still loading
-        logger.info(f"  [bake] tag at {IP.BAKE_TAG_ADDR:#010x} read "
+        dlog.info(f"  [bake] tag at {IP.BAKE_TAG_ADDR:#010x} read "
                     f"{seen.hex(' ') if seen else 'nothing'}, wanted {want.hex(' ')}")
         logger.warning(
             "  [bake] the running game does NOT carry this seed's on-disc patch. "
@@ -12890,9 +12933,6 @@ class FF1PSPContext(CommonContext):
             # resident JOBxx.GIM copies (battle + pause menu; field is baked
             # at map load and out of scope -- job-sprite-surfaces memory)
             ("jobsprite", self._jobsprite_loop),
-            # read-only watch on battle sprite holders: an object that gets
-            # none is the "CPU Jump to 00000000" / RA 0x088fba28 battle freeze
-            ("holder", self._sprite_holder_loop),
             # lute_tablets: "Lute Tablets N of M" progress line in Key Items
             ("keyratio", self._keyratio_loop),
             ("movement", self._movement_loop),
@@ -13058,7 +13098,7 @@ class FF1PSPContext(CommonContext):
                 self._alert_popup()
                 self._alert_flash()
             except Exception as e:
-                logger.info(f"  [offline_alert] {e!r}")
+                dlog.info(f"  [offline_alert] {e!r}")
 
     async def _cpu_watchdog(self):
         """Watch for the "attached to PPSSPP but no game is running" state and say
@@ -13092,7 +13132,7 @@ class FF1PSPContext(CommonContext):
                     if not self.bake_ok and getattr(self, "_bake", None) is not None:
                         if await self._verify_bake(self._bake):
                             self.bake_ok = True
-                            logger.info("  [bake] re-verified after boot -> on-disc "
+                            dlog.info("  [bake] re-verified after boot -> on-disc "
                                         "features (dabble) restored")
             except Exception as e:
                 if "CPU not started" in repr(e) and not warned:
@@ -13202,7 +13242,7 @@ class FF1PSPContext(CommonContext):
         try:
             await asyncio.wait_for(super().shutdown(), 5)
         except asyncio.TimeoutError:
-            logger.warning("  server shutdown timed out -- closing anyway.")
+            dlog.warning("  server shutdown timed out -- closing anyway.")
 
 
 def launch(connect: Optional[str] = None,

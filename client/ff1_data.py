@@ -534,65 +534,6 @@ BATTLE_DROP_SLOTS    = 9            # max entries the drop fn scans (index < 9)
 BATTLE_ENEMY_ROWS    = 9            # enemy unit rows (4..12) -- the same 9, which
                                     # is WHY drop slot N belongs to enemy row N
 
-# --- battle sprite holder diagnostics (crash forensics, 2026-08-31) --------
-# ABSOLUTE module/heap addresses, NOT save-relative -- never pass these to sa().
-#
-# A battle party-sprite object (0x874 bytes, vtable SPRITE_VTBL_BATTLE) holds a
-# pointer at +0x0c to a HOLDER, and the initializer's epilogue dereferences the
-# holder's first word with no null check:
-#
-#   088fb9ec  lw   v0, 0xb4(s1)     <- entries this object got
-#   088fb9f8  bne  v0, zero, loop   <- 0 => the fill loop never ran
-#   088fba08  jalr t9               -> 0x088e9424 "return this+0xc"
-#   088fba10  lw   v0, 0x0(v0)      -> the holder pointer
-#   088fba14  lw   a0, 0x0(v0)      -> 0 when the object never GOT a holder
-#   088fba20  jalr t9               -> "CPU Jump to 00000000", RA 0x088fba28
-#
-# MEASURED in the frozen crash 2026-08-31 (not inferred): 19 objects of this
-# class were live. 18 had their own heap holder with a valid buffer and count 1.
-# Exactly ONE -- the object at 0x08dad080, which is s1 in the crash registers --
-# had holder == SPRITE_HOLDER_FALLBACK, whose first word is a permanent 0, and
-# count 0. The fallback is a static zero-initialised by 0x088e5d74; an object
-# pointing at it never obtained a holder. Objects of the OTHER class
-# (SPRITE_VTBL_OTHER) also point at the fallback and are harmless -- their
-# +0x64 does not take this path -- so the class check is load-bearing.
-SPRITE_HOLDER_FALLBACK = 0x089E8868  # static empty holder; first word always 0
-SPRITE_OBJ_SIZE        = 0x874       # heap size word of the sprite object
-SPRITE_OBJ_MAGIC       = 0xBABEFACE  # heap header magic that follows the size
-SPRITE_OBJ_HDR_SKIP    = 0x1C        # size word -> object base
-SPRITE_OBJ_HOLDER_OFF  = 0x0C        # u32 holder ptr (== FALLBACK means starved)
-SPRITE_OBJ_VTBL_OFF    = 0xAC        # u32 class vtable
-SPRITE_OBJ_COUNT_OFF   = 0xB4        # u32 entries held (0 = starved = fatal)
-# Fields that separate a built object from a stillborn one. Crash-state diff
-# against a healthy neighbour of the same kind: healthy read w/h 0x100/0x20,
-# a non-null asset pointer and count 1; the starved object read 0/0, asset 0,
-# count 0, with its tail still at the allocator's 0xffffffff fill. So the object
-# was never given its asset -- it is NOT holder exhaustion (110 holder nodes
-# were free at crash time).
-SPRITE_OBJ_W_OFF       = 0x28        # u32 texture width  (0 on a stillborn)
-SPRITE_OBJ_H_OFF       = 0x2C        # u32 texture height (0 on a stillborn)
-SPRITE_OBJ_ASSET_OFF   = 0xA8        # u32 asset/descriptor ptr (0 on a stillborn)
-SPRITE_OBJ_KIND_OFF    = 0x868       # u32 type argument the caller varies per row
-SPRITE_VTBL_BATTLE     = 0x089C9348  # the class whose epilogue crashes
-SPRITE_VTBL_OTHER      = 0x089C8AD0  # same block size, safe on the fallback
-# Object census window: every block of this class in the crash state sat inside
-# [0x08bec9e4, 0x08eb1c24]. Clamped well inside PSP RAM -- a read crossing
-# 0x0A000000 falls back to a minutes-long WS read (hybridpsp-oob-read wedge).
-SPRITE_HEAP_LO         = 0x08B00000
-SPRITE_HEAP_HI         = 0x08F00000
-# Holders come from 0x80-byte heap nodes carrying their own header
-# [size 0x80][0x0c][BABEFACE]; the node's first word is 1 while it is in use and
-# 0 once free, and the object's holder pointer is node+0x40. Walking the live
-# arena counts supply, which is the LEADING indicator: the fatal state is
-# reached when a request finds none. The arena measured 52 nodes (49 in use,
-# 3 free) at crash time and fits in one 128KB read, so this is cheap enough to
-# sample every tick.
-SPRITE_NODE_SIZE       = 0x80
-SPRITE_NODE_HDR_SKIP   = 0x20        # header -> node base
-SPRITE_NODE_USED_OFF   = 0x00        # u32 1 = in use, 0 = free
-SPRITE_NODE_LO         = 0x08B30000
-SPRITE_NODE_HI         = 0x08B50000
-
 # magic_info: the effect table every spell AND enemy skill is defined by.
 # 14-byte records, effect ids are 1-BASED, so record(id) = REC0 + (id-1)*14.
 # +0 side, +1 TARGET MODE, +2 status mask or power, +4 element, +6 type,
@@ -1692,6 +1633,15 @@ CRESCENT_LAKE_MAP_ID    = 0x43        # FIELD_MAP_ID in the Crescent Lake sages'
 # the Bahamut pattern -- see the ApClient sage stage for why his handover
 # could not be used).
 SAGE_TILE = (47, 22, 5)
+
+# Mount Gulg's OVERWORLD cave mouth, as (field_x, field_y, radius) -- the same
+# FIELD coordinate space FIELD_PARTY_X_OFF/Y_OFF report, which is the AMD grid
+# cell PLUS ONE on x (grid_x = field_x - 1; see re_only/tile_editor.py). The
+# entrance is grid (181,196), so field (182,196). Radius 4 = 4 tiles each way,
+# i.e. the player gets the "you need the key" note while still approaching.
+# Used only to LOG a hint when mount_gulg_key is on and the key is not held;
+# the actual seal is openworld_data.GULG_SEAL_GRID_EDITS.
+GULG_TILE = (182, 196, 4)
 # Pravoka town (Bikke / the pirates). Same role for the Bikke detectors: his
 # "defeated" (id63) and "ship available" (id5) flags are SAVE-CARRIED, so seeing
 # them set proves nothing about THIS session -- a save slot from another session

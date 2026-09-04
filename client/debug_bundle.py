@@ -118,7 +118,9 @@ WHAT TO DO WITH IT
 
 WHAT IS IN IT
   report.txt        readable summary -- versions, game patch state, setup
-  client_log*.txt   the client's own log (the main diagnostic)
+  client_log*.txt   the client's own log (the main diagnostic). Lines tagged
+                    [FF1PSP at ...] are the client's internal telemetry --
+                    deliberately kept out of the client window, not errors
   breadcrumbs.log   the most recent log lines, even if a log file rotated
   ap_state.json     which checks you have sent and items you have received
   slot_data.json    the options your seed was generated with
@@ -543,28 +545,6 @@ async def snapshot_ram(ctx):
             out[label] = (await psp.read(ctx.sa(addr), size)).hex(" ")
         except Exception as e:
             out[label] = f"unreadable: {e!r}"
-    # Battle sprite holders: an object of the fatal class whose holder is the
-    # static fallback is the "CPU Jump to 00000000" / RA 0x088fba28 freeze --
-    # its construction jumps through the fallback's permanently-null first
-    # word. In the 2026-08-31 crash the single starved object WAS s1 in the
-    # crash registers, so a non-empty "starved" list here IS the cause, not a
-    # side effect. ABSOLUTE addresses: no sa().
-    try:
-        nodes = await ctx._sprite_nodes()
-        rows, starved = await ctx._sprite_objects()
-        fired = await ctx._sprite_guard_fired()
-        out["sprite_holders"] = {
-            "nodes_in_use": nodes[0] if nodes else None,
-            "nodes_free": nodes[1] if nodes else None,
-            "sprite_objects": len(rows),
-            "rows": rows,
-            "starved": [f"0x{o:08x}" for o in starved],
-            "guard_skips": fired,
-            "note": ("STARVED object(s) present -- this is the battle-intro "
-                     "freeze" if starved else "every sprite object has a holder"),
-        }
-    except Exception as e:
-        out["sprite_holders"] = f"unreadable: {e!r}"
     # Decoded key items: the hex above is the evidence, this is the readable
     # form -- "does the player actually hold X" is asked in nearly every report.
     try:

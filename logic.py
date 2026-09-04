@@ -77,6 +77,34 @@ WARP_CUBE = "Warp Cube"          # Waterfall robot -> pool item; gates deep Sky 
 BOTTLED_FAERIE = "Bottled Faerie"  # Caravan -> pool item; gates the Fairy (Oxyale)
 OXYALE   = "Oxyale"              # Fairy -> pool item; gates Sea Shrine (Kraken)
 
+# World-changing AP items (2026-09-03). REAL pool items with NO in-game
+# existence: the client paints overworld grid cells when one is held (see
+# re_only/ap_world_item_edits.py and ids.WORLD_OFF). Two yaml options gate them;
+# with both off none of these tokens exist and every rule below is unchanged.
+#
+# unlockable_northern_foot_trails carves ONE corridor between the Lefein
+# landmass and Gaia, walled at both ends by a 1x2 boulder, plus a stub pier on
+# the Pravoka shore. Each item removes exactly one obstruction:
+#   LUFENIAN_BRIDGE  Pravoka/Cornelia landmass <-> the Lefein landmass
+#   LUFENIAN_NITRO   the Lefein landmass       <-> Gaia
+#   GAIAN_NITRO      Gaia                      <-> the Mirage Desert continent
+# They are INDEPENDENT, not a chain: Gaia is a mountain-locked 18-cell pocket
+# touching BOTH the Lefein landmass and the Mirage continent, so the Gaian
+# powder alone opens Gaia from the desert side (which northern_docks reaches by
+# ship), while bridge+Lufenian opens it from the Lefein side.
+LUFENIAN_BRIDGE = "Lufenian Bridge"
+LUFENIAN_NITRO  = "Lufenian Nitro Powder"
+GAIAN_NITRO     = "Gaian Nitro Powder"
+# mount_gulg_key seals Mount Gulg's OVERWORLD entrance until the key is held --
+# the dungeon is unreachable by any vehicle without it, exactly like the Chime
+# gates the Sky Castle.
+MOUNT_GULG_KEY  = "Mount Gulg Key"
+
+# Every world-changing item, in datapackage id order (ids.world_item_id). Order
+# is FROZEN: appending is safe, reordering renumbers live seeds' item ids.
+WORLD_ITEMS = (LUFENIAN_BRIDGE, LUFENIAN_NITRO, GAIAN_NITRO, MOUNT_GULG_KEY)
+TRAIL_ITEMS = (LUFENIAN_BRIDGE, LUFENIAN_NITRO, GAIAN_NITRO)
+
 GARLAND_DEFEATED = "Garland Defeated"
 VAMPIRE_DEFEATED = "Vampire Defeated"
 TITAN_FED = "Titan Fed"
@@ -678,7 +706,8 @@ def _simplify(alts):
     return out or [[]]
 
 
-def access_nodes(early: bool, extended: bool, northern_docks: bool = False) -> dict:
+def access_nodes(early: bool, extended: bool, northern_docks: bool = False,
+                 trails: bool = False, gulg_key: bool = False) -> dict:
     """The NAMED access nodes the region rules are built from.
 
     Each value is an OR-of-AND alternative list. Naming the shared prefixes means
@@ -700,6 +729,23 @@ def access_nodes(early: bool, extended: bool, northern_docks: bool = False) -> d
     onrac = [[AIRSHIP]] + docked                      # Onrac access
     caravan = [[AIRSHIP]] + _and_all(docked, [CANOE])  # Caravan wants the canoe by sea
     mirage_desert = [[AIRSHIP]] + docked
+    # unlockable_northern_foot_trails: one corridor, three independent gates.
+    # Gaia is a mountain-locked pocket touching BOTH the Lefein landmass and the
+    # Mirage continent, so each side reaches it with its own pair of items and
+    # the far side of the corridor needs all three. With the option off none of
+    # these tokens exist and every alternative below vanishes.
+    if trails:
+        lefein_land = [[AIRSHIP], [LUFENIAN_BRIDGE]] + _and_all(
+            docked, [GAIAN_NITRO, LUFENIAN_NITRO])
+        gaia = [[AIRSHIP], [LUFENIAN_BRIDGE, LUFENIAN_NITRO]] + _and_all(
+            docked, [GAIAN_NITRO])
+        mirage_desert = mirage_desert + [
+            [LUFENIAN_BRIDGE, LUFENIAN_NITRO, GAIAN_NITRO]]
+    else:
+        lefein_land = [[AIRSHIP]]
+        gaia = [[AIRSHIP]]
+    lefein_land, gaia = _simplify(lefein_land), _simplify(gaia)
+    mirage_desert = _simplify(mirage_desert)
     mirage_tower = _and_all(mirage_desert, [CHIME])
     flying_fortress = _and_all(mirage_tower, [WARP_CUBE])
     # Giant's Cavern (Titan's Tunnel) = Melmond access + Star Ruby -- you need the
@@ -711,6 +757,10 @@ def access_nodes(early: bool, extended: bool, northern_docks: bool = False) -> d
     crescent = [[AIRSHIP], [SHIP, CANAL]] + ([[CANOE]] if early else [])
     # Mount Gulg = Airship OR (Crescent Lake + Canoe); Ice Cave = Airship OR Canoe
     gulg = _simplify([[AIRSHIP]] + _and_all(crescent, [CANOE]))
+    # mount_gulg_key seals the OVERWORLD entrance, so the key is required on top
+    # of however you got there -- the airship does not bypass a walled cave mouth.
+    if gulg_key:
+        gulg = _and_all(gulg, [MOUNT_GULG_KEY])
     ice_cave = [[AIRSHIP], [CANOE]]
     return {
         "duergar": duergar, "inner_sea": inner_sea, "melmond": melmond,
@@ -718,14 +768,16 @@ def access_nodes(early: bool, extended: bool, northern_docks: bool = False) -> d
         "mirage_tower": mirage_tower, "flying_fortress": flying_fortress,
         "crescent": crescent, "gulg": gulg, "ice_cave": ice_cave,
         "giants": giants, "sardas": sardas,
+        "lefein_land": lefein_land, "gaia": gaia,
     }
 
 
-def region_rules_for(early: bool, extended: bool, northern_docks: bool = False) -> dict:
+def region_rules_for(early: bool, extended: bool, northern_docks: bool = False,
+                     trails: bool = False, gulg_key: bool = False) -> dict:
     """Effective region rules for the open-world toggles. Fresh dict;
     values are AND-lists or OR-of-AND-lists (see set_rules access())."""
     r = {k: list(v) for k, v in REGION_RULES.items()}
-    n = access_nodes(early, extended, northern_docks)
+    n = access_nodes(early, extended, northern_docks, trails, gulg_key)
 
     # --- node-driven regions (see access_nodes) ---
     r["mount_duergar"] = n["duergar"]
@@ -739,6 +791,16 @@ def region_rules_for(early: bool, extended: bool, northern_docks: bool = False) 
     r["sardas_cave"] = n["sardas"]
     r["onrac_hub"] = n["onrac"]
     r["onrac_caravan"] = n["caravan"]
+    # Lefein = PHYSICAL access to the Lefein landmass (airship, or the Lufenian
+    # Bridge with the trails option) AND the translated Rosetta, because the only
+    # AP location in town is the Elder and he is unintelligible until Dr Unne
+    # translates it. Town access on its own carries no AP location today (Lefein
+    # has no AP shop and the bestiary files its landmass under its own generated
+    # node), so there is no separate lefein_town region to register.
+    r["lefein"] = _and_all(n["lefein_land"], [ROSETTA_TRANSLATED])
+    # Gaia: the mountain-locked pocket. Airship, or either nitro-powder route.
+    # SHOP_TOWN_REGION points the Gaia shops here, so they follow it exactly.
+    r["gaia"] = n["gaia"]
     # Sunken Shrine = Onrac access + Oxyale (you still need to breathe down there).
     # Waterfall = Onrac access + Canoe.
     for k in ("sunken_shrine_2f_sharknado", "sunken_shrine_3f_split",
@@ -826,11 +888,12 @@ SHOP_TOWN_REGION = {
 }
 
 
-def shop_rules_for(early: bool, extended: bool, northern_docks: bool = False) -> dict:
+def shop_rules_for(early: bool, extended: bool, northern_docks: bool = False,
+                   trails: bool = False, gulg_key: bool = False) -> dict:
     """Shop-name -> access rule. Every item shop simply inherits the rule of the
     town it stands in (SHOP_TOWN_REGION), so a shop can never disagree with its
     town's chests."""
-    r = region_rules_for(early, extended, northern_docks)
+    r = region_rules_for(early, extended, northern_docks, trails, gulg_key)
     o = {}
     for nm, _shop, _reqs in SHOP_LOCATIONS:
         town = nm.split(" Weapon")[0].split(" Armor")[0].split(" Item")[0]
@@ -1005,17 +1068,17 @@ def _both(left, right):
 
 
 def bestiary_access(tier, cls, early=False, extended=False,
-                    northern_docks=False):
+                    northern_docks=False, trails=False, gulg_key=False):
     """Access for one (ZONE_TIER band, access class) under the open-world
     toggles: the OR over the class's geography nodes. `tier` is accepted (and
     ignored) because it is the first half of the source key -- the band has
     already done its work at generation time, filtering which components may
     contribute at all."""
-    ck = (cls, early, extended, northern_docks)
+    ck = (cls, early, extended, northern_docks, trails, gulg_key)
     hit = _BESTIARY_ACCESS_CACHE.get(ck)
     if hit is not None:
         return hit
-    nodes = access_nodes(early, extended, northern_docks)
+    nodes = access_nodes(early, extended, northern_docks, trails, gulg_key)
     alts = []
     for name in ACCESS_CLASSES[cls]:
         rule = _BESTIARY_STATIC_NODES.get(name)
@@ -1032,7 +1095,9 @@ def _bestiary_access_for(key, opts):
     return bestiary_access(key[0], key[1],
                            bool(opts.get("early")),
                            bool(opts.get("extended")),
-                           bool(opts.get("northern_docks")))
+                           bool(opts.get("northern_docks")),
+                           bool(opts.get("northern_foot_trails")),
+                           bool(opts.get("mount_gulg_key")))
 
 # Dungeon access (keys = bestiary_data dungeon names == rando._CAVE_DUNGEONS).
 _BESTIARY_DUNGEON_RULES = {
@@ -1135,7 +1200,7 @@ PARTY_GATE_MONSTER = {
 PARTY_TOKENS = {2: "Party of 2", 3: "Party of 3", 4: "Party of 4"}
 
 
-def bestiary_source_rule(source, opts):
+def _bestiary_source_rule_ungated(source, opts):
     """OR-of-AND access alternatives for one bestiary_data source under the
     seed's options, or None when that source is not live this seed.
 
@@ -1197,6 +1262,24 @@ def bestiary_source_rule(source, opts):
         mon = 0x80 + (key - 0x100)
         return _BESTIARY_BONUS_RULES[BESTIARY_DLC_BOSS_BAND[mon]]
     raise KeyError(f"unknown bestiary source kind {kind!r}")
+
+
+def bestiary_source_rule(source, opts):
+    """_bestiary_source_rule_ungated + the mount_gulg_key gate.
+
+    The Gulg rules are module-level constants shared by several source kinds
+    (the dungeon row, Marilith's scripted fight, the Hellfire Chasm band), so
+    the key is ANDed on HERE, once, by identity -- rather than at each of the
+    four return sites, where a new caller could quietly miss it. Sealing the
+    overworld cave mouth gates the whole dungeon regardless of vehicle, so the
+    airship alternative inside those rules does not bypass it.
+    """
+    rule = _bestiary_source_rule_ungated(source, opts)
+    if rule is None or not opts.get("mount_gulg_key"):
+        return rule
+    if rule is _BESTIARY_DUNGEON_RULES["gurgu"] or rule is _BESTIARY_BONUS_RULES[1]:
+        return _and_all(rule, [MOUNT_GULG_KEY])
+    return rule
 
 
 def bestiary_place_sources(mon, opts, ow_sources=None, cave_sources=None):

@@ -21,6 +21,7 @@ to the Launcher.
 import asyncio
 import glob
 import json
+import logging
 import os
 import re
 import subprocess
@@ -29,6 +30,8 @@ import time
 
 # The fixed local debugger port we pin in the ini. ppsspp_ws.LOCAL_HINT must match.
 DEBUG_PORT = 8765
+# Diagnostic tier; never reaches the client window. See ApClient.dlog.
+dlog = logging.getLogger("FF1PSP")
 # FF1 20th Anniversary (US) disc id, as matched inside the ISO header read:
 # UMD_DATA.BIN carries the dashed form near the disc header; the plain form lives
 # deep in the data. Kept for callers outside this module; the live check is
@@ -1138,8 +1141,9 @@ def ensure_patched_iso(iso: str, bake: dict, notify=None) -> str:
         enabled = sorted(k for k, v in feats.items() if v)
         n_tables = len(data)
         what = ", ".join(enabled) if enabled else "no code features"
-        say(f"Baking this seed into a patched copy of your ISO ({what}; "
-            f"{n_tables} data tables).")
+        say(f"Baking this seed into a patched copy of your ISO "
+            f"({len(enabled)} code features, {n_tables} data tables).")
+        dlog.info(f"  [bake] code features: {what}")
         say("One-time for this seed; takes ~1-4 minutes depending on your disk "
             "speed.")
         say("Progress below; the client may look idle between updates. Your "
