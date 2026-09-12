@@ -4,7 +4,7 @@
 
 An [Archipelago](https://archipelago.gg) multiworld randomizer for Final Fantasy 1, played in the PPSSPP emulator.
 
-Current version: **0.1.0**
+Current version: **0.2.3**
 
 ---
 

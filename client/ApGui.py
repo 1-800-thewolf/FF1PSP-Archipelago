@@ -40,8 +40,13 @@ from kivy.uix.slider import Slider
 from kivy.uix.textinput import TextInput
 from kivy.uix.togglebutton import ToggleButton
 from kivy.uix.widget import Widget
+from kivy.core.text import Label as CoreLabel
+from kivy.graphics import Ellipse, InstructionGroup, Quad, Triangle
+from kivy.graphics.texture import Texture
 
 from .. import tracker as TR
+from .. import ow_map as OM
+from .. import ow_minimap_data as OWD
 
 logger = logging.getLogger("Client")
 
@@ -245,6 +250,31 @@ class _WrapTabBar(BoxLayout):
         # on disabled widgets), so a locked town tab can't be opened.
         if 0 <= idx < len(self._buttons):
             self._buttons[idx].disabled = not on
+
+    def set_visible(self, idx, on):
+        """Take a tab BUTTON out of the strip entirely, or put it back in its
+        own slot. Used by the Tracker's Bestiary sub-tab, which must not exist
+        at all on a seed with bestiarysanity off (a tab that only ever says
+        "off" is noise -- same call as the top-level Bestiary tab).
+
+        A GridLayout child list runs newest-first, so the button's slot is
+        "after every VISIBLE tab with a higher index": that is the insert
+        position in `children`, which is what keeps the strip in tab order
+        however many neighbours are hidden."""
+        if not (0 <= idx < len(self._buttons)):
+            return
+        btn = self._buttons[idx]
+        shown = btn.parent is not None
+        if on == shown:
+            return
+        if on:
+            after = sum(1 for i, b in enumerate(self._buttons)
+                        if i > idx and b.parent is not None)
+            self._bar.add_widget(btn, index=after)
+        else:
+            self._bar.remove_widget(btn)
+            if btn.state == "down":
+                self.select(0)      # never leave a hidden tab's content up
 
 
 class _AreaTile(BoxLayout):
@@ -984,6 +1014,28 @@ class TrackerMixin:
                                           # BestiarysanityPercent is 0
         self._bestiary_tab_home = None    # (parent, index) it was removed from
         self._last_bestiary = None
+        # Bestiary Summary, mirrored as a sub-tab of the TRACKER tab (user call
+        # 2026-09-08). Same content, second slot in the strip, and it only
+        # exists on a seed with bestiarysanity above 0.
+        self._tracker_bestiary_box = None
+        self._tracker_bestiary_idx = None
+
+        # Map tab (overworld picture + Bestiary place highlights + the party's
+        # live cell). Built once; the view redraws only on selection /
+        # position / size changes.
+        self._map_tab = None
+        self._map_tab_widget = None
+        self._map_view = None
+        self._map_showing = None      # "Showing: ..." label
+        self._map_pins = ([], "")     # glowing dungeon squares, title
+        self._map_here = None         # "You are in: ..." label
+        self._map_sel = []            # [(src, title, zones)] currently lit
+        self._map_pos = None          # last (grid_x, grid_y) or None
+        self._map_here_src = None     # land heading under the party
+        self._map_here_zone = None    # encounter zone under the party
+        # monsters the party's OWN zone rolls; a heading covers several zones,
+        # so this is what marks the rows that can really turn up here
+        self._map_zone_mons = frozenset()
         # Boost tab (top-level sibling of Tracker/Shops)
         self._boost_tab = None
         self._boost_rows = {}           # stat key -> _BoostSlider
@@ -1014,6 +1066,10 @@ class TrackerMixin:
         except Exception as ex:
             logger.warning(f"Could not build the Bestiary tab: {ex}")
         try:
+            self.build_map_tab()
+        except Exception as ex:
+            logger.warning(f"Could not build the Map tab: {ex}")
+        try:
             self.build_boost_tab()
         except Exception as ex:
             logger.warning(f"Could not build the Boost tab: {ex}")
@@ -1041,6 +1097,17 @@ class TrackerMixin:
                              self._build_summary(),
                              dark_text=(TR.SUMMARY in TR.BRIGHT_SECTIONS))
         self._section_tab_idx[TR.SUMMARY] = 0
+
+        # Bestiary Summary, second: the monster hunt is the other "where do I
+        # go now" list, so it sits beside Summary rather than after Bosses.
+        # It carries the Bestiary Summary button's own look (pink, remaining
+        # count, shine) and stays OUT of the strip until a payload says the
+        # feature is on this seed -- _paint_bestiary owns that.
+        sv, self._tracker_bestiary_box = self._bestiary_scroll_box(0.6)
+        self._tracker_bestiary_idx = self._tabbar.add_tab(
+            "Bestiary", TR.SECTION_COLOR[TR.SUMMARY], sv,
+            dark_text=(TR.SUMMARY in TR.BRIGHT_SECTIONS))
+        self._tabbar.set_visible(self._tracker_bestiary_idx, False)
 
         for key, display, rgb in TR.SECTIONS:
             if key == TR.SUMMARY:
@@ -1169,6 +1236,7 @@ class TrackerMixin:
             self._paint_inner(state)
         except Exception as ex:
             logger.warning(f"Tracker repaint failed: {ex}")
+        self._map_refresh_squares()
 
     def _fill_key_strip(self, rows):
         """(Re)populate the strip grid with exactly `rows`."""
@@ -1750,6 +1818,23 @@ class TrackerMixin:
     }
     _BESTIARY_KILLED_COLOR = "81C784"
 
+    @staticmethod
+    def _bestiary_scroll_box(width=0.6):
+        """Scrolling column that takes `width` of the tab and leaves the rest
+        empty. Shared by the Bestiary sub-tabs and the Tracker's Bestiary
+        mirror, so the two Summary copies lay out identically."""
+        sv = ScrollView(do_scroll_x=False)
+        row = BoxLayout(orientation="horizontal", size_hint_y=None,
+                        padding=(dp(4), dp(4)))
+        row.bind(minimum_height=row.setter("height"))
+        box = BoxLayout(orientation="vertical", size_hint=(width, None),
+                        spacing=dp(2), pos_hint={"top": 1})
+        box.bind(minimum_height=box.setter("height"))
+        row.add_widget(box)
+        row.add_widget(BoxLayout(size_hint=(1 - width, None), height=dp(1)))
+        sv.add_widget(row)
+        return sv, box
+
     def build_bestiary_tab(self):
         if self._bestiary_tab is not None:
             return
@@ -1793,19 +1878,7 @@ class TrackerMixin:
         self._bestiary_tabbar = _WrapTabBar(cols=4, btn_height=dp(38))
         root.add_widget(self._bestiary_tabbar)
 
-        def _scroll_box(width=0.6):
-            sv = ScrollView(do_scroll_x=False)
-            row = BoxLayout(orientation="horizontal", size_hint_y=None,
-                            padding=(dp(4), dp(4)))
-            row.bind(minimum_height=row.setter("height"))
-            box = BoxLayout(orientation="vertical", size_hint=(width, None),
-                            spacing=dp(2), pos_hint={"top": 1})
-            box.bind(minimum_height=box.setter("height"))
-            row.add_widget(box)
-            row.add_widget(BoxLayout(size_hint=(1 - width, None), height=dp(1)))
-            sv.add_widget(row)
-            return sv, box
-
+        _scroll_box = self._bestiary_scroll_box
         sv, self._bestiary_summary_box = _scroll_box(0.5)
         self._bestiary_tabbar.add_tab("Summary", TR.SECTION_COLOR[TR.SUMMARY],
                                       sv)
@@ -1863,6 +1936,8 @@ class TrackerMixin:
             self._paint_bestiary(payload)
         except Exception as ex:
             logger.warning(f"Bestiary repaint failed: {ex}")
+        self._map_refresh_legend()
+        self._map_refresh_squares()
 
     # Rows render plain until a section has been explored enough to earn its
     # item-quality colors (tracker.BESTIARY_COLOR_UNLOCK).
@@ -1873,14 +1948,23 @@ class TrackerMixin:
     # dims, so the reachable places are the ones that catch the eye.
     _BESTIARY_DIM_COLOR = "5A5A5A"
 
-    def _bestiary_row(self, entry, indent="  "):
+    # Tag colour for a monster the party's current encounter zone really rolls
+    # (the same cyan the Map tab's "You are in" line uses).
+    _BESTIARY_HERE_COLOR = "00E5FF"
+
+    def _bestiary_row(self, entry, indent="  ", dim=False, here=False):
         """One monster line. Colour AND quality letter ride the ENTRY, not the
-        tab -- a monster revealed anywhere reads the same on every section."""
+        tab -- a monster revealed anywhere reads the same on every section.
+
+        `here` = this row's heading is the one the party is standing under,
+        so a monster in the party's own encounter zone earns the "(in this
+        zone)" tag.
+
+        `dim` = the PLACE this row sits under is not reachable yet. Only the
+        NAME greys out; the quality letter and odds keep their own colour, so
+        the reveal still reads on a gated group (the 2026-08-31 regression was
+        greying the whole line, which swallowed the letter)."""
         cls = entry.get("cls")
-        # NOT dimmed by reachability: reachability belongs to the PLACE, the
-        # quality to the monster. Greying these rows also swallowed the letter,
-        # so a tab reading "Monster Item Qualities Unlocked" still showed plain
-        # names for every gated group (live 2026-08-31).
         if not entry.get("revealed", True):
             hexc, letter = self._BESTIARY_LOCKED_COLOR, ""
         else:
@@ -1890,22 +1974,154 @@ class TrackerMixin:
             if entry.get("killed"):
                 hexc = self._BESTIARY_KILLED_COLOR
         tail = " (defeated)" if entry.get("killed") else ""
-        return _offer_label(
-            f"[color={hexc}]{indent}{entry['name']}{letter}{tail}[/color]")
+        if dim:
+            name_hex = self._BESTIARY_DIM_COLOR
+            if letter:
+                letter = (f"[/color][color={hexc}]{letter}[/color]"
+                          f"[color={name_hex}]")
+            hexc = name_hex
+        pct = entry.get("pct")
+        if pct is not None:
+            # chance one random battle here carries this monster (the
+            # engine's weighted 8-slot roll, logic.SLOT_ODDS_PCT). "rare" =
+            # under 5%: logic never expects that fight for progression, and
+            # a monster rare EVERYWHERE can hold none (user call 2026-09-04)
+            # the number alone (user call 2026-09-05: no "(rare)" / "(no
+            # progression)" notes); "rare"/"no_prog" stay in the payload
+            tail += f" {pct:.1f}%"
+        markup = f"[color={hexc}]{indent}{entry['name']}{letter}{tail}[/color]"
+        # A heading is a reachability NODE, which is usually several 32x32
+        # encounter zones with unrelated rolled rows, so its roster is a union
+        # of all of them. This marks the ones the party's OWN zone can actually
+        # produce, which is the question the tab kept answering wrong (report
+        # 2026-09-07: east of Crescent Lake promising Rakshasa).
+        if here and entry.get("mon") in self._map_zone_mons:
+            markup += (f" [color={self._BESTIARY_HERE_COLOR}]"
+                       f"(in this zone)[/color]")
+        # A monster that roams overworld land is a Map link: clicking the
+        # row lights every place it can be met and opens the Map tab.
+        places = [p for p in (entry.get("places") or ()) if p]
+        if places:
+            # a ROW click is the one place water hunts light too
+            return _ClickLabel(
+                markup, on_press=lambda p=places, n=entry["name"],
+                m=entry.get("mon"):
+                self._map_show_places(p, n, water=True, mon=m))
+        return _offer_label(markup)
 
-    def _fill_bestiary_groups(self, box, groups):
-        for grp in groups:
-            # "open" is absent on a payload built with no token set; unknown
-            # reachability paints normally rather than greying everything.
-            dim = grp.get("open", True) is False
-            if dim:
-                box.add_widget(_wrap_label(
-                    f"[color={self._BESTIARY_DIM_COLOR}]{grp['label']}"
-                    f"  -- not reachable yet[/color]"))
-            else:
-                box.add_widget(_shop_header(grp["label"]))
+    # A heading the Map can draw: overworld LAND, and since 2026-09-06 the
+    # WATER headings too (Ocean, the four regional pools, the rivers). Dungeon
+    # headings ("cave", N) stay plain text -- the Map tab has no cave view.
+    @staticmethod
+    def _norm_place(p):
+        """A payload place ["ow", [5, 22]] as the hashable (kind, key) tuple
+        ow_map speaks, or None when it is not one."""
+        try:
+            kind = p[0]
+            if kind in OM.WATER_KINDS:
+                return (kind, int(p[1]))
+            return (kind, (int(p[1][0]), int(p[1][1])))
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    @staticmethod
+    def _bestiary_map_places(grp):
+        return [p for p in (grp.get("places") or ())
+                if p and p[0] in (OM.LAND_KINDS | OM.WATER_KINDS)]
+
+    def _bestiary_here_group(self, grp):
+        """True when this heading is the land place the party stands on."""
+        src = self._map_here_src
+        if src is None or src[0] not in OM.LAND_KINDS:
+            return False
+        return any(self._norm_place(p) == src
+                   for p in (grp.get("places") or ()) if p)
+
+    def _bestiary_header(self, grp, hexc):
+        """Group header; a Map link when the place is overworld land or water."""
+        places = self._bestiary_map_places(grp)
+        if places:
+            return _MapHeaderRow(
+                grp["label"], hexc,
+                on_press=lambda p=places, n=grp["label"]:
+                self._map_show_places(p, n, water=True))
+        return _shop_header(grp["label"], hexc=hexc)
+
+    def _bestiary_dim_header(self, grp, suffix=""):
+        """Gated group header (grey); still a Map link when it is drawable."""
+        text = f"[color={self._BESTIARY_DIM_COLOR}]{grp['label']}{suffix}[/color]"
+        places = self._bestiary_map_places(grp)
+        if places:
+            return _ClickLabel(
+                text, wrap=True,
+                on_press=lambda p=places, n=grp["label"]:
+                self._map_show_places(p, n, water=True))
+        return _wrap_label(text)
+
+    # Divider colour for the in-logic block: the thing to look at.
+    _BESTIARY_OPEN_DIVIDER = "81C784"
+    # A cleared place: one dim line in its normal position, no rows.
+    _BESTIARY_DONE_COLOR = "4E4E4E"
+
+    def _bestiary_done_line(self, grp):
+        n = grp.get("done", 0)
+        text = (f"[color={self._BESTIARY_DONE_COLOR}]{grp['label']}  -- all "
+                f"{n} found[/color]")
+        # Still a Map link (2026-09-06). A cleared place is exactly the heading
+        # you click to ask "where WAS that?", and it used to be the only row in
+        # the tab that did nothing.
+        places = self._bestiary_map_places(grp)
+        if places:
+            return _ClickLabel(
+                text, wrap=True,
+                on_press=lambda p=places, n2=grp["label"]:
+                self._map_show_places(p, n2, water=True))
+        return _wrap_label(text)
+
+    def _fill_bestiary_groups(self, box, groups, rgb=None):
+        """Groups partitioned by reachability, in-logic FIRST, each block under
+        a divider with its count. Before this (live 2026-09-05, Bosses tab) the
+        groups sat in place order with only the header colour telling them
+        apart, and every monster row was equally bright, so the two open
+        bosses hid in a wall of forty gated ones.
+
+        Open headers take the SECTION's own colour (the Tracker's in-logic
+        language); gated headers AND their monster names grey out together.
+        "open" is absent on a payload built with no token set: unknown
+        reachability paints everything as open rather than greying it all.
+
+        A place whose whole roster is checked ("done", empty monster list)
+        keeps its slot in the open block as a single dim "all N found" line:
+        a cleared Mount Gulg used to drop out of the Fire tab entirely and
+        read as missing (user report 2026-09-05)."""
+        untracked = all("open" not in g for g in groups)
+        opens = [g for g in groups if g.get("open", True) is not False]
+        gated = [g for g in groups if g.get("open", True) is False]
+        open_hex = _hex(rgb) if rgb else "D0D0D0"
+        # No "IN LOGIC NOW -- n monsters" divider (user call 2026-09-05):
+        # the open block simply comes first; the gated block keeps its
+        # divider because grey alone did not read as "not yet".
+        if not untracked and groups and not any(g["monsters"] for g in opens):
+            box.add_widget(_offer_label(
+                "[color=6E6E6E]   Nothing here is reachable yet.[/color]"))
+        for grp in opens:
+            if grp.get("done") and not grp["monsters"]:
+                box.add_widget(self._bestiary_done_line(grp))
+                continue
+            box.add_widget(self._bestiary_header(grp, open_hex))
+            here = self._bestiary_here_group(grp)
             for e in grp["monsters"]:
-                box.add_widget(self._bestiary_row(e))
+                box.add_widget(self._bestiary_row(e, here=here))
+        if gated:
+            n = sum(len(g["monsters"]) for g in gated)
+            box.add_widget(_wrap_label(
+                f"[b][color={self._BESTIARY_DIM_COLOR}]NOT REACHABLE YET"
+                f"  -- {n} monster{'' if n == 1 else 's'}[/color][/b]"))
+        for grp in gated:
+            box.add_widget(self._bestiary_dim_header(grp))
+            here = self._bestiary_here_group(grp)
+            for e in grp["monsters"]:
+                box.add_widget(self._bestiary_row(e, dim=True, here=here))
 
     def _bestiary_show_off(self, message):
         """Collapse the whole tab to one line. With bestiarysanity off there is
@@ -1976,8 +2192,14 @@ class TrackerMixin:
     #   cleared (tab complete)   -> grayscale, caption "0" (still clickable)
     #   monsters left, none      -> out-of-logic dark grey + slashes
     #     fightable right now
-    #   fightable, none found    -> section colour + shine
-    #   fightable, some found    -> section colour, no shine
+    #   fightable                -> section colour
+    #   ... + a REVEALED          -> section colour + shine
+    #     progression monster
+    #     fightable here at a
+    #     >= 5% / guaranteed place
+    # (user call 2026-09-08: the sheen means "a key item is huntable here",
+    # replacing the Tracker's "in logic, nothing found yet" look; the rule is
+    # tracker.bestiary_view's `shine`, this only paints it.)
     # The caption is the REMAINING COUNT, not the Tracker's percent: a monster
     # hunt is a to-do list and "12 left" is the actionable number.
     def _paint_bestiary_tab(self, idx, skey, info):
@@ -2014,17 +2236,105 @@ class TrackerMixin:
             bar.set_base(idx, base)
             bar.set_shine(idx, bool(info.get("shine")))
 
+    # Summary line colours. Green is the SAME 81C784 the section tabs use for
+    # their "Monster Item Qualities Unlocked" line (user call 2026-09-08): a
+    # section whose own qualities are unlocked reads green on the Summary too,
+    # so the two surfaces never disagree about what has been identified.
+    _BESTIARY_SUMMARY_COLOR = "FFFFFF"
+    _BESTIARY_UNLOCKED_COLOR = "81C784"
+
+    # The word the rarest tail names, per item class.
+    _BESTIARY_CLS_WORD = {
+        "progression": "Progression",
+        "useful": "Useful",
+        "filler": "Filler",
+        "trap": "Trap",
+    }
+
+    def _bestiary_summary_line(self, skey, sec, clickable=False):
+        """One Summary row: "<section>: n left. <Quality> is the rarest".
+
+        The rarest tail is drawn for ANY section holding an identified monster,
+        green or not (user call 2026-09-08). On a green (unlocked) section it
+        is the truth; on a white one it is only the rarest the player knows
+        about so far, because reveal rides the monster and can arrive through
+        a different tab. A cleared section keeps the old grey "done" line and
+        never names a quality -- there is nothing left there to hold one.
+
+        The quality word takes its own class colour, the same purple/blue/grey
+        the (P)/(U)/(F) letters use on the monster rows. The tags are written
+        flat, never nested: a colour span is CLOSED before the word and
+        reopened after it (the 2026-08-31 lesson from _bestiary_row)."""
+        name = TR.BESTIARY_SECTION_DISPLAY.get(skey, skey)
+        if sec is None:
+            markup = f"[color={self._BESTIARY_DONE_COLOR}]  {name}: done[/color]"
+        else:
+            line_hex = (self._BESTIARY_UNLOCKED_COLOR
+                        if sec.get("colors_unlocked")
+                        else self._BESTIARY_SUMMARY_COLOR)
+            markup = (f"[color={line_hex}]  {name}: "
+                      f"[b]{sec.get('remaining', 0)}[/b] left")
+            word = self._BESTIARY_CLS_WORD.get(sec.get("rarest"))
+            if word:
+                cls_hex = self._BESTIARY_CLS_COLOR.get(sec["rarest"], "9E9E9E")
+                markup += (f". [/color][color={cls_hex}]{word}[/color]"
+                           f"[color={line_hex}] is the rarest")
+            markup += "[/color]"
+        if clickable:
+            return _ClickLabel(markup, wrap=True,
+                               on_press=lambda k=skey:
+                               self._open_bestiary_section(k))
+        # _wrap_label, not _offer_label: the tail pushes these past the fixed
+        # one-row width and a clipped line would read as broken punctuation.
+        return _wrap_label(markup)
+
+    def _open_bestiary_section(self, skey):
+        """Tracker mirror click-through: front the real Bestiary tab with that
+        section's sub-tab already selected."""
+        idx = self._bestiary_section_idx.get(skey)
+        if idx is not None and self._bestiary_tabbar is not None:
+            try:
+                self._bestiary_tabbar.select(idx)
+            except Exception as ex:
+                logger.debug(f"Bestiary section select failed: {ex}")
+        self._switch_to_tab(self._bestiary_tab_widget)
+
+    def _fill_bestiary_summary(self, box, payload, by_key, clickable=False):
+        """Paint one copy of the Summary. Called for the Bestiary tab's own
+        Summary sub-tab and for the Tracker tab's Bestiary mirror, so the two
+        can only ever differ in whether their lines are click-through."""
+        if box is None:
+            return
+        done, total = payload.get("done", 0), payload.get("total", 0)
+        box.add_widget(_wrap_label(
+            f"[b]{done}/{total} monster checks found[/b]"))
+        if done >= total and total:
+            box.add_widget(_offer_label(
+                "[color=81C784]Every monster check is complete![/color]"))
+            return
+        box.add_widget(_offer_label(
+            "[color=6E6E6E]Each tab lists the monsters still holding a "
+            "check there.[/color]"))
+        for skey in TR.BESTIARY_SECTION_ORDER:
+            box.add_widget(self._bestiary_summary_line(
+                skey, by_key.get(skey), clickable=clickable))
+
     def _paint_bestiary(self, payload):
         if self._bestiary_summary_box is None:
             return
-        for box in [self._bestiary_summary_box] + list(
-                self._bestiary_section_box.values()):
-            box.clear_widgets()
+        boxes = [self._bestiary_summary_box, self._tracker_bestiary_box]
+        boxes += list(self._bestiary_section_box.values())
+        for box in boxes:
+            if box is not None:
+                box.clear_widgets()
         if not payload or not payload.get("enabled"):
             # A payload only exists once slot_data is in, so this is a real
             # "off for this seed", not the pre-connect placeholder.
             if not self._bestiary_hide_tab():
                 self._bestiary_show_off("Bestiarysanity is off for this seed.")
+            if (self._tracker_bestiary_idx is not None
+                and self._tabbar is not None):
+                self._tabbar.set_visible(self._tracker_bestiary_idx, False)
             return
         self._bestiary_unhide_tab()
         self._bestiary_show_tabs()
@@ -2035,18 +2345,25 @@ class TrackerMixin:
         # No colour legend here: it ran wider than the window and the row it
         # sat in could only clip. The (P)/(U)/(F)/(T) letters ride the monster
         # rows themselves, which is where a player reads them anyway.
-        self._bestiary_summary_box.add_widget(_wrap_label(
-            f"[b]{done}/{total} monster checks found[/b]"))
-
         by_key = {s["key"]: s for s in payload.get("sections") or []}
         strip = payload.get("strip") or {}
-        # Summary carries the whole seed's remaining count and shines while any
-        # hunt is left -- the same thing the Tracker's Summary tab does.
+        # Summary carries the whole seed's remaining count and shines while
+        # ANY section would (a revealed progression monster is huntable
+        # somewhere in logic) -- user call 2026-09-08, same rule as the tabs.
         left_all = max(0, total - done)
         self._bestiary_tabbar.set_text(self._BESTIARY_SUMMARY_IDX,
                                        f"Summary  {left_all}")
-        self._bestiary_tabbar.set_shine(self._BESTIARY_SUMMARY_IDX,
-                                        left_all > 0)
+        shine_any = any(bool((info or {}).get("shine"))
+                        for info in strip.values())
+        self._bestiary_tabbar.set_shine(self._BESTIARY_SUMMARY_IDX, shine_any)
+        if (self._tracker_bestiary_idx is not None
+                and self._tabbar is not None):
+            # Same caption and same sheen as the Bestiary Summary button: one
+            # look for one list, wherever the player meets it.
+            self._tabbar.set_visible(self._tracker_bestiary_idx, True)
+            self._tabbar.set_text(self._tracker_bestiary_idx,
+                                  f"Bestiary  {left_all}")
+            self._tabbar.set_shine(self._tracker_bestiary_idx, shine_any)
         for skey, idx in self._bestiary_section_idx.items():
             sec = by_key.get(skey)
             name = TR.BESTIARY_SECTION_DISPLAY.get(skey, skey)
@@ -2060,32 +2377,21 @@ class TrackerMixin:
                     "[color=81C784]Nothing left to hunt here.[/color]"))
                 continue
             unlocked = sec.get("colors_unlocked", True)
-            box.add_widget(_wrap_label(
-                f"[b]{sec['display']}[/b][color=6E6E6E] -- "
-                f"{sec['remaining']} monster"
-                f"{'' if sec['remaining'] == 1 else 's'} left to defeat"
-                f"[/color]"))
+            # No "<tab> -- n monsters left" header (user call 2026-09-05);
+            # the tab button already carries the count.
+            box.add_widget(_offer_label(
+                "[color=9AA0A6]Click a monster to see where to fight it.[/color]"))
             box.add_widget(_wrap_label(
                 f"[color={'81C784' if unlocked else '9AA0A6'}]"
                 f"{sec.get('progress', '')}[/color]"))
-            self._fill_bestiary_groups(box, sec["groups"])
+            self._fill_bestiary_groups(
+                box, sec["groups"], TR.BESTIARY_SECTION_COLOR.get(skey))
 
-        if done >= total and total:
-            self._bestiary_summary_box.add_widget(_offer_label(
-                "[color=81C784]Every monster check is complete![/color]"))
-        else:
-            self._bestiary_summary_box.add_widget(_offer_label(
-                "[color=6E6E6E]Each tab lists the monsters still holding a "
-                "check there.[/color]"))
-            for skey in TR.BESTIARY_SECTION_ORDER:
-                sec = by_key.get(skey)
-                name = TR.BESTIARY_SECTION_DISPLAY.get(skey, skey)
-                if sec is None:
-                    self._bestiary_summary_box.add_widget(_offer_label(
-                        f"[color=4E4E4E]  {name}: done[/color]"))
-                else:
-                    self._bestiary_summary_box.add_widget(_offer_label(
-                        f"  {name}: [b]{sec['remaining']}[/b] left"))
+        self._fill_bestiary_summary(self._bestiary_summary_box, payload, by_key)
+        # The Tracker's mirror: same content, click-through lines (a Summary
+        # row there opens that section on the real Bestiary tab).
+        self._fill_bestiary_summary(self._tracker_bestiary_box, payload,
+                                    by_key, clickable=True)
         self._paint_bestiary_find()
 
     def _paint_bestiary_find(self):
@@ -2118,13 +2424,333 @@ class TrackerMixin:
             f"[color=8C8C8C]{hits} remaining monster"
             f"{'' if hits == 1 else 's'} match \"{q}\"[/color]"))
         for grp in found["groups"]:
-            box.add_widget(_shop_header(grp["label"]))
+            if grp.get("done") and not grp["monsters"]:
+                box.add_widget(self._bestiary_done_line(grp))
+                continue
+            dim = grp.get("open", True) is False
+            if dim:
+                box.add_widget(self._bestiary_dim_header(
+                    grp, "  -- not reachable yet"))
+            else:
+                box.add_widget(self._bestiary_header(
+                    grp, _hex(TR.BESTIARY_SECTION_COLOR.get(grp["section"]))))
+            here = self._bestiary_here_group(grp)
             for e in grp["monsters"]:
-                box.add_widget(self._bestiary_row(e))
+                box.add_widget(self._bestiary_row(e, dim=dim, here=here))
         if not hits:
             box.add_widget(_offer_label(
                 "[color=6E6E6E]   No remaining check matches. Monsters you "
                 "have already defeated are not listed.[/color]"))
+
+    # -------------------------------------------------------------- map tab --
+    # Clicked places all light the SAME bright orange (user call 2026-09-05:
+    # the yellow wash read as grass); the party's own place is the cyan wash
+    # underneath.
+    _MAP_SEL_RGBA = ((255, 110, 0, 255),)     # alpha breathes in the view
+    _MAP_HERE_RGBA = (0, 229, 255, 105)
+    _MAP_HINT = ("Click a place or a monster in the Bestiary tab to light "
+                 "it here.")
+
+    def build_map_tab(self):
+        if self._map_tab is not None:
+            return
+        # Layout since 2026-09-06 (user call, modelled on the in-game map
+        # screen): the square map fills the tab's full HEIGHT, flush left;
+        # every word lives in a fixed-width column of framed panels on the
+        # right, the Clear button pinned at its foot.
+        root = BoxLayout(orientation="horizontal", padding=0, spacing=dp(4))
+        self._map_view = _OwMapView(size_hint=(None, 1))
+        self._map_view.on_hunt_click = self._map_show_section
+        # square: width follows height
+        self._map_view.bind(height=lambda w, h: setattr(w, "width", h))
+        root.add_widget(self._map_view)
+        col = BoxLayout(orientation="vertical", size_hint_x=None,
+                        width=dp(280), padding=(dp(4), dp(6)), spacing=dp(6))
+        self._map_showing = _panel_label(f"[color=9AA0A6]{self._MAP_HINT}[/color]")
+        col.add_widget(_MapPanel(self._map_showing))
+        self._map_here = _panel_label("")
+        col.add_widget(_MapPanel(self._map_here))
+        legend = _panel_label("", font_size=dp(11))
+        col.add_widget(_MapPanel(legend))
+        self._map_legend = legend
+        col.add_widget(Widget())            # spacer: pushes Clear to the foot
+        clear = Button(text="Clear", size_hint_y=None, height=dp(36))
+        clear.bind(on_press=lambda _b: self._map_clear())
+        col.add_widget(clear)
+        root.add_widget(col)
+        self._map_tab_widget = self.add_client_tab("Map", root)
+        self._map_tab = root
+        self._map_refresh_legend()
+        self._map_set_pos(self._map_pos)
+        self._map_refresh_squares()
+        self._map_apply_edits()
+        # Clear the highlight when the player leaves the tab (user call
+        # 2026-09-05): a tab that is not current is off the widget tree, so
+        # "has a root window" is "is showing". The selection made from the
+        # Bestiary tab lands BEFORE the switch, so it only counts as left once
+        # the map has been seen showing since that selection.
+        self._map_seen_showing = False
+        Clock.schedule_interval(self._map_visibility_tick, 0.25)
+
+    def _map_visibility_tick(self, _dt):
+        tab = self._map_tab
+        if tab is None:
+            return
+        showing = tab.get_root_window() is not None
+        if showing:
+            self._map_seen_showing = True
+        elif self._map_seen_showing and self._map_sel:
+            self._map_clear()
+            self._map_seen_showing = False
+
+    def _map_refresh_legend(self):
+        if getattr(self, "_map_legend", None) is not None:
+            self._map_legend.text = _map_legend_markup(self._map_forests_on())
+
+    def _map_refresh_squares(self):
+        """Recolour the PopTracker squares from the latest Tracker state and
+        Bestiary payload. Called after either repaints; cheap."""
+        view = self._map_view
+        if view is None:
+            return
+        try:
+            areas = getattr(self._last_state, "areas", None)
+            view.set_squares(OM.map_squares(areas, self._last_bestiary))
+        except Exception as ex:
+            logger.debug(f"Map squares refresh failed: {ex}")
+
+    def _map_show_section(self, skey):
+        """Hunting-grounds square click: light every overworld land place of
+        that Bestiary sub-tab. Already on the Map tab, so no tab switch."""
+        places = OM.section_land_places(self._last_bestiary, skey)
+        name = TR.SECTION_DISPLAY.get(skey, skey).split("/")[0]
+        if not places:
+            if self._map_showing is not None:
+                self._map_showing.text = (f"[color=9AA0A6]{name}: no overworld "
+                                          f"land hunts left this seed.[/color]")
+            return
+        self._map_show_places(places, f"{name} hunting grounds", switch=False)
+
+    def _map_forests_on(self):
+        opts = (self._last_bestiary or {}).get("opts") or {}
+        return bool(opts.get("forests", True))
+
+    def _map_show_places(self, places, title, switch=True, water=False,
+                         mon=None):
+        """Light `places` (Bestiary (kind, key) sources) and open the Map tab.
+        Overworld land headings draw; water hunts (river / ocean) draw only
+        when `water` is set (a monster row click). A dungeon-only click is a
+        no-op rather than a blank map.
+
+        `mon` = a MONSTER row was clicked, so the question is "where is this
+        one", not "what is this place". A heading key is a reachability node
+        covering up to eight 32x32 encounter zones whose rolled rows have
+        nothing in common, so the highlight narrows to the zones that really
+        carry the monster (logic.overworld_zone_sources). A heading click
+        leaves `mon` None and still lights the whole place."""
+        srcs = []
+        for p in places or ():
+            norm = self._norm_place(p)
+            if norm is None:
+                continue
+            kind, key = norm
+            if kind in OM.WATER_KINDS and not water:
+                continue
+            if (kind in OM.LAND_KINDS or kind in OM.WATER_KINDS) \
+                    and (kind, key) not in srcs:
+                srcs.append((kind, key))
+        # dungeon places -> landmark squares that glow beside the land
+        # (user call 2026-09-06); only a row / heading click carries them
+        pins = OM.dungeon_pins(places) if water else []
+        if not srcs and not pins:
+            return
+        # Only the plain-land kinds are indexed by zones_overworld, so only
+        # they can be narrowed: a Forests / Desert / Grass heading rolls a
+        # patcher cave's own pool, and the water headings a third table.
+        zones = self._map_zones_for_mon(mon)
+        self._map_sel = [(s, title, zones if s[0] in OM.ZONE_ROW_KINDS else None)
+                         for s in srcs]
+        self._map_pins = (pins, title)
+        self._map_seen_showing = False
+        self._map_repaint_selection()
+        if switch:
+            self._switch_to_map_tab()
+
+    def _map_zones_for_mon(self, mon):
+        """The encounter zones this seed really rolls `mon` in, or None for
+        "do not narrow" -- a heading click, or a payload with no zone table
+        (an older build, where the union highlight is all there is)."""
+        if mon is None:
+            return None
+        table = (self._last_bestiary or {}).get("ow_zones") or {}
+        zones = table.get(mon)
+        if zones is None:
+            zones = table.get(str(mon))
+        return frozenset(int(z) for z in zones) if zones else None
+
+    def _map_clear(self):
+        self._map_sel = []
+        self._map_pins = ([], "")
+        self._map_repaint_selection()
+
+    def _map_repaint_selection(self):
+        view = self._map_view
+        if view is None:
+            return
+        forests = self._map_forests_on()
+        opts = (self._last_bestiary or {}).get("opts") or {}
+        layers, water = [], []
+        for src, _title, zsel in self._map_sel:
+            cells = OM.cells_for_source(src, forests, opts, zones=zsel)
+            (water if src[0] in OM.WATER_KINDS else layers).append(
+                (cells, self._MAP_SEL_RGBA[0]))
+        pins, ptitle = self._map_pins
+        view.set_selection(layers, water)
+        view.set_dungeon_pins(pins)
+        if self._map_showing is not None:
+            self._map_showing.text = self._map_showing_text(
+                layers, water, pins, ptitle, opts)
+
+    def _map_showing_text(self, layers, water, pins, ptitle, opts):
+        """The "Showing:" text: overworld places on line one, the dungeons
+        (glowing squares) on a second line (user call 2026-09-06)."""
+        if not self._map_sel and not pins:
+            return f"[color=9AA0A6]{self._MAP_HINT}[/color]"
+        if self._map_sel:
+            title = self._map_sel[0][1]
+            names = [OM.source_label(s, opts) for s, _t, _z in self._map_sel]
+            if len(names) == 1 and not pins:
+                body = f"[b]{names[0]}[/b]"
+            else:
+                body = f"[b]{title}[/b]: " + "  /  ".join(names)
+            if not any(cells for cells, _rgba in layers + water):
+                # a heading whose zones hold none of its terrain (the
+                # generator can name a forest on a grass-only landmass)
+                body += "  [color=9AA0A6]-- no such land on the map[/color]"
+        else:
+            body = f"[b]{ptitle}[/b]"
+        text = f"Showing: {body}"
+        if pins:
+            text += "\nDungeons: " + "  /  ".join(OM.pin_name(p) for p in pins)
+        return text
+
+    def update_map_edits(self, tiles, class_cells):
+        """Thread-safe entry point: the overworld cells the client's
+        openworld loop rewrites ({(x, y): tile id}) and the canoe-river cells
+        it reclasses ({(x, y): class}). The map repaints them by terrain so
+        docks, trails, bridges, boulders and the Gulg seal show as they are."""
+        cls = {}
+        tc = getattr(OWD, "TILE_CLASS", ())
+        for (x, y), tile in (tiles or {}).items():
+            if 0 <= tile < len(tc):
+                cls[(x, y)] = tc[tile]
+        for (x, y) in (class_cells or {}):
+            cls[(x, y)] = OWD.T_RIVER
+        self._map_edits = cls
+        Clock.schedule_once(lambda _dt: self._map_apply_edits(), 0)
+
+    def _map_apply_edits(self):
+        view = self._map_view
+        if view is None:
+            return
+        try:
+            view.set_edits(getattr(self, "_map_edits", {}))
+        except Exception as ex:
+            logger.debug(f"Map edits repaint failed: {ex}")
+
+    def update_map_pos(self, pos):
+        """Thread-safe entry point from the client's asyncio loop: the party's
+        overworld grid cell, or None off the overworld."""
+        self._map_pos = tuple(pos) if pos else None
+        Clock.schedule_once(lambda _dt: self._map_set_pos(self._map_pos), 0)
+
+    # How many of the party's own zone's monsters the "You are in" panel
+    # names before it summarises the rest.
+    _MAP_HERE_MAX_ROWS = 10
+
+    def _map_here_text(self, pos, label, src, rows):
+        """The "You are in" panel: the heading on line one, and -- on plain
+        land -- what the party's OWN encounter zone rolls on line two.
+
+        The heading alone was the whole panel until 2026-09-07, and it reads
+        as a forecast it cannot honour: a heading is a reachability node, and
+        most nodes cover several 32x32 zones with unrelated rolled rows, so
+        "Overworld (Crescent Lake)" is true from four zones that share no
+        monsters. Line two is the local truth."""
+        if pos is None:
+            return "[color=6E6E6E]Party is not on the overworld.[/color]"
+        if src is not None and src[0] in OM.LAND_KINDS:
+            head = f"You are in: [b][color=00E5FF]{label}[/color][/b]"
+        elif src is not None:
+            head = f"You are at: [b][color=00E5FF]{label}[/color][/b]"
+        else:
+            head = f"You are at: [color=9AA0A6]{label}[/color]"
+        if not rows:
+            return head
+        shown = rows[:self._MAP_HERE_MAX_ROWS]
+        body = ", ".join(f"{r['name']} {r['pct']:.1f}%" for r in shown)
+        more = len(rows) - len(shown)
+        if more > 0:
+            body += f", +{more} more"
+        return (f"{head}\n[color=9AA0A6]Rolls in this zone "
+                f"({self._map_here_zone}):[/color] {body}")
+
+    def _map_set_pos(self, pos):
+        forests = self._map_forests_on()
+        bst = self._last_bestiary or {}
+        opts = bst.get("opts") or {}
+        src = None
+        label = ""
+        if pos is not None:
+            label, src = OM.place_at(pos[0], pos[1], forests, opts)
+        # What the party's OWN zone rolls -- the local forecast the heading
+        # cannot give. Drives the panel's second line AND the Bestiary tab's
+        # "(in this zone)" tags, so it is computed before the Map-tab guard
+        # below: the tags must work whether or not the Map tab is built.
+        rows = (OM.here_rows(bst.get("zone_rows"), pos[0], pos[1], forests, opts)
+                if pos is not None else [])
+        mons = frozenset(int(r["mon"]) for r in rows)
+        src_changed = src != self._map_here_src
+        self._map_here_src = src
+        self._map_here_zone = (OM.zone_of(pos[0], pos[1])
+                               if pos is not None else None)
+        if mons != self._map_zone_mons:
+            self._map_zone_mons = mons
+            if self._last_bestiary:
+                # crossing a zone edge changes which rows are tagged; walking
+                # WITHIN a zone changes nothing, so this is rare
+                self._paint_bestiary_safe(self._last_bestiary)
+        view = self._map_view
+        if view is None:
+            return
+        try:
+            if src_changed:
+                cells = OM.cells_for_source(src, forests, opts) if src else []
+                view.set_here(cells, self._MAP_HERE_RGBA)
+            view.set_pos(pos)
+            if self._map_here is not None:
+                self._map_here.text = self._map_here_text(pos, label, src, rows)
+        except Exception as ex:
+            logger.debug(f"Map position update failed: {ex}")
+
+    def _switch_to_map_tab(self):
+        self._switch_to_tab(self._map_tab_widget)
+
+    def _switch_to_tab(self, tab):
+        """Front a top-level tab, whatever this kvui build's tab widget is: a
+        ButtonBehavior gets a synthetic press/release, a TabbedPanel a
+        switch_to. Best effort -- the content is already painted, so a
+        failed switch only costs the player a click on the tab."""
+        if tab is None:
+            return
+        for attempt in (lambda: tab.trigger_action(duration=0),
+                        lambda: self.tabs.switch_to(tab),
+                        lambda: tab.dispatch("on_release")):
+            try:
+                attempt()
+                return
+            except Exception:
+                continue
 
     # ------------------------------------------------------------- boost tab --
     # One snapped slider per stat: (key, title, lo, hi, step, note). The step is
@@ -2437,6 +3063,557 @@ class _ShopRow(BoxLayout):
         self._bg.pos, self._bg.size = self.pos, self.size
 
 
+class _ClickLabel(Label):
+    """A markup Label that fires `on_press` when tapped. `wrap` gives the
+    grow-on-width behaviour of _wrap_label, otherwise the fixed one-row
+    ellipsised look of _offer_label. Used for Bestiary rows and headers that
+    link to the Map tab; the touch is CLAIMED so the ScrollView does not
+    also treat it as a drag start."""
+
+    def __init__(self, markup, on_press=None, wrap=False, **kw):
+        super().__init__(text=markup, markup=True, size_hint_y=None,
+                         height=ROW_HEIGHT, halign="left",
+                         valign="top" if wrap else "middle",
+                         shorten=not wrap, shorten_from="right", **kw)
+        self._on_press = on_press
+        if wrap:
+            self.bind(width=lambda w, _v: setattr(w, "text_size", (w.width, None)),
+                      texture_size=lambda w, ts: setattr(
+                          w, "height", max(ROW_HEIGHT, ts[1] + dp(2))))
+        else:
+            self.bind(size=lambda w, _v: setattr(w, "text_size", w.size))
+
+    def on_touch_down(self, touch):
+        if self.collide_point(*touch.pos) and self._on_press:
+            self._on_press()
+            return True
+        return super().on_touch_down(touch)
+
+
+class _OwMapView(Widget):
+    """The overworld picture, a highlight overlay, landmark pins and the
+    party dot.
+
+    Two 255x255 RGBA textures (the baked map, the highlight) are drawn
+    NEAREST-filtered into the largest square that fits the widget; the
+    overlay is re-blitted only when the lit set changes and the pins are
+    redrawn only on relayout or a position change, so an idle tab costs
+    nothing per frame. Kivy textures are bottom-up, so map row y lands on
+    texture row H-1-y, and every pixel<->cell conversion mirrors that."""
+
+    # PopTracker square fills (user call 2026-09-05, replacing the kind-coloured
+    # pins): green = every remaining check in logic, red = none, split = mixed,
+    # grey = all collected. A pin with nothing to check draws a plain dot.
+    _SQ = {OM.GREEN: (0.16, 0.78, 0.30), OM.RED: (0.86, 0.18, 0.18),
+           OM.GREY: (0.55, 0.55, 0.55)}
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._base_tex = None
+        self._hl_tex = None
+        self._here_tex = None
+        self._water_tex = None
+        self._layers = []       # [(cells, rgba)] clicked land selections
+        self._water = []        # [(cells, rgba)] clicked water selections
+        self._here = ([], (0, 0, 0, 0))
+        self._pos = None
+        self._geom = (0, 0, 1)  # (origin x, origin y, cell px)
+        self._squares = {"pins": {}, "hunts": {}}
+        self._dpins = []        # landmark pins whose square glows (rings)
+        self._hg_rects = {}     # section -> (x0, y0, x1, y1) hit box
+        self.on_hunt_click = None
+        self._edits = {}        # {(x, y): terrain class} live world edits
+        # party marker: the in-game map's pulsing diamond -- grows over
+        # 0.5 s then snaps back to small (user call 2026-09-05)
+        self._party = InstructionGroup()
+        self._party_ev = None
+        self._party_t = 0.0
+        with self.canvas:
+            Color(0.05, 0.05, 0.07, 1)
+            self._bg = Rectangle(pos=(0, 0), size=(0, 0))
+            Color(1, 1, 1, 1)
+            self._base_rect = Rectangle(pos=(0, 0), size=(0, 0))
+            Color(1, 1, 1, 1)
+            self._here_rect = Rectangle(pos=(0, 0), size=(0, 0))
+            # the clicked-place overlay has its OWN colour instruction so its
+            # alpha can breathe (user call 2026-09-05: slow 2 s pulse,
+            # 0.5 -> 1 -> 0.5) without re-blitting the texture
+            self._sel_col = Color(1, 1, 1, 1)
+            self._hl_rect = Rectangle(pos=(0, 0), size=(0, 0))
+            # water hunts: own layer so it can pulse OPPOSITE the land layer
+            self._water_col = Color(1, 1, 1, 1)
+            self._water_rect = Rectangle(pos=(0, 0), size=(0, 0))
+        self._pins = InstructionGroup()
+        # dungeon glow rings: own group so their Color can breathe with the
+        # water layer (opposite the land) without redrawing the pins
+        self._rings = InstructionGroup()
+        self._ring_col = Color(*self._RING_RGB, 1)
+        self.canvas.after.add(self._pins)
+        self.canvas.after.add(self._rings)
+        self.canvas.after.add(self._party)
+        self._pulse_ev = None
+        self._pulse_t = 0.0
+        self.bind(pos=self._relayout, size=self._relayout)
+        Clock.schedule_once(lambda _dt: self._ensure_textures(), 0)
+
+    _PULSE_PERIOD = 1.5          # user call 2026-09-05: 1.5 s, 0.25 -> 1 -> 0.25
+    _PULSE_LOW = 0.25
+
+    def _pulse(self, dt):
+        self._pulse_t = (self._pulse_t + dt) % self._PULSE_PERIOD
+        # triangle wave: LOW at t=0, 1.0 at half period, back to LOW
+        f = self._pulse_t / self._PULSE_PERIOD
+        tri = 1.0 - abs(2.0 * f - 1.0)
+        a = self._PULSE_LOW + (1.0 - self._PULSE_LOW) * tri
+        self._sel_col.a = a
+        # water breathes against land when both are lit (land at 1 -> water
+        # at LOW); alone it breathes like land
+        land_lit = any(c for c, _r in self._layers)
+        alt = (1.0 + self._PULSE_LOW - a) if land_lit else a
+        self._water_col.a = alt
+        self._ring_col.a = alt
+
+    def _set_pulsing(self, on):
+        if on and self._pulse_ev is None:
+            self._pulse_t = 0.0
+            self._pulse_ev = Clock.schedule_interval(self._pulse, 1 / 30.0)
+        elif not on and self._pulse_ev is not None:
+            self._pulse_ev.cancel()
+            self._pulse_ev = None
+            self._sel_col.a = 1.0
+            self._water_col.a = 1.0
+            self._ring_col.a = 1.0
+
+    # -- textures ---------------------------------------------------------
+    @staticmethod
+    def _new_texture():
+        tex = Texture.create(size=(OWD.W, OWD.H), colorfmt="rgba")
+        tex.mag_filter = "nearest"
+        tex.min_filter = "nearest"
+        return tex
+
+    def _blit_base(self):
+        """The baked picture with the live world edits painted over it (each
+        edited cell takes its new terrain's base shade)."""
+        W, H = OWD.W, OWD.H
+        cells = bytearray(OWD.cells())
+        for (x, y), cls in self._edits.items():
+            if 0 <= x < W and 0 <= y < H and 0 <= cls * 2 < len(OWD.PALETTE):
+                cells[y * W + x] = cls * 2
+        pal = [bytes((r, g, b, 255)) for r, g, b in OWD.PALETTE]
+        rows = []
+        for y in range(H - 1, -1, -1):          # bottom-up
+            row = cells[y * W:(y + 1) * W]
+            rows.append(b"".join(pal[c] for c in row))
+        self._base_tex.blit_buffer(b"".join(rows), colorfmt="rgba",
+                                   bufferfmt="ubyte")
+        self._base_rect.texture = self._base_tex
+        self.canvas.ask_update()
+
+    def set_edits(self, edits):
+        self._edits = dict(edits or {})
+        if self._base_tex is not None:
+            self._blit_base()
+
+    def _ensure_textures(self):
+        if self._base_tex is not None:
+            return
+        self._base_tex = self._new_texture()
+        self._blit_base()
+        self._hl_tex = self._new_texture()
+        self._water_tex = self._new_texture()
+        self._here_tex = self._new_texture()
+        self._base_rect.texture = self._base_tex
+        self._hl_rect.texture = self._hl_tex
+        self._water_rect.texture = self._water_tex
+        self._here_rect.texture = self._here_tex
+        self._blit_overlay()
+        self._blit_here()
+        self._relayout()
+
+    @staticmethod
+    def _paint_cells(layers):
+        W, H = OWD.W, OWD.H
+        buf = bytearray(W * H * 4)
+        for cells, rgba in layers:
+            if not cells:
+                continue
+            px = bytes(rgba)
+            for i in cells:
+                y, x = divmod(i, W)
+                o = ((H - 1 - y) * W + x) * 4
+                buf[o:o + 4] = px
+        return bytes(buf)
+
+    def _blit_overlay(self):
+        if self._hl_tex is None:
+            return
+        self._hl_tex.blit_buffer(self._paint_cells(self._layers),
+                                 colorfmt="rgba", bufferfmt="ubyte")
+        self._water_tex.blit_buffer(self._paint_cells(self._water),
+                                    colorfmt="rgba", bufferfmt="ubyte")
+        # a texture blit does not by itself dirty the canvas
+        self._hl_rect.texture = self._hl_tex
+        self._water_rect.texture = self._water_tex
+        self._set_pulsing(self._anything_lit())
+        self.canvas.ask_update()
+
+    def _blit_here(self):
+        if self._here_tex is None:
+            return
+        self._here_tex.blit_buffer(self._paint_cells([self._here]),
+                                   colorfmt="rgba", bufferfmt="ubyte")
+        self._here_rect.texture = self._here_tex
+        self.canvas.ask_update()
+
+    # -- public ------------------------------------------------------------
+    def set_selection(self, layers, water=()):
+        self._layers = list(layers)
+        self._water = list(water)
+        self._blit_overlay()
+
+    def set_here(self, cells, rgba):
+        self._here = (list(cells), tuple(rgba))
+        self._blit_here()
+
+    _PARTY_PERIOD = 0.5
+
+    def set_pos(self, pos):
+        self._pos = tuple(pos) if pos else None
+        if self._pos is not None and self._party_ev is None:
+            self._party_t = 0.0
+            self._party_ev = Clock.schedule_interval(self._party_tick, 1 / 30.0)
+        elif self._pos is None and self._party_ev is not None:
+            self._party_ev.cancel()
+            self._party_ev = None
+        self._draw_party()
+
+    def _party_tick(self, dt):
+        # sawtooth: small -> big over the period, then snap back
+        self._party_t = (self._party_t + dt) % self._PARTY_PERIOD
+        self._draw_party()
+
+    def _draw_party(self):
+        g = self._party
+        g.clear()
+        if self._pos is None:
+            return
+        ox, oy, s = self._geom
+        cx, cy = self._cell_center(*self._pos)
+        f = self._party_t / self._PARTY_PERIOD
+        # 30% smaller than the first cut (user call 2026-09-05)
+        r = 0.7 * (max(dp(5), s * 1.2) + f * max(dp(7), s * 1.6))
+        pts = [cx, cy + r, cx + r, cy, cx, cy - r, cx - r, cy]
+        g.add(Color(0.45, 0.35, 0.95, 0.9))
+        g.add(Line(points=pts, close=True, width=1.6))
+        g.add(Color(0.93, 0.92, 1.0, 0.95))
+        g.add(Quad(points=pts))
+        g.add(Color(0.75, 0.65, 1.0, 0.9))
+        g.add(Line(points=pts, close=True, width=1.0))
+        self.canvas.ask_update()
+
+    def set_squares(self, squares):
+        self._squares = squares or {"pins": {}, "hunts": {}}
+        self._draw_pins()
+
+    def _anything_lit(self):
+        return (any(c for c, _r in self._layers + self._water)
+                or bool(self._dpins))
+
+    def set_dungeon_pins(self, pins):
+        """Landmark pins whose square glows: a pulsing ring in the land
+        highlight colour, breathing with the water layer (opposite the
+        land) so the square and the land alternate (user call 2026-09-06)."""
+        self._dpins = list(pins or ())
+        self._draw_rings()
+        self._set_pulsing(self._anything_lit())
+
+    # the land selection colour (_MAP_SEL_RGBA), as floats
+    _RING_RGB = (1.0, 110 / 255.0, 0.0)
+
+    def _draw_rings(self):
+        g = self._rings
+        g.clear()
+        if not self._dpins:
+            self.canvas.ask_update()
+            return
+        _ox, _oy, s = self._geom
+        sq = max(dp(7), s * 2.2)
+        # 100% larger than the first cut, then brought in by half (user
+        # calls 2026-09-06); still clear of the square's corners
+        # +50% thickness grows INWARD toward the square: the line is centred
+        # on the path, so the radius gives back half the extra width
+        w = dp(1.8) * 1.5
+        r = (sq / 2.0 + dp(3)) * 1.5 - (w - dp(1.8)) / 2.0
+        g.add(self._ring_col)
+        for gx, gy, _kind, _name, pid in OWD.LANDMARKS:
+            if not pid or pid not in self._dpins:
+                continue
+            cx, cy = self._cell_center(gx, gy)
+            # round, not square (user call 2026-09-06)
+            g.add(Line(circle=(cx, cy, r), width=w))
+        self.canvas.ask_update()
+
+    def on_touch_down(self, touch):
+        if self.collide_point(*touch.pos):
+            for skey, (x0, y0, x1, y1) in self._hg_rects.items():
+                if x0 <= touch.x <= x1 and y0 <= touch.y <= y1:
+                    if self.on_hunt_click is not None:
+                        self.on_hunt_click(skey)
+                    return True
+        return super().on_touch_down(touch)
+
+    # -- layout / pins -----------------------------------------------------
+    def _relayout(self, *_a):
+        side = max(1.0, min(self.width, self.height))
+        ox = self.x + (self.width - side) / 2.0
+        oy = self.y + (self.height - side) / 2.0
+        self._bg.pos, self._bg.size = self.pos, self.size
+        for r in (self._base_rect, self._hl_rect, self._water_rect, self._here_rect):
+            r.pos = (ox, oy)
+            r.size = (side, side)
+        self._geom = (ox, oy, side / OWD.W)
+        self._draw_pins()
+        self._draw_rings()
+
+    def _cell_center(self, gx, gy):
+        ox, oy, s = self._geom
+        return ox + (gx + 0.5) * s, oy + (OWD.H - 1 - gy + 0.5) * s
+
+    def _square(self, g, cx, cy, size, state, ring=False):
+        r = size / 2.0
+        g.add(Color(0, 0, 0, 0.9))
+        g.add(Rectangle(pos=(cx - r - 1, cy - r - 1), size=(size + 2, size + 2)))
+        if state == OM.HALF:
+            g.add(Color(*self._SQ[OM.GREEN], 1))
+            g.add(Rectangle(pos=(cx - r, cy - r), size=(size, size)))
+            g.add(Color(*self._SQ[OM.RED], 1))
+            # lower-right half, split top-left -> bottom-right like PopTracker
+            g.add(Triangle(points=[cx - r, cy - r, cx + r, cy - r, cx + r, cy + r]))
+        else:
+            g.add(Color(*self._SQ.get(state, (1, 1, 1)), 1))
+            g.add(Rectangle(pos=(cx - r, cy - r), size=(size, size)))
+        if ring:
+            g.add(Color(1, 1, 1, 0.9))
+            g.add(Line(rectangle=(cx - r - 1, cy - r - 1, size + 2, size + 2),
+                       width=1.1))
+
+    def _draw_pins(self):
+        g = self._pins
+        g.clear()
+        ox, oy, s = self._geom
+        side = s * OWD.W
+        names_on = side >= dp(300)
+        font = dp(10) if side < dp(600) else dp(12)
+        sq = max(dp(7), s * 2.2)
+        pins_state = self._squares.get("pins") or {}
+        hunts = self._squares.get("hunts") or {}
+        placed = []          # occupied rects, labels avoid them
+        labels = []          # (cx, cy, half-size, text, tint)
+        for gx, gy, kind, name, pid in OWD.LANDMARKS:
+            cx, cy = self._cell_center(gx, gy)
+            st = pins_state.get(pid) if (pid and name) else None
+            if st is not None:
+                self._square(g, cx, cy, sq, st)
+                r = sq / 2.0
+                placed.append((cx - r, cy - r, cx + r, cy + r))
+            else:
+                d = dp(3) if kind == "dock" else dp(4.5)
+                g.add(Color(0, 0, 0, 0.8))
+                g.add(Ellipse(pos=(cx - d / 2 - 1, cy - d / 2 - 1),
+                              size=(d + 2, d + 2)))
+                g.add(Color(0.88, 0.88, 0.88, 1))
+                g.add(Ellipse(pos=(cx - d / 2, cy - d / 2), size=(d, d)))
+                r = d / 2.0
+            if name and names_on:
+                labels.append((cx, cy, r, name, (1, 1, 1, 1)))
+        self._hg_rects = {}
+        for skey, (gx, gy) in OWD.HUNTING_SQUARES.items():
+            st = hunts.get(skey)
+            if st is None:
+                continue
+            cx, cy = self._cell_center(gx, gy)
+            big = sq * 1.4
+            self._square(g, cx, cy, big, st, ring=True)
+            r = big / 2.0
+            rect = (cx - r - dp(2), cy - r - dp(2), cx + r + dp(2), cy + r + dp(2))
+            placed.append(rect)
+            self._hg_rects[skey] = rect
+            if names_on:
+                labels.append((cx, cy, r, _hunt_label(skey), (1.0, 0.93, 0.35, 1)))
+        # Labels: greedy placement right / left / above / below the marker,
+        # first slot that overlaps nothing already placed; least overlap
+        # otherwise. Top-to-bottom order so the outcome is stable.
+        pad = dp(2)
+        for cx, cy, r, text, tint in sorted(labels, key=lambda t: (-t[1], t[0])):
+            tex = _text_texture(text, font)
+            if tex is None:
+                continue
+            w, h = tex.size
+            cands = ((cx + r + pad, cy - h / 2.0), (cx - r - pad - w, cy - h / 2.0),
+                     (cx - w / 2.0, cy + r + pad), (cx - w / 2.0, cy - r - pad - h))
+            best, best_ov = None, None
+            for lx, ly in cands:
+                lx = min(max(lx, ox), ox + side - w)
+                ly = min(max(ly, oy), oy + side - h)
+                rect = (lx, ly, lx + w, ly + h)
+                ov = sum(_overlap(rect, p) for p in placed)
+                if ov <= 0:
+                    best = rect
+                    break
+                if best_ov is None or ov < best_ov:
+                    best, best_ov = rect, ov
+            placed.append(best)
+            g.add(Color(*tint))
+            g.add(Rectangle(texture=tex, pos=(best[0], best[1]), size=(w, h)))
+        self._draw_party()
+        self.canvas.ask_update()
+
+
+_TEXT_TEX_CACHE = {}
+
+
+def _text_texture(text, font_size):
+    """A cached outlined text texture for map pin labels (CoreLabel, no
+    widget). Outline support depends on the text provider; without it the
+    label still renders, just without the dark edge."""
+    key = (text, int(font_size))
+    tex = _TEXT_TEX_CACHE.get(key)
+    if tex is not None:
+        return tex
+    try:
+        try:
+            cl = CoreLabel(text=text, font_size=font_size, bold=True,
+                           color=(1, 1, 1, 1), outline_width=2,
+                           outline_color=(0, 0, 0, 1))
+        except TypeError:
+            cl = CoreLabel(text=text, font_size=font_size, bold=True,
+                           color=(1, 1, 1, 1))
+        cl.refresh()
+        tex = cl.texture
+    except Exception as ex:
+        logger.debug(f"map label texture failed for {text!r}: {ex}")
+        return None
+    _TEXT_TEX_CACHE[key] = tex
+    return tex
+
+
+def _overlap(a, b):
+    """Intersection area of two (x0, y0, x1, y1) rects."""
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    h = min(a[3], b[3]) - max(a[1], b[1])
+    return w * h if (w > 0 and h > 0) else 0.0
+
+
+def _hunt_label(skey):
+    return TR.SECTION_DISPLAY.get(skey, skey).split("/")[0] + " hunting"
+
+
+def _map_legend_markup(_forests_on=True):
+    """The squares legend only (the terrain-word line was dropped on user
+    call 2026-09-05); words in their colour, no glyphs (the client font has
+    no symbol coverage). One entry per line since it moved into the narrow
+    side column (2026-09-06)."""
+    return ("[b]Squares[/b]\n"
+            "[color=29C74D]green[/color]  all in logic\n"
+            "[color=DB2E2E]red[/color]  none in logic\n"
+            "[color=29C74D]green[/color]/[color=DB2E2E]red[/color]  mixed\n"
+            "[color=8C8C8C]grey[/color]  all found\n"
+            "[color=FFEB59]ringed[/color]  overworld hunting grounds "
+            "(click to show)")
+
+
+def _panel_label(markup, font_size=None):
+    """A wrapping label for the Map tab's side panels: text_size pinned on
+    WIDTH only, height grows with the text (the size-pinned Label was the
+    root of every fragment on this tab, see kivy-text-size memory)."""
+    kw = {"font_size": font_size} if font_size is not None else {}
+    lbl = Label(text=markup, markup=True, halign="left", valign="top",
+                size_hint_y=None, **kw)
+    lbl.bind(width=lambda w, v: setattr(w, "text_size", (v, None)))
+    lbl.bind(texture_size=lambda w, v: setattr(w, "height", v[1]))
+    return lbl
+
+
+class _MapPanel(BoxLayout):
+    """A framed box in the Map tab's side column, after the in-game map
+    screen's blue windows: dark navy fill, light outline, a little padding.
+    Sizes itself to its one child (which must grow on texture_size)."""
+
+    def __init__(self, child, **kw):
+        super().__init__(orientation="vertical", size_hint_y=None,
+                         padding=dp(8), **kw)
+        with self.canvas.before:
+            Color(0.05, 0.08, 0.32, 1)
+            self._fill = Rectangle(pos=self.pos, size=self.size)
+            Color(0.80, 0.84, 0.95, 1)
+            self._edge = Line(rectangle=(0, 0, 0, 0), width=1.2)
+        self.add_widget(child)
+        child.bind(height=self._fit)
+        self.bind(pos=self._frame, size=self._frame)
+        self._fit(child, child.height)
+
+    def _fit(self, child, h):
+        self.height = h + self.padding[1] + self.padding[3]
+
+    def _frame(self, *_a):
+        self._fill.pos, self._fill.size = self.pos, self.size
+        self._edge.rectangle = (self.x + 1, self.y + 1,
+                                self.width - 2, self.height - 2)
+
+
+class _MapHeaderRow(BoxLayout):
+    """A Bestiary group header that links to the Map tab: the same look as
+    _ShopHeaderRow (name over a hairline rule) plus a tap target.
+
+    THE TAP TARGET IS THE LABEL, not this row (2026-09-06, player report: the
+    heading did nothing at all while monster rows lit the map fine). Every Map
+    link that works is a _ClickLabel; this header was the only one that hung
+    its handler on a BoxLayout, which is the sole structural difference between
+    the working path and the dead one. The row keeps its own on_touch_down as a
+    fallback so a tap on the hairline rule still counts."""
+
+    def __init__(self, name, hexc, on_press=None, **kw):
+        super().__init__(orientation="vertical", size_hint_y=None,
+                         height=dp(24), **kw)
+        self._on_press = on_press
+        rgba = tuple(int(hexc[i:i + 2], 16) / 255 for i in (0, 2, 4)) + (0.55,)
+        # NO size_hint_y / height here: _ClickLabel passes both to Label
+        # itself, and repeating them raises "got multiple values for keyword
+        # argument 'size_hint_y'" -- which _paint_bestiary_safe swallows, so
+        # every Bestiary section renders EMPTY with only a log warning
+        # (shipped and caught live 2026-09-06).
+        lbl = _ClickLabel(f"[b][color={hexc}]{name}[/color][/b]",
+                          on_press=on_press, wrap=True)
+        lbl.valign = "bottom"
+        # _ClickLabel(wrap=True) already grows itself on texture_size; the row
+        # just follows its height. Binding _grow to texture_size as well would
+        # put two writers on lbl.height with different floors.
+        lbl.bind(height=lambda w, h: setattr(self, "height", h + dp(3)))
+        self.add_widget(lbl)
+        rule = Widget(size_hint_y=None, height=dp(2))
+        with rule.canvas:
+            Color(*rgba)
+            self._line = Rectangle(pos=rule.pos, size=(0, dp(1)))
+        rule.bind(pos=lambda w, _v: self._sync(w),
+                  size=lambda w, _v: self._sync(w))
+        self.add_widget(rule)
+
+    def _sync(self, w):
+        self._line.pos = (w.x, w.y + dp(1))
+        self._line.size = (w.width, dp(1))
+
+    def on_touch_down(self, touch):
+        # Fallback only: the label child claims its own touch first and returns
+        # True, so this fires for the hairline rule and the row's padding.
+        if super().on_touch_down(touch):
+            return True
+        if self.collide_point(*touch.pos) and self._on_press:
+            self._on_press()
+            return True
+        return False
+
+
 class _ShopHeaderRow(BoxLayout):
     """A shop name with a hairline rule under it, in the shop's category color.
     The rule is what turns a stack of shops into visible blocks."""
@@ -2471,9 +3648,19 @@ class _ShopHeaderRow(BoxLayout):
         self._line.size = (w.width, dp(1))
 
 
-def _shop_header(name, kind=None):
-    """The shop's name over a hairline rule in its category color."""
-    hexc = _SHOP_KIND_COLOR.get(kind, "D0D0D0")
+def _hex(rgb):
+    """(r, g, b) floats -> "RRGGBB" for Kivy markup; None -> neutral grey."""
+    if not rgb:
+        return "D0D0D0"
+    return "".join(f"{max(0, min(255, int(round(c * 255)))):02X}"
+                   for c in rgb[:3])
+
+
+def _shop_header(name, kind=None, hexc=None):
+    """The shop's name over a hairline rule in its category color (or an
+    explicit hex, which the Bestiary uses for its section colour)."""
+    if hexc is None:
+        hexc = _SHOP_KIND_COLOR.get(kind, "D0D0D0")
     rgba = tuple(int(hexc[i:i + 2], 16) / 255 for i in (0, 2, 4)) + (0.55,)
     return _ShopHeaderRow(f"[color={hexc}]{name}[/color]", rgba)
 

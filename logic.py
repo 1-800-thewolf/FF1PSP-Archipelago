@@ -757,6 +757,9 @@ def access_nodes(early: bool, extended: bool, northern_docks: bool = False,
     crescent = [[AIRSHIP], [SHIP, CANAL]] + ([[CANOE]] if early else [])
     # Mount Gulg = Airship OR (Crescent Lake + Canoe); Ice Cave = Airship OR Canoe
     gulg = _simplify([[AIRSHIP]] + _and_all(crescent, [CANOE]))
+    # The LANDMASS Mount Gulg stands on, for the bestiary's overworld sources:
+    # the key below seals the cave mouth, not the grass around it.
+    gulg_land = gulg
     # mount_gulg_key seals the OVERWORLD entrance, so the key is required on top
     # of however you got there -- the airship does not bypass a walled cave mouth.
     if gulg_key:
@@ -766,7 +769,8 @@ def access_nodes(early: bool, extended: bool, northern_docks: bool = False,
         "duergar": duergar, "inner_sea": inner_sea, "melmond": melmond,
         "onrac": onrac, "caravan": caravan, "mirage_desert": mirage_desert,
         "mirage_tower": mirage_tower, "flying_fortress": flying_fortress,
-        "crescent": crescent, "gulg": gulg, "ice_cave": ice_cave,
+        "crescent": crescent, "gulg": gulg, "gulg_land": gulg_land,
+        "ice_cave": ice_cave,
         "giants": giants, "sardas": sardas,
         "lefein_land": lefein_land, "gaia": gaia,
     }
@@ -995,6 +999,7 @@ EVENTS = [
 # the table read for them -- so their places come from the hd/cf/ff rows.
 from .bestiary_data import (ACCESS_CLASSES, AUTHORED_HARDER_DUNGEONS,
                             BESTIARY_ELIGIBLE, BESTIARY_SOURCES, SOURCE_LABELS,
+                            SOURCE_BEST_SLOT,
                             CAVE_MAP_DUNGEON, CHAOS_FLOOR_MAP, DUNGEON_MONSTERS,
                             HARDER_TARGET, SOURCE_GATE, SOURCE_KEY_GATE,
                             DUNGEON_DISPLAY, FORMATION_MONSTERS, ZONE_ACCESS,
@@ -1136,6 +1141,13 @@ _BESTIARY_SCRIPTED_RULES = {
     0x4C: _BESTIARY_DUNGEON_RULES["fortress"],  # Guardians
 }
 
+# Monster-tile access for the maps that have tiles but no random-encounter
+# row (bestiary_data "tile" keys outside CAVE_MAP_DUNGEON; gen_bestiary_areas
+# TILE_PLACES). Every other tile map answers with its dungeon's rule.
+_BESTIARY_TILE_RULES = {
+    0x58: [[SHIP]],                             # Western Keep (Astos' castle)
+}
+
 # Bonus-dungeon gates by dungeon index (BONUS_DUNGEONS order): crystal seal +
 # entrance vehicles (DLC_DUNGEON_EXTRA_TOKENS; Whisperwind's Ice-Cave OR is
 # folded to its Ship+Canal alternative -- conservative, early toggles only relax).
@@ -1173,6 +1185,14 @@ PARTY_GATE_EVENT = {                 # EVENTS, by location name
     "Flying Fortress - Tiamat": 3,
 }
 PARTY_GATE_GOAL = 3                  # the Chaos goal location
+# Ordinary static chests deep enough to need a real party, by treasure index.
+# Cavern of Ice Chest #8..#15 (idx 200-207) sit past the B2 drop, in the stretch
+# the Levistone guards -- Piscodemon/Astos-tier packs with no retreat, the same
+# "two members cannot honestly do this" case as Kraken.
+PARTY_GATE_CHEST = {idx: 2 for idx in range(200, 208)}
+# NPC / event pickups, by NPC_LOCATIONS name. The Levistone is the bottom of
+# that same Ice Cave stretch, so it carries the chests' threshold.
+PARTY_GATE_NPC = {"Ice Cave NPC: Levistone": 2}
 # Static boss-chamber chests, by BONUS_DUNGEONS index (the value space of
 # DLC_STATIC_IDX_DUNGEON): Earthgift 2, Hellfire 2, Lifespring 3, Whisperwind 4.
 PARTY_GATE_STATIC_DG = {0: 2, 1: 2, 2: 3, 3: 4}
@@ -1252,6 +1272,15 @@ def _bestiary_source_rule_ungated(source, opts):
         return [[SHIP, CANAL, CANOE], [AIRSHIP, CANOE]]
     if kind == "scripted":
         return _BESTIARY_SCRIPTED_RULES[key]
+    if kind == "tile":
+        # Fixed-formation trigger tiles: on-disc map data, untouched by the
+        # harder-dungeon reroll (that swaps encounter ROWS, not formations),
+        # so the baked place is real on every seed. Same geography as the
+        # dungeon it sits in; the Western Keep has no dungeon row.
+        rule = _BESTIARY_TILE_RULES.get(key)
+        if rule is None:
+            rule = _BESTIARY_DUNGEON_RULES[CAVE_MAP_DUNGEON[key]]
+        return rule
     if kind in ("hd", "cf", "ff"):
         return _BESTIARY_DUNGEON_RULES[key]     # authored rows, keyed by dungeon
     if kind == "dlc":
@@ -1340,12 +1369,59 @@ def bestiary_minion_monsters(minion_plan, bonus_excluded=False):
 # instead of read from the bake. overworld_sources() does that translation; the
 # static entries are IGNORED whenever a derived map is supplied, and contribute
 # nothing when one is not -- guessing from vanilla is what caused the bug.
-def overworld_sources(zones_overworld, ow_hi=None):
+# The engine's 8-slot encounter roll is NOT uniform: scramble 0x08945850 lands
+# on slots 0-3 with 12/64 each, 4-5 with 6/64, 6 with 3/64 and 7 with 1/64
+# (iso_patcher._SLOT_WEIGHT_COUNTS). A monster that sits only in slot 7 of a
+# place is a 1-in-64 fight there; the tab says so rather than sending the
+# player to grind it (Black Widow in the Temple of Chaos, report 2026-09-04).
+SLOT_ODDS_PCT = (18.75, 18.75, 18.75, 18.75, 9.375, 9.375, 4.6875, 1.5625)
+# Below this best-slot chance a place reads as "(rare N%)" on the tab.
+RARE_BELOW_PCT = 5.0
+
+
+def _note_odds(odds, mon, source, slot):
+    """odds[(mon, source)] = the monster's BEST slot chance at that place."""
+    if odds is None:
+        return
+    pct = SLOT_ODDS_PCT[slot]
+    key = (mon, source)
+    if pct > odds.get(key, 0.0):
+        odds[key] = pct
+
+
+def source_odds_pct(mon, source, odds=None):
+    """Chance (%) that one random battle at `source` is a formation carrying
+    `mon` -- the BEST 8-slot roll index it occupies there -- or None when the
+    fight is guaranteed (scripted / bonus bosses / minions carry no slot).
+
+    The seed's own rolled tables come first (`odds`, filled by
+    overworld_sources / cave_sources); everything else is the baked
+    bestiary_data.SOURCE_BEST_SLOT, emitted from the same pool rows the
+    patcher bakes."""
+    if odds is not None:
+        pct = odds.get((mon, source))
+        if pct is not None:
+            return pct
+    slot = SOURCE_BEST_SLOT.get(source, {}).get(mon)
+    return None if slot is None else SLOT_ODDS_PCT[slot]
+
+
+def source_is_rare(mon, source, odds=None):
+    """A fight logic must not lean on: under RARE_BELOW_PCT (slots 6-7,
+    i.e. 4.7% and 1.6%). User call 2026-09-04: a 1.6% Hill Gigas may hold a
+    Useful item, never a Progression one, unless a >=5% place is in logic."""
+    pct = source_odds_pct(mon, source, odds)
+    return pct is not None and pct < RARE_BELOW_PCT
+
+
+def overworld_sources(zones_overworld, ow_hi=None, odds=None):
     """{mon: {('ow', (tier, class)), ...}} from a rolled zones_overworld table.
 
     zones_overworld -- 512 bytes, 64 zones x 8 slots (rando's table, as shipped)
     ow_hi           -- the companion HIGH-BYTE table (harder_overworld ships u16
                        DLC formation ids); None when the seed has no companion.
+    odds            -- optional dict filled with {(mon, source): best slot %}
+                       (SLOT_ODDS_PCT), for the tab's rarity tag.
 
     Zones with no standing room (all sea / unused) carry no ZONE_ACCESS entry and
     are skipped -- a formation parked there can never be walked into."""
@@ -1360,6 +1436,65 @@ def overworld_sources(zones_overworld, ow_hi=None):
                 fid |= ow_hi[i] << 8
             for mon in FORMATION_MONSTERS.get(fid, ()):
                 out.setdefault(mon, set()).add(("ow", key))
+                _note_odds(odds, mon, ("ow", key), slot)
+    return out
+
+
+def _ow_zone_scan(zones_overworld, ow_hi=None):
+    """(zone, slot, fid) for every rolled overworld zone row, ZONE_ACCESS
+    order. Zones with no standing room carry no ZONE_ACCESS entry and are
+    skipped, exactly as overworld_sources skips them."""
+    if not zones_overworld or len(zones_overworld) < 64 * 8:
+        return
+    for zi in ZONE_ACCESS:
+        for slot in range(8):
+            i = zi * 8 + slot
+            fid = zones_overworld[i]
+            if ow_hi and i < len(ow_hi) and ow_hi[i]:
+                fid |= ow_hi[i] << 8
+            yield zi, slot, fid
+
+
+def overworld_zone_sources(zones_overworld, ow_hi=None):
+    """{mon: {zone, ...}} -- the ACTUAL 32x32 encounter zones a monster rolls in.
+
+    overworld_sources() keys by ZONE_ACCESS, which is a reachability NODE, not
+    a zone, and 13 of the 19 land nodes cover several zones (Crescent Lake =
+    54, 55, 62, 63; Pravoka = eight). Unioning their rows under one heading is
+    right for LOGIC -- every zone behind a node opens at the same time -- and
+    wrong for HUNTING: standing east of Crescent Lake (zone 55, whose row is
+    Wraith / Chimera / Fire Hydra / Fire Lizard) you can never meet zone 62's
+    Rakshasa, which the same heading promises (live report 2026-09-07).
+
+    The heading taxonomy and its access gates are untouched; the Map tab and
+    the "You are in" line narrow with this."""
+    out = {}
+    for zi, _slot, fid in _ow_zone_scan(zones_overworld, ow_hi):
+        for mon in FORMATION_MONSTERS.get(fid, ()):
+            out.setdefault(mon, set()).add(zi)
+    return out
+
+
+def overworld_zone_rows(zones_overworld, ow_hi=None):
+    """{zone: [{"mon", "name", "pct"}, ...]} -- what ONE zone rolls, commonest
+    first. The companion of overworld_zone_sources: that answers "where is this
+    monster really", this answers "what can actually jump me here". `pct` is the
+    monster's best slot chance IN THIS ZONE (SLOT_ODDS_PCT), so it is the number
+    the party experiences, not the union's best."""
+    best = {}
+    for zi, slot, fid in _ow_zone_scan(zones_overworld, ow_hi):
+        for mon in FORMATION_MONSTERS.get(fid, ()):
+            key = (zi, mon)
+            pct = SLOT_ODDS_PCT[slot]
+            if pct > best.get(key, 0.0):
+                best[key] = pct
+    out = {}
+    for (zi, mon), pct in best.items():
+        out.setdefault(zi, []).append(
+            {"mon": mon, "name": BESTIARY_MONSTER_NAME.get(mon, f"{mon:#04x}"),
+             "pct": pct})
+    for rows in out.values():
+        rows.sort(key=lambda e: (-e["pct"], e["name"]))
     return out
 
 
@@ -1377,11 +1512,12 @@ def _gate_open(gate, opts):
                is want for opt, want in gate)
 
 
-def cave_sources(zones_caves, opts=None):
+def cave_sources(zones_caves, opts=None, odds=None):
     """{mon: {('cave', map_id), ...}} from a rolled zones_caves table.
 
     zones_caves -- rando's cave table as shipped (8 slots per map id), or None.
     opts        -- the seed's bestiary opts.
+    odds        -- optional dict filled with {(mon, source): best slot %}.
 
     The cave twin of overworld_sources. Boss cameos need no special case: they
     are stamped INTO this table (rando._stamp_boss_slots), so reading the bytes
@@ -1402,13 +1538,18 @@ def cave_sources(zones_caves, opts=None):
         for slot in range(8):
             for mon in FORMATION_MONSTERS.get(zones_caves[base + slot], ()):
                 out.setdefault(mon, set()).add(("cave", mid))
+                _note_odds(odds, mon, ("cave", mid), slot)
     return out
 
 
 def bestiary_rule_alts(mon, opts, minion_rules=None, ow_sources=None,
-                       cave_sources=None):
+                       cave_sources=None, odds=None, common_only=False):
     """All access alternatives for a monster under the seed's options; [] means
     not huntable this seed (no location, no logic).
+
+    common_only -- drop every place where the monster is a RARE roll
+                   (source_is_rare); minion fights are never rare. This is
+                   the progression-grade rule; see bestiary_rules.
 
     Places come from bestiary_place_sources, so what logic counts and what the
     Bestiary tab shows can never disagree."""
@@ -1425,6 +1566,8 @@ def bestiary_rule_alts(mon, opts, minion_rules=None, ow_sources=None,
             alts.append(alt)
 
     for source in bestiary_place_sources(mon, opts, ow_sources, cave_sources):
+        if common_only and source_is_rare(mon, source, odds):
+            continue
         for alt in bestiary_source_rule(source, opts):
             _add(alt)
     if minion_rules:
@@ -1434,3 +1577,28 @@ def bestiary_rule_alts(mon, opts, minion_rules=None, ow_sources=None,
     if [] in alts:
         return [[]]
     return alts
+
+
+def bestiary_rules(mon, opts, minion_rules=None, ow_sources=None,
+                   cave_sources=None, odds=None):
+    """(access alts, progression_ok) for one monster's bestiary location.
+
+    Logic never expects a player to farm a <5% fight for a REQUIRED item
+    (user call 2026-09-04):
+      * a monster with at least one common (>=5%) place gets the COMMON
+        places as its access rule -- a rare place neither opens the check
+        in logic nor lights it on the tab -- and may hold anything;
+      * a monster whose every place is rare keeps those places as its rule
+        (the check exists, is reachable, shows on the tab) but
+        progression_ok is False: __init__ pins a no-advancement item_rule on
+        it, so it can only ever hold Useful or filler.
+    ([], False) = not huntable this seed at all."""
+    every = bestiary_rule_alts(mon, opts, minion_rules, ow_sources,
+                               cave_sources, odds)
+    if not every:
+        return [], False
+    common = bestiary_rule_alts(mon, opts, minion_rules, ow_sources,
+                                cave_sources, odds, common_only=True)
+    if common:
+        return common, True
+    return every, False

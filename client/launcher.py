@@ -24,9 +24,12 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
+
+from . import hostproc
 
 # The fixed local debugger port we pin in the ini. ppsspp_ws.LOCAL_HINT must match.
 DEBUG_PORT = 8765
@@ -131,12 +134,39 @@ def remote_psp_target(cfg: dict = None):
 
 
 # ------------------------------------------------------------ PPSSPP locating ---
+def _posix_ppsspp_candidates(home: str, which=shutil.which, globf=glob.glob):
+    """Linux / macOS PPSSPP launchables, best first (pure; tested offline).
+    PATH wins (distro package, symlinked AppImage), then the Flathub flatpak's
+    exported wrapper -- what EmuDeck installs on the Steam Deck, so it is THE
+    mainstream Linux case -- then bare AppImages in the usual drop folders."""
+    out = []
+    for name in ("PPSSPPSDL", "PPSSPPQt", "ppsspp"):
+        w = which(name)
+        if w:
+            out.append(w)
+    out += [os.path.join("/var/lib/flatpak/exports/bin", hostproc.FLATPAK_APP_ID),
+            os.path.join(home, ".local", "share", "flatpak", "exports", "bin",
+                         hostproc.FLATPAK_APP_ID),
+            "/usr/bin/PPSSPPSDL", "/usr/local/bin/PPSSPPSDL",
+            "/usr/games/ppsspp", "/usr/bin/ppsspp"]
+    for pat in ("Applications/*PPSSPP*.AppImage", "Downloads/*PPSSPP*.AppImage",
+                "Desktop/*PPSSPP*.AppImage", "Applications/PPSSPP*/PPSSPPSDL"):
+        out += sorted(globf(os.path.join(home, pat)))
+    if hostproc.IS_MAC:
+        out += ["/Applications/PPSSPPSDL.app/Contents/MacOS/PPSSPPSDL",
+                os.path.join(home, "Applications", "PPSSPPSDL.app", "Contents",
+                             "MacOS", "PPSSPPSDL")]
+    return out
+
+
 def _ppsspp_candidates():
     """Likely PPSSPP executable paths, best first."""
     out = []
     env = os.environ.get("FF1PSP_PPSSPP")
     if env:
         out.append(env)
+    if not hostproc.IS_WINDOWS:
+        return out + _posix_ppsspp_candidates(os.path.expanduser("~"))
     pf = [os.environ.get("ProgramFiles", ""),
           os.environ.get("ProgramFiles(x86)", ""),
           os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")]
@@ -172,6 +202,25 @@ def find_ppsspp(saved: str = "") -> str:
 
 
 # --------------------------------------------------------------- ISO locating ---
+def _posix_iso_roots(home: str, globf=glob.glob):
+    """Where Linux players keep PSP discs: PPSSPP's own memstick GAME dirs
+    (native and flatpak), EmuDeck's Emulation/roms/psp, generic ROMs folders,
+    and the same layouts on Steam Deck SD cards under /run/media."""
+    roots = [os.path.join(home, ".config", "ppsspp", "PSP", "GAME"),
+             os.path.join(home, ".var", "app", hostproc.FLATPAK_APP_ID,
+                          "config", "ppsspp", "PSP", "GAME"),
+             os.path.join(home, "Emulation", "roms", "psp"),
+             os.path.join(home, "ROMs"), os.path.join(home, "roms"),
+             os.path.join(home, "Games")]
+    for pat in ("/run/media/*/Emulation/roms/psp",
+                "/run/media/*/*/Emulation/roms/psp",
+                "/run/media/*/ROMs", "/run/media/*/*/ROMs",
+                "/run/media/*/roms", "/run/media/*/*/roms",
+                "/media/*/*/Emulation/roms/psp", "/media/*/*/ROMs"):
+        roots += sorted(globf(pat))
+    return roots
+
+
 # Any PSP disc id as it appears in an image header: media/publisher pair, a
 # REGION letter, a type letter, five digits (dashed in UMD_DATA.BIN, undashed
 # deeper in the data). We read the region letter so a rejection can name what
@@ -267,8 +316,10 @@ def _iso_install_roots(ppsspp_exe: str):
     so a player who dropped the ISO into the Program Files PPSSPP folder (or a
     subfolder they made inside it) is still found when the exe was not."""
     roots = []
-    if ppsspp_exe:
+    if ppsspp_exe and not hostproc.is_flatpak_exe(ppsspp_exe):
         roots.append(os.path.dirname(ppsspp_exe))
+    if not hostproc.IS_WINDOWS:
+        return roots + _posix_iso_roots(os.path.expanduser("~"))
     for base in (os.environ.get("ProgramFiles", ""),
                  os.environ.get("ProgramFiles(x86)", ""),
                  os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs"),
@@ -420,6 +471,36 @@ def find_iso(ppsspp_exe: str = "", saved: str = "") -> str:
 
 
 # ---------------------------------------------------------------- ini patching ---
+def _posix_ini_candidates(exe: str, home: str, env, isfile=os.path.isfile) -> list:
+    """Where a Linux / macOS PPSSPP reads ppsspp.ini (pure; tested offline).
+
+    NativeApp.cpp: memstick = $XDG_CONFIG_HOME/ppsspp, else ~/.config/ppsspp;
+    the ini is <memstick>/PSP/SYSTEM/ppsspp.ini. The flatpak runs with its own
+    XDG_CONFIG_HOME = ~/.var/app/org.ppsspp.PPSSPP/config, so when the chosen
+    exe is the flatpak wrapper THAT copy is the active one. The active copy is
+    always returned (patch_ini creates it if missing -- PPSSPP then loads it
+    and fills in defaults); the other layout only when it already exists.
+    ~/Documents/PPSSPP is never read on POSIX. Portable layouts beside the
+    binary are honoured only when present: never create dirs under /usr or
+    /var/lib/flatpak."""
+    tail = os.path.join("PSP", "SYSTEM", "ppsspp.ini")
+    flat = os.path.join(home, ".var", "app", hostproc.FLATPAK_APP_ID, "config",
+                        "ppsspp", tail)
+    xdg = env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    native = os.path.join(xdg, "ppsspp", tail)
+    if hostproc.is_flatpak_exe(exe):
+        cands = [flat] + ([native] if isfile(native) else [])
+    else:
+        cands = [native] + ([flat] if isfile(flat) else [])
+    if exe:
+        exedir = os.path.dirname(exe)
+        for c in (os.path.join(exedir, "memstick", tail),
+                  os.path.join(exedir, tail)):
+            if isfile(c):
+                cands.append(c)
+    return cands
+
+
 def find_inis(ppsspp_exe: str) -> list:
     """All ppsspp.ini paths the running PPSSPP might read. Which one is ACTIVE
     depends on portable-mode detection (the Documents copy has won in practice,
@@ -432,9 +513,17 @@ def find_inis(ppsspp_exe: str) -> list:
     only the exe-dir ini existed, we patched it, and PPSSPP (installed.txt
     present -> non-portable) then CREATED the Documents ini from defaults one
     second later with RemoteDebuggerOnStartup=False, so the debugger never bound
-    and the client timed out after 181s (live log 2026-08-07)."""
+    and the client timed out after 181s (live log 2026-08-07).
+
+    POSIX (Linux / macOS) is a different map entirely -- see
+    _posix_ini_candidates. The Steam Deck bundle of 2026-09-07 showed this
+    Windows list writing a junk ~/Documents/PPSSPP copy that no Linux PPSSPP
+    ever reads, so the pinned debugger port never reached the emulator."""
     if not ppsspp_exe:
         return []
+    if not hostproc.IS_WINDOWS:
+        return _dedupe_paths(_posix_ini_candidates(
+            ppsspp_exe, os.path.expanduser("~"), os.environ))
     exedir = os.path.dirname(ppsspp_exe)
     cands = [
         os.path.join(exedir, "PSP", "SYSTEM", "ppsspp.ini"),
@@ -453,6 +542,10 @@ def find_inis(ppsspp_exe: str) -> list:
                 cands.append(os.path.join(root, "PSP", "SYSTEM", "ppsspp.ini"))
     except Exception:
         pass
+    return _dedupe_paths(cands)
+
+
+def _dedupe_paths(cands):
     seen, out = set(), []
     for c in cands:
         k = os.path.normcase(os.path.abspath(c))
@@ -617,8 +710,20 @@ _LAST_LAUNCH = None
 
 
 def child_exited():
-    """True iff WE launched a PPSSPP and that process has exited."""
-    return _CHILD is not None and _CHILD.poll() is not None
+    """True iff WE launched a PPSSPP and the emulator is gone.
+
+    Windows: our Popen IS the emulator, so poll() is the answer. POSIX: the
+    Popen may be a wrapper -- the flatpak's exported `sh` script around
+    `flatpak run`, an AppImage runtime -- that can return while PPSSPPSDL
+    lives on. The Deck log (2026-09-07) showed exactly that: wrapper gone
+    after the first wait, emulator still on screen, and the "died during
+    startup" retry launched a SECOND one. Off Windows the process table has
+    the final say."""
+    if _CHILD is None or _CHILD.poll() is None:
+        return False
+    if hostproc.IS_WINDOWS:
+        return True
+    return not ppsspp_process_running()
 
 
 def relaunch_last(notify=None, stop=None) -> bool:
@@ -638,11 +743,12 @@ def relaunch_last(notify=None, stop=None) -> bool:
 
 def launch_ppsspp(exe: str, iso: str):
     global _CHILD, _LAST_LAUNCH
-    flags = 0
+    kw = {}
     if os.name == "nt":
-        flags = subprocess.CREATE_NEW_PROCESS_GROUP  # survive client exit
-    _CHILD = subprocess.Popen([exe, iso], cwd=os.path.dirname(exe),
-                              creationflags=flags)
+        kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # survive client exit
+    else:
+        kw["start_new_session"] = True     # same intent: own session, outlives us
+    _CHILD = subprocess.Popen([exe, iso], cwd=os.path.dirname(exe), **kw)
     _LAST_LAUNCH = (exe, iso)
     return _CHILD
 
@@ -669,15 +775,10 @@ def read_u16_via_debugger(addr: int):
 
 
 def kill_ppsspp():
-    """Terminate any running PPSSPP so we can relaunch on the patched ISO."""
-    if os.name != "nt":
-        return
-    for exe in ("PPSSPPWindows64.exe", "PPSSPPWindows.exe"):
-        try:
-            subprocess.run(["taskkill", "/F", "/IM", exe],
-                           capture_output=True, timeout=10)
-        except Exception:
-            pass
+    """Terminate any running PPSSPP so we can relaunch on the patched ISO.
+    Every platform -- see hostproc.kill_ppsspp (taskkill on Windows;
+    SIGTERM, `flatpak kill`, then SIGKILL on POSIX)."""
+    hostproc.kill_ppsspp()
 
 
 def ppsspp_process_running() -> bool:
@@ -685,18 +786,7 @@ def ppsspp_process_running() -> bool:
     Guards against launching a SECOND instance: with two PPSSPPs the bridge
     can attach to the idle one -- every write lands in dead RAM while the
     live game ignores us (see memory: two-instances silent dead writes)."""
-    if os.name != "nt":
-        return False
-    for exe in ("PPSSPPWindows64.exe", "PPSSPPWindows.exe"):
-        try:
-            out = subprocess.run(
-                ["tasklist", "/FI", f"IMAGENAME eq {exe}", "/NH"],
-                capture_output=True, text=True, timeout=5).stdout
-            if exe.lower() in (out or "").lower():
-                return True
-        except Exception:
-            pass
-    return False
+    return hostproc.ppsspp_running()
 
 
 def port_squatter(port=DEBUG_PORT):
@@ -710,27 +800,9 @@ def port_squatter(port=DEBUG_PORT):
     the player toggles 'Allow remote debugger' forever with nothing baked
     wrong. Local RE dev servers (re_only/tile_editor.py) are the usual
     culprit. Returns (pid, image, local_addr) or None."""
-    if os.name != "nt":
-        return None
     try:
-        ns = subprocess.run(["netstat", "-ano", "-p", "TCP"],
-                            capture_output=True, text=True, timeout=5).stdout
-        owners = []
-        for ln in (ns or "").splitlines():
-            parts = ln.split()
-            if len(parts) >= 5 and parts[3] == "LISTENING":
-                m = re.search(r":(\d+)$", parts[1])
-                if m and int(m.group(1)) == int(port):
-                    owners.append((parts[4], parts[1]))
-        if not owners:
-            return None
-        out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
-                             capture_output=True, text=True, timeout=5).stdout
-        names = dict((pid, img) for img, pid in
-                     re.findall(r'^"([^"]+)","(\d+)"', out or "", re.M))
-        for pid, addr in owners:
-            img = names.get(pid, "?")
-            if not img.lower().startswith("ppsspp"):
+        for pid, img, addr in hostproc.port_owners(port):
+            if not hostproc.comm_is_ppsspp(img):
                 return (pid, img, addr)
     except Exception:
         pass
@@ -745,7 +817,7 @@ def _squatter_msg(sq) -> str:
             f"and our probes hit ITS server, not the debugger. Nothing is "
             f"wrong with the ISO bake or 'Allow remote debugger'. Close that "
             f"process (e.g. re_only/tile_editor.py) and reconnect to the "
-            f"slot. On Windows: taskkill /F /PID {pid}")
+            f"slot. {hostproc.kill_hint(pid)}")
 
 
 # Shown once if the debugger still hasn't answered after a while. With the
@@ -832,9 +904,15 @@ def ppsspp_dialog(cfg: dict):
         return var
 
     def pick_exe(var):
-        p = filedialog.askopenfilename(
-            title="Select PPSSPPWindows64.exe",
-            filetypes=[("PPSSPP", "PPSSPP*.exe"), ("Executables", "*.exe")])
+        if hostproc.IS_WINDOWS:
+            p = filedialog.askopenfilename(
+                title="Select PPSSPPWindows64.exe",
+                filetypes=[("PPSSPP", "PPSSPP*.exe"), ("Executables", "*.exe")])
+        else:
+            p = filedialog.askopenfilename(
+                title="Select PPSSPP (PPSSPPSDL, a PPSSPP AppImage, or the "
+                      "flatpak launcher org.ppsspp.PPSSPP)",
+                filetypes=[("All files", "*")])
         if p:
             var.set(p)
             if not rows["FF1 ISO:"].get():
@@ -1325,5 +1403,9 @@ def ensure_ppsspp(bake: dict = None, notify=None, stop=None) -> bool:
             say("Timed out waiting for the PPSSPP debugger. Is "
                 "'Allow remote debugger' / RemoteDebuggerOnStartup "
                 "enabled?")
+            if not hostproc.IS_WINDOWS:
+                # Off Windows the ini LOCATION is the usual suspect (flatpak
+                # vs native XDG); name what we wrote so support can check it.
+                say("ppsspp.ini patched at: " + "; ".join(find_inis(exe)))
         return False
     return False

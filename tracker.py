@@ -734,9 +734,14 @@ def classify(lid, region_rules, shop_overrides, early, bonus_crystals=False,
         # Own tile, but the SAME rule as set_rules: region + the NPC's own reqs,
         # OR an NPC_ALT_RULES bypass (Sarda by airship). npc_rule_alts bakes the
         # extras into the alternatives, so extra is empty here.
+        # starting_party_members: the Levistone pickup also needs a party big
+        # enough for the deep Ice Cave (logic.PARTY_GATE_NPC). It rides `extra`
+        # (an AND on top of every alternative), so no bypass skips it.
+        _pn = LOGIC.PARTY_GATE_NPC.get(_nm)
         return (npc_area_key(ordinal),
                 LOGIC.npc_rule_alts(ordinal, region_rules.get(region, []), extra),
-                [])
+                [] if _pn is None or _pn > party_cap
+                else [LOGIC.PARTY_TOKENS[_pn]])
 
     if _is_chest_loc(lid):
         idx = ID.loc_index(lid)
@@ -777,6 +782,10 @@ def classify(lid, region_rules, shop_overrides, early, bonus_crystals=False,
             area, extra = geo_area, [LOGIC.TITAN_FED]
         else:
             area, extra = geo_area, []
+        # starting_party_members: deep Cavern of Ice chests (PARTY_GATE_CHEST).
+        _pn = LOGIC.PARTY_GATE_CHEST.get(idx)
+        if _pn is not None and _pn <= party_cap:
+            extra = list(extra) + [LOGIC.PARTY_TOKENS[_pn]]
         return area, as_alts(rule), extra
 
     return None
@@ -1166,7 +1175,7 @@ BESTIARY_COLOR_UNLOCK = 0.5
 # floors, then open-world surfaces, then water, then bonus content.
 _BESTIARY_KIND_ORDER = {
     "scripted": 0, "dlc_boss": 0,
-    "cave": 2, "hd": 2, "cf": 2, "ff": 2,
+    "cave": 2, "hd": 2, "cf": 2, "ff": 2, "tile": 2,
     "ow": 3, "ow_harder": 3, "forest": 4, "forest_harder": 4,
     "desert": 5, "desert_harder": 5, "t4": 6, "t4_harder": 6,
     "ocean": 7, "oc": 7, "river": 8, "rr": 8,
@@ -1180,6 +1189,13 @@ _BESTIARY_SUFFIX_RE = _re.compile(r"^(.*) \(([^()]*)\)$")
 _AP_FLAG_PROGRESSION = 1
 _AP_FLAG_USEFUL = 2
 _AP_FLAG_TRAP = 4
+
+
+# Source kinds the client's Map tab can draw as overworld zones (ff1psp.ow_map
+# owns the geometry; this only decides what rides the payload).
+MAP_LAND_KINDS = frozenset((
+    "ow", "ow_harder", "forest", "forest_harder", "desert", "desert_harder",
+    "t4", "t4_harder", "river", "rr", "ocean", "oc"))
 
 
 def _bestiary_cls(flags):
@@ -1260,6 +1276,38 @@ def _bestiary_progress_text(found, unlock_at):
             f"  [{bar}]")
 
 
+# Rarity ladder for the Summary's "<quality> is the rarest" tail (user call
+# 2026-09-08): progression is the rarest thing a monster can be holding, then
+# useful, then filler. "trap" is listed for completeness only -- _bestiary_cls
+# deliberately files traps as filler, so it can never actually surface here.
+BESTIARY_RARITY_ORDER = ("progression", "useful", "filler", "trap")
+
+
+def bestiary_rarest(section):
+    """Rarest item quality still sitting on an unclaimed, IDENTIFIED monster in
+    this section, or None when nothing here has been identified yet.
+
+    "Unclaimed" is everything the section still lists -- a monster already
+    defeated but whose check has not landed keeps its row and counts here too
+    (user call 2026-09-08), so this can never disagree with the "n left" count
+    beside it. "Identified" is the row's own `revealed` flag, which rides the
+    MONSTER: a quality learned through an unlocked section reads the same
+    everywhere, so a section whose own colours are still locked can name a
+    rarest that is only rarest as far as the player currently knows."""
+    best = None
+    for grp in (section or {}).get("groups") or ():
+        for e in grp.get("monsters") or ():
+            if not e.get("revealed"):
+                continue
+            try:
+                rank = BESTIARY_RARITY_ORDER.index(e.get("cls"))
+            except ValueError:
+                continue
+            if best is None or rank < best:
+                best = rank
+    return None if best is None else BESTIARY_RARITY_ORDER[best]
+
+
 def _bestiary_merge_labels(labels):
     """One header for several places holding the same monsters, factoring out
     whatever the labels share so the row stays one line wide.
@@ -1323,7 +1371,8 @@ def _bestiary_source_open(src, mon, opts, tokens, party_cap):
 
 def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
                   tokens=None, party_cap=0, ow_sources=None,
-                  cave_sources=None):
+                  cave_sources=None, odds=None, ow_zones=None,
+                  zone_rows=None):
     """Payload for the Bestiary tab.
 
     bst           -- slot_data "bestiary" dict (None/falsy = off)
@@ -1341,14 +1390,38 @@ def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
                      same idea for dungeons. That table only ships when a
                      harder toggle is on; None means the caves are vanilla and
                      the baked rows already describe them.
+    odds          -- {(mon, (kind, key)): best slot %} collected by the two
+                     derive calls above (logic.SLOT_ODDS_PCT), or None; baked
+                     places answer from bestiary_data.SOURCE_BEST_SLOT. Every
+                     rolled entry carries "pct" (None = guaranteed fight),
+                     "rare" (under logic.RARE_BELOW_PCT) and "no_prog" (the
+                     monster is rare EVERYWHERE, so its check can hold no
+                     progression -- logic.bestiary_rules). A rare place lights
+                     as reachable only for such rare-only monsters: for every
+                     other monster it is not part of the access rule.
+    ow_zones      -- logic.overworld_zone_sources() over the same table:
+                     {mon: {zone, ...}}, the ACTUAL 32x32 zones a monster
+                     rolls in. A heading key is a reachability NODE and most
+                     nodes cover several zones, so the heading's roster is a
+                     union; this lets the Map tab light only the zones that
+                     really carry the monster you clicked.
+    zone_rows     -- logic.overworld_zone_rows(): {zone: [{"mon", "name",
+                     "pct"}]}, what a single zone rolls, for the Map tab's
+                     "You are in" line.
 
     Returns {"enabled", "done", "total", "progression_on", "sections": [...]},
     each section {"key", "display", "rgb", "dark_text", "remaining", "groups":
-    [{"label", "monsters": [{"mon", "name", "cls", "killed"}]}]}. Only
-    UNCHECKED monsters are listed and only non-empty sections are returned."""
+    [{"label", "monsters": [{"mon", "name", "cls", "killed"}], "open",
+    "done"}]}. Only UNCHECKED monsters are listed and only sections with
+    something left are returned -- but a place whose WHOLE roster is checked
+    stays in its section as an empty group with "done" = its roster size,
+    in its normal sort position. Before this (live 2026-09-05) a cleared
+    Mount Gulg simply vanished from the Fire tab, which read as "missing"
+    rather than "finished"."""
     if not bst:
         return {"enabled": False, "done": 0, "total": 0,
-                "progression_on": False, "sections": [], "strip": {}}
+                "progression_on": False, "sections": [], "strip": {},
+                "ow_zones": {}, "zone_rows": {}}
     opts = dict(bst.get("opts") or {})
     monsters = [int(m) for m in (bst.get("monsters") or [])]
     checked = {int(m) for m in checked_mons}
@@ -1356,7 +1429,7 @@ def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
     minion_where = _bestiary_minion_places(minion_plan, opts)
 
     minion_rules = {}
-    if tokens is not None and minion_plan:
+    if minion_plan:
         minion_rules = LOGIC.bestiary_minion_monsters(
             minion_plan, bool(opts.get("bonus_excluded")))
     # section -> True once any UNCHECKED monster can be hunted there right now
@@ -1371,8 +1444,24 @@ def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
     # Drives the greying of a place group inside a tab; with no token set every
     # group reads open, same as the strip showing no logic look at all.
     place_open = {}
+    # (mon, place) -> best slot % there (None = guaranteed); mon -> True when
+    # the monster is a rare roll at EVERY place (logic.bestiary_rules).
+    place_pct = {}
+    no_prog = {}
+    # (mon, place) -> True when THIS monster is fightable there right now at
+    # a non-rare (>= logic.RARE_BELOW_PCT, or guaranteed) roll. Drives the
+    # sub-tab sheen: "a progression monster is huntable here in logic".
+    mon_open = {}
+    # place -> its (kind, key) source, and mon -> its overworld LAND sources:
+    # what the Map tab lights when a heading or a monster row is clicked.
+    place_src = {}
+    land_places = {}
     for mon in monsters:
         places = []
+        land = []
+        _alts, prog_ok = LOGIC.bestiary_rules(mon, opts, minion_rules,
+                                              ow_sources, cave_sources, odds)
+        no_prog[mon] = not prog_ok
         for kind, key in _bestiary_display_sources(mon, opts, ow_sources,
                                                    cave_sources):
             section = LOGIC.BESTIARY_SOURCE_SECTION.get((kind, key))
@@ -1382,11 +1471,23 @@ def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
                      key if isinstance(key, (int, float)) else str(key))
             place = (section, order, _bestiary_source_label((kind, key), opts))
             places.append(place)
-            if (tokens is not None and mon not in checked
+            place_src.setdefault(place, (kind, key))
+            # every drawable source rides the row: overworld kinds light
+            # zones, dungeon kinds glow their landmark square (2026-09-06)
+            land.append((kind, key))
+            pct = LOGIC.source_odds_pct(mon, (kind, key), odds)
+            place_pct[(mon, place)] = pct
+            # A rare place is in the access rule only when the monster has
+            # no common place at all (then it is Useful/filler territory).
+            counts = prog_ok is False or not LOGIC.source_is_rare(
+                mon, (kind, key), odds)
+            if (counts and tokens is not None and mon not in checked
                     and _bestiary_source_open((kind, key), mon, opts,
                                               tokens, party_cap)):
                 sec_open[section] = True
                 place_open[place] = True
+                if not LOGIC.source_is_rare(mon, (kind, key), odds):
+                    mon_open[(mon, place)] = True
         for label, section in sorted(minion_where.get(mon, ())):
             place = (section, (_BESTIARY_MINION_ORDER, 0), label)
             places.append(place)
@@ -1395,9 +1496,18 @@ def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
                                             tokens, party_cap)):
                 sec_open[section] = True
                 place_open[place] = True
+                mon_open[(mon, place)] = True      # a minion fight is guaranteed
         if not places:
             places.append((BESTIARY_BOSSES, (98, 0), "Elsewhere (random pools)"))
         where[mon] = places
+        land_places[mon] = land
+
+    # place key -> every monster filed there, checked or not. A place with
+    # nothing left is still a place: it is emitted as a "done" group below.
+    place_all = {}
+    for mon in monsters:
+        for place in where[mon]:
+            place_all.setdefault(place, set()).add(mon)
 
     # section -> (own checks, of which found) for the colour gate
     tally = {}
@@ -1412,9 +1522,24 @@ def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
     # anything here". Mirrors TrackerState.section_rollup / section_in_logic /
     # section_shine so ApGui can paint both strips off the same rules:
     #   in_logic -- something here is fightable RIGHT NOW and still unchecked
-    #   shine    -- in logic and nothing in the section found yet
+    #   shine    -- a REVEALED progression monster is fightable here right
+    #               now at a non-rare roll (>= logic.RARE_BELOW_PCT, or a
+    #               guaranteed fight). User call 2026-09-08: this replaces the
+    #               Tracker's "in logic, nothing found yet" shine -- the sheen
+    #               says "come hunt, a key item is here", not "unvisited".
+    #               Revealed only, so it leaks nothing a row would not show.
     # Both are None when no token set was supplied (those two looks then never
     # fire, rather than showing a guess as fact).
+    unlocked_sections = {skey for skey, (tot, got) in tally.items()
+                         if got >= _bestiary_unlock_at(tot)}
+    revealed = {mon for mon in monsters
+                if any(p[0] in unlocked_sections for p in where[mon])}
+    sec_prog = set()
+    for mon in monsters:
+        if (mon in checked or mon in killed or mon not in revealed
+                or _bestiary_cls(flags_by_mon.get(mon)) != "progression"):
+            continue
+        sec_prog.update(p[0] for p in where[mon] if mon_open.get((mon, p)))
     strip = {}
     for skey, (tot, got) in tally.items():
         if tokens is None:
@@ -1432,17 +1557,14 @@ def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
             # sections only lights the ones the player can actually walk to
             # (verified: turn 1 lights cornelia + bosses and nothing else).
             in_logic = bool(sec_open.get(skey))
-            shine = in_logic and got == 0
+            shine = in_logic and skey in sec_prog
         strip[skey] = {"total": tot, "found": got, "remaining": tot - got,
                        "in_logic": in_logic, "shine": shine}
 
-    # A monster's quality is revealed once ANY section it appears in has earned
-    # its colors: the reveal belongs to the monster, not to the tab you happen
-    # to be looking at, so Hyenadon reads the same on Cornelia and on Elfheim.
-    unlocked_sections = {skey for skey, (tot, got) in tally.items()
-                         if got >= _bestiary_unlock_at(tot)}
-    revealed = {mon for mon in monsters
-                if any(p[0] in unlocked_sections for p in where[mon])}
+    # (A monster's quality is revealed once ANY section it appears in has
+    # earned its colors -- `revealed` above: the reveal belongs to the
+    # monster, not to the tab you happen to be looking at, so Hyenadon reads
+    # the same on Cornelia and on Elfheim.)
 
     grouped = {}
     for mon in monsters:
@@ -1454,20 +1576,47 @@ def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
             "cls": _bestiary_cls(flags_by_mon.get(mon)),
             "killed": mon in killed,
             "revealed": mon in revealed,
+            "no_prog": bool(no_prog.get(mon)),
+            # every (kind, key) source of this monster (Map tab row click:
+            # overworld headings light, dungeons glow their square)
+            "places": list(land_places.get(mon, ())),
         }
         for place in where[mon]:
-            grouped.setdefault(place, []).append(entry)
+            # One dict per (monster, place): the odds belong to the pairing,
+            # not to the monster.
+            e = dict(entry)
+            pct = place_pct.get((mon, place))
+            e["pct"] = pct
+            e["rare"] = pct is not None and pct < LOGIC.RARE_BELOW_PCT
+            grouped.setdefault(place, []).append(e)
 
     sections = []
     for skey in BESTIARY_SECTION_ORDER:
         keys = [k for k in grouped if k[0] == skey]
         if not keys:
             continue
+        # Cleared places ride along in the same sort order so a finished
+        # dungeon reads "done" where the player expects to see it. Their sig
+        # is a tuple, so it can never collide with a live roster's frozenset;
+        # two cleared places with the same full roster still merge.
+        done_keys = [k for k in place_all
+                     if k[0] == skey and k not in grouped]
         # Places within a section that hold the SAME remaining monsters collapse
         # into one group ("Desert / Grass (Cornelia)"): three identical
         # rosters under three headers is the same list read three times.
         merged, seen = {}, set()
-        for k in sorted(keys, key=lambda k: (k[1][0], str(k[1][1]), k[2])):
+        for k in sorted(keys + done_keys,
+                        key=lambda k: (k[1][0], str(k[1][1]), k[2])):
+            if k not in grouped:
+                sig = ("done", frozenset(place_all[k]))
+                if sig in merged:
+                    merged[sig]["labels"].append(k[2])
+                    merged[sig]["places"].append(place_src.get(k))
+                else:
+                    merged[sig] = {"labels": [k[2]], "monsters": [],
+                                   "open": True, "done": len(place_all[k]),
+                                   "places": [place_src.get(k)]}
+                continue
             ms = sorted(grouped[k], key=lambda e: e["name"])
             sig = frozenset(e["mon"] for e in ms)
             seen.update(sig)
@@ -1476,12 +1625,29 @@ def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
             k_open = tokens is None or bool(place_open.get(k))
             if sig in merged:
                 merged[sig]["labels"].append(k[2])
+                merged[sig]["places"].append(place_src.get(k))
                 merged[sig]["open"] = merged[sig]["open"] or k_open
+                # Merged header: show the BEST odds among the places under
+                # it (the header still points at the common one), and the
+                # rare tag only if the monster is rare at every one.
+                pct_here = {e["mon"]: e.get("pct") for e in ms}
+                for e in merged[sig]["monsters"]:
+                    p = pct_here.get(e["mon"])
+                    if e.get("pct") is None or p is None:
+                        e["pct"] = None
+                    else:
+                        e["pct"] = max(e["pct"], p)
+                    e["rare"] = (e["pct"] is not None
+                                 and e["pct"] < LOGIC.RARE_BELOW_PCT)
             else:
                 merged[sig] = {"labels": [k[2]], "monsters": ms,
-                               "open": k_open}
+                               "open": k_open, "places": [place_src.get(k)]}
         groups = [{"label": _bestiary_merge_labels(g["labels"]),
-                   "monsters": g["monsters"], "open": g["open"]}
+                   "monsters": g["monsters"], "open": g["open"],
+                   "done": g.get("done", 0),
+                   # the (kind, key) sources under this header; the Map tab
+                   # lights the land ones on a header click
+                   "places": [p for p in g.get("places", ()) if p]}
                   for g in merged.values()]
         total_here, found_here = tally.get(skey, (0, 0))
         unlock_at = _bestiary_unlock_at(total_here)
@@ -1498,6 +1664,10 @@ def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
             "progress": _bestiary_progress_text(found_here, unlock_at),
             "groups": groups,
         })
+        # The Summary's rarest tail. Computed here, off the finished groups,
+        # so the two Summary copies (Bestiary tab and Tracker sub-tab) can
+        # never disagree about it.
+        sections[-1]["rarest"] = bestiary_rarest(sections[-1])
     return {
         "enabled": True,
         "done": len(checked & set(monsters)),
@@ -1505,6 +1675,14 @@ def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
         "progression_on": bool(bst.get("progression")),
         "sections": sections,
         "strip": strip,
+        # the seed's bestiary option flags; the Map tab reads "forests" to
+        # decide whether forest cells belong to Overworld or Forests headings
+        "opts": opts,
+        # zone-accurate overworld truth beside the node-keyed headings above
+        # (2026-09-07): a heading names a reachability node, which is usually
+        # several 32x32 encounter zones with different rows.
+        "ow_zones": {int(m): sorted(z) for m, z in (ow_zones or {}).items()},
+        "zone_rows": {int(z): list(r) for z, r in (zone_rows or {}).items()},
     }
 
 
@@ -1525,11 +1703,16 @@ def bestiary_search(view, query):
             place_hit = sec_hit or q in grp["label"].lower()
             ms = (grp["monsters"] if place_hit
                   else [m for m in grp["monsters"] if q in m["name"].lower()])
-            if not ms:
+            # A cleared place answers a PLACE query ("gulg" -> "all 9 found")
+            # so a finished dungeon is never mistaken for an unknown one.
+            if not ms and not (place_hit and grp.get("done")):
                 continue
             hits += len(ms)
             out.append({"label": f"{sec['display']} -- {grp['label']}",
                         "section": sec["key"], "monsters": ms,
+                        "done": grp.get("done", 0),
+                        "open": grp.get("open", True),
+                        "places": list(grp.get("places", ())),
                         # a hit is colored only if ITS section is unlocked --
                         # Find must not leak what a locked tab is hiding
                         "colors_unlocked": sec.get("colors_unlocked", True)})

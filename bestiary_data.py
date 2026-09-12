@@ -18,129 +18,129 @@ Per-monster spawn sources for bestiarysanity. Source kinds:
 # see _zone_access() in the generator. bestiary_access() ORs the
 # nodes under the seed's open-world toggles and conjoins the tier
 # baseline.
-ACCESS_CLASSES = (('airship',), ('airship', 'onrac'), ('airship', 'mirage'), ('mirage',), ('onrac',), ('airship', 'start'), ('start',), ('tier8',), ('airship', 'duergar'), ('airship', 'melmond'), ('melmond',), ('giants', 'melmond'), ('duergar', 'elfheim'), ('giants',), ('elfheim',), ('airship', 'crescent'), ('airship', 'gulg'), ('airship', 'crescent', 'gulg'), ('crescent', 'gulg'), ('gulg',))
+ACCESS_CLASSES = (('airship',), ('airship', 'gaia'), ('gaia',), ('airship', 'onrac'), ('airship', 'mirage'), ('airship', 'gaia', 'lefein_land', 'mirage'), ('airship', 'gaia', 'lefein_land'), ('airship', 'lefein_land'), ('mirage',), ('onrac',), ('airship', 'lefein_land', 'mirage'), ('lefein_land',), ('airship', 'start'), ('start',), ('tier8',), ('airship', 'duergar'), ('airship', 'melmond'), ('melmond',), ('giants', 'melmond'), ('duergar', 'elfheim'), ('giants',), ('elfheim',), ('airship', 'crescent'), ('airship', 'gulg_land'), ('airship', 'crescent', 'gulg_land'), ('crescent', 'gulg_land'), ('gulg_land',))
 
 BESTIARY_ELIGIBLE = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194)
 
 BESTIARY_SOURCES = {
-    0x00: (('cave', 31), ('desert', (1, 5)), ('ow', (0, 5)), ('ow', (1, 5)), ('ow', (4, 9)), ('ow', (4, 13)), ('ow', (6, 0)), ('ow', (8, 0)), ('ow_harder', (0, 5)), ('ow_harder', (1, 5)), ('ow_harder', (1, 8))),  # Goblin
-    0x01: (('cave', 4), ('cave', 31), ('desert', (1, 5)), ('minion', 2), ('ow', (0, 5)), ('ow', (1, 5)), ('ow', (3, 14)), ('ow', (5, 16)), ('ow_harder', (0, 5)), ('ow_harder', (1, 5)), ('ow_harder', (1, 8)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('t4', (3, 14)), ('t4', (5, 16))),  # Goblin Guard
-    0x02: (('cave', 31), ('desert', (1, 5)), ('desert_harder', (1, 5)), ('minion', 3), ('ow', (0, 5)), ('ow', (1, 5)), ('ow', (1, 8)), ('ow', (2, 14)), ('ow', (3, 12)), ('ow', (3, 14)), ('ow', (4, 9)), ('ow', (5, 16)), ('ow_harder', (0, 5)), ('ow_harder', (1, 5)), ('ow_harder', (1, 8)), ('t4', (2, 14)), ('t4', (3, 14)), ('t4', (5, 16))),  # Wolf
-    0x03: (('cave', 2), ('cave', 3), ('cave', 31), ('cave', 40), ('cave', 90), ('cave', 91), ('desert', (1, 5)), ('desert_harder', (1, 5)), ('forest_harder', (1, 5)), ('forest_harder', (1, 8)), ('ow', (0, 5)), ('ow', (1, 5)), ('ow', (1, 8)), ('ow', (2, 14)), ('ow', (3, 12)), ('ow', (3, 14)), ('ow', (4, 9)), ('ow', (4, 13)), ('ow', (5, 16)), ('ow_harder', (0, 5)), ('ow_harder', (1, 5)), ('ow_harder', (1, 8)), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('t4', (2, 14)), ('t4', (3, 14)), ('t4', (5, 16)), ('t4_harder', (3, 14))),  # Warg Wolf
-    0x04: (('cave', 2), ('cave', 3), ('cave', 4), ('cave', 31), ('cave', 89), ('cave', 90), ('cave', 91), ('forest_harder', (1, 5)), ('forest_harder', (1, 8)), ('minion', 3), ('minion', 8), ('ow', (0, 5)), ('ow', (1, 5)), ('ow', (3, 14)), ('ow', (5, 16)), ('ow_harder', (0, 5)), ('ow_harder', (1, 5)), ('ow_harder', (1, 8)), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('t4', (3, 14)), ('t4', (5, 16)), ('t4_harder', (3, 14))),  # Werewolf
-    0x05: (('cave', 33), ('cave', 67), ('cave', 68), ('cave', 69), ('cave', 70), ('cf', 'chaos_basement'), ('forest', (4, 9)), ('forest', (4, 13)), ('hd', 'gurgu'), ('hd', 'ice'), ('minion', 41), ('ow', (6, 0)), ('ow', (6, 1)), ('ow', (8, 0)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Winter Wolf
-    0x06: (('cave', 4), ('cave', 42), ('cave', 43), ('cave', 44), ('desert', (1, 5)), ('desert', (6, 1)), ('desert', (7, 0)), ('desert_harder', (1, 5)), ('forest', (3, 12)), ('forest', (3, 14)), ('minion', 14), ('ow', (1, 5)), ('ow', (6, 0)), ('ow', (6, 1)), ('ow', (7, 0)), ('ow', (8, 0)), ('ow_harder', (0, 5)), ('ow_harder', (1, 5)), ('ow_harder', (1, 8)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1))),  # Lizard
-    0x07: (('cave', 36), ('cave', 45), ('cave', 46), ('cf', 'chaos_basement'), ('minion', 20), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Fire Lizard
-    0x08: (('cave', 35), ('desert', (7, 0)), ('minion', 91), ('ow', (6, 0)), ('ow', (7, 0)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16))),  # Basilisk
-    0x09: (('cave', 2), ('cave', 4), ('cave', 5), ('cave', 42), ('cave', 43), ('cave', 44), ('desert', (5, 16)), ('desert', (6, 1)), ('desert', (7, 0)), ('forest', (2, 14)), ('forest', (3, 12)), ('forest', (3, 14)), ('forest_harder', (3, 12)), ('forest_harder', (3, 14)), ('ow', (5, 15)), ('ow', (6, 0)), ('ow', (6, 1)), ('ow', (7, 0)), ('ow', (8, 0)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('t4', (5, 16))),  # Hill Gigas
-    0x0a: (('cave', 33), ('cave', 67), ('cave', 68), ('cave', 69), ('cave', 70), ('cf', 'chaos_basement'), ('forest', (4, 9)), ('forest', (4, 13)), ('hd', 'gurgu'), ('hd', 'ice'), ('ow', (6, 0)), ('ow', (6, 1)), ('ow', (8, 0)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Ice Gigas
-    0x0b: (('cave', 36), ('cave', 45), ('cave', 46), ('minion', 21), ('minion', 64), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Fire Gigas
-    0x0c: (('desert_harder', (1, 5)), ('minion', 7), ('oc', 3), ('ocean', 0), ('ow_harder', (1, 5)), ('ow_harder', (1, 8))),  # Sahagin
-    0x0d: (('cave', 24), ('cave', 25), ('cave', 26), ('cave', 27), ('cave', 28), ('cave', 29), ('hd', 'sunken'), ('oc', 3), ('oc', 4), ('ocean', 0), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Sahagin Chief
-    0x0e: (('cave', 24), ('cave', 25), ('cave', 26), ('cave', 27), ('cave', 28), ('cave', 29), ('cave', 30), ('cave', 37), ('hd', 'sunken'), ('minion', 7), ('minion', 25), ('oc', 3), ('oc', 4), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Sahagin Prince
-    0x0f: (('desert_harder', (1, 5)), ('scripted', 126)),  # Pirate
+    0x00: (('cave', 31), ('desert', (1, 12)), ('ow', (0, 12)), ('ow', (1, 12)), ('ow', (4, 16)), ('ow', (4, 20)), ('ow', (6, 0)), ('ow', (8, 7)), ('ow_harder', (0, 12)), ('ow_harder', (1, 12)), ('ow_harder', (1, 15))),  # Goblin
+    0x01: (('cave', 4), ('cave', 31), ('desert', (1, 12)), ('minion', 2), ('ow', (0, 12)), ('ow', (1, 12)), ('ow', (3, 21)), ('ow', (5, 23)), ('ow_harder', (0, 12)), ('ow_harder', (1, 12)), ('ow_harder', (1, 15)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('t4', (3, 21)), ('t4', (5, 23))),  # Goblin Guard
+    0x02: (('cave', 31), ('desert', (1, 12)), ('desert_harder', (1, 12)), ('minion', 3), ('ow', (0, 12)), ('ow', (1, 12)), ('ow', (1, 15)), ('ow', (2, 21)), ('ow', (3, 19)), ('ow', (3, 21)), ('ow', (4, 16)), ('ow', (5, 23)), ('ow_harder', (0, 12)), ('ow_harder', (1, 12)), ('ow_harder', (1, 15)), ('t4', (2, 21)), ('t4', (3, 21)), ('t4', (5, 23))),  # Wolf
+    0x03: (('cave', 2), ('cave', 3), ('cave', 31), ('cave', 40), ('cave', 90), ('cave', 91), ('desert', (1, 12)), ('desert_harder', (1, 12)), ('forest_harder', (1, 12)), ('forest_harder', (1, 15)), ('ow', (0, 12)), ('ow', (1, 12)), ('ow', (1, 15)), ('ow', (2, 21)), ('ow', (3, 19)), ('ow', (3, 21)), ('ow', (4, 16)), ('ow', (4, 20)), ('ow', (5, 23)), ('ow_harder', (0, 12)), ('ow_harder', (1, 12)), ('ow_harder', (1, 15)), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('t4', (2, 21)), ('t4', (3, 21)), ('t4', (5, 23)), ('t4_harder', (3, 21))),  # Warg Wolf
+    0x04: (('cave', 2), ('cave', 3), ('cave', 4), ('cave', 31), ('cave', 89), ('cave', 90), ('cave', 91), ('forest_harder', (1, 12)), ('forest_harder', (1, 15)), ('minion', 3), ('minion', 8), ('ow', (0, 12)), ('ow', (1, 12)), ('ow', (3, 21)), ('ow', (5, 23)), ('ow_harder', (0, 12)), ('ow_harder', (1, 12)), ('ow_harder', (1, 15)), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('t4', (3, 21)), ('t4', (5, 23)), ('t4_harder', (3, 21))),  # Werewolf
+    0x05: (('cave', 33), ('cave', 67), ('cave', 68), ('cave', 69), ('cave', 70), ('cf', 'chaos_basement'), ('forest', (4, 16)), ('forest', (4, 20)), ('hd', 'gurgu'), ('hd', 'ice'), ('minion', 41), ('ow', (6, 0)), ('ow', (6, 3)), ('ow', (8, 0)), ('ow', (8, 1)), ('ow', (8, 7)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('tile', 70)),  # Winter Wolf
+    0x06: (('cave', 4), ('cave', 42), ('cave', 43), ('cave', 44), ('desert', (1, 12)), ('desert', (6, 3)), ('desert', (7, 0)), ('desert_harder', (1, 12)), ('forest', (3, 19)), ('forest', (3, 21)), ('minion', 14), ('ow', (1, 12)), ('ow', (6, 0)), ('ow', (6, 3)), ('ow', (7, 0)), ('ow', (8, 0)), ('ow', (8, 1)), ('ow_harder', (0, 12)), ('ow_harder', (1, 12)), ('ow_harder', (1, 15)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3))),  # Lizard
+    0x07: (('cave', 36), ('cave', 45), ('cave', 46), ('cf', 'chaos_basement'), ('minion', 20), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('tile', 45), ('tile', 46)),  # Fire Lizard
+    0x08: (('cave', 35), ('desert', (7, 0)), ('minion', 91), ('ow', (6, 0)), ('ow', (7, 0)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23))),  # Basilisk
+    0x09: (('cave', 2), ('cave', 4), ('cave', 5), ('cave', 42), ('cave', 43), ('cave', 44), ('desert', (5, 23)), ('desert', (6, 3)), ('desert', (7, 0)), ('forest', (2, 21)), ('forest', (3, 19)), ('forest', (3, 21)), ('forest_harder', (3, 19)), ('forest_harder', (3, 21)), ('ow', (5, 22)), ('ow', (6, 0)), ('ow', (6, 3)), ('ow', (7, 0)), ('ow', (8, 0)), ('ow', (8, 1)), ('ow', (8, 7)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('t4', (5, 23)), ('tile', 1)),  # Hill Gigas
+    0x0a: (('cave', 33), ('cave', 67), ('cave', 68), ('cave', 69), ('cave', 70), ('cf', 'chaos_basement'), ('forest', (4, 16)), ('forest', (4, 20)), ('hd', 'gurgu'), ('hd', 'ice'), ('ow', (6, 0)), ('ow', (6, 3)), ('ow', (8, 0)), ('ow', (8, 1)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5))),  # Ice Gigas
+    0x0b: (('cave', 36), ('cave', 45), ('cave', 46), ('minion', 21), ('minion', 64), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5))),  # Fire Gigas
+    0x0c: (('desert_harder', (1, 12)), ('minion', 7), ('oc', 3), ('ocean', 0), ('ow_harder', (1, 12)), ('ow_harder', (1, 15))),  # Sahagin
+    0x0d: (('cave', 24), ('cave', 25), ('cave', 26), ('cave', 27), ('cave', 28), ('cave', 29), ('hd', 'sunken'), ('oc', 3), ('oc', 4), ('ocean', 0), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5))),  # Sahagin Chief
+    0x0e: (('cave', 24), ('cave', 25), ('cave', 26), ('cave', 27), ('cave', 28), ('cave', 29), ('cave', 30), ('cave', 37), ('hd', 'sunken'), ('minion', 7), ('minion', 25), ('oc', 3), ('oc', 4), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5))),  # Sahagin Prince
+    0x0f: (('desert_harder', (1, 12)), ('scripted', 126)),  # Pirate
     0x10: (('oc', 3), ('ocean', 0)),  # Buccaneer
     0x11: (('cave', 25), ('cave', 26), ('cave', 27), ('cave', 28), ('cave', 29), ('hd', 'sunken'), ('oc', 3), ('oc', 4), ('ocean', 0)),  # Shark
-    0x12: (('cave', 23), ('cave', 24), ('cave', 25), ('cave', 26), ('cave', 27), ('cave', 28), ('cave', 29), ('cave', 30), ('cave', 37), ('hd', 'sunken'), ('minion', 58), ('oc', 3), ('oc', 4)),  # White Shark
+    0x12: (('cave', 23), ('cave', 24), ('cave', 25), ('cave', 26), ('cave', 27), ('cave', 28), ('cave', 29), ('cave', 30), ('cave', 37), ('hd', 'sunken'), ('minion', 58), ('oc', 3), ('oc', 4), ('tile', 24)),  # White Shark
     0x13: (('minion', 47), ('oc', 3), ('ocean', 0)),  # Bigeyes
     0x14: (('cave', 23), ('cave', 24), ('cave', 28), ('cave', 29), ('cave', 37), ('hd', 'sunken'), ('minion', 25), ('minion', 45), ('oc', 4)),  # Deepeyes
-    0x15: (('cave', 31), ('cave', 89), ('cave', 90), ('cave', 91), ('forest', (1, 5)), ('forest', (1, 8)), ('minion', 0), ('minion', 10), ('ow', (1, 5)), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14))),  # Skeleton
-    0x16: (('cave', 66), ('cave', 69), ('cave', 70), ('cave', 90), ('cave', 91), ('forest', (1, 5)), ('forest', (1, 8)), ('forest_harder', (3, 12)), ('forest_harder', (3, 14)), ('hd', 'gurgu'), ('minion', 9), ('minion', 55), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16))),  # Bloodbones
-    0x17: (('cave', 31), ('desert', (1, 5)), ('desert_harder', (1, 5)), ('forest', (0, 5)), ('forest_harder', (0, 5)), ('minion', 81), ('ow', (1, 5)), ('ow', (1, 8)), ('ow', (2, 14)), ('ow', (3, 12)), ('ow', (4, 9)), ('ow_harder', (0, 5)), ('ow_harder', (1, 5)), ('ow_harder', (1, 8)), ('t4', (2, 14))),  # Gigas Worm
-    0x18: (('cave', 89), ('cave', 90), ('cave', 91), ('forest', (1, 5)), ('forest', (1, 8)), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14))),  # Crawler
-    0x19: (('cave', 41), ('cave', 42), ('cave', 43), ('cave', 44), ('forest_harder', (0, 5)), ('forest_harder', (4, 9)), ('forest_harder', (4, 13)), ('minion', 42), ('ow', (4, 9)), ('ow', (4, 13)), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16))),  # Hyenadon
-    0x1a: (('cave', 43), ('cave', 44), ('cave', 45), ('cave', 46), ('cave', 81), ('cave', 82), ('desert', (6, 1)), ('forest', (3, 12)), ('forest', (3, 14)), ('forest_harder', (3, 12)), ('forest_harder', (3, 14)), ('ow', (6, 1)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16))),  # Hellhound
-    0x1b: (('cave', 1), ('cave', 2), ('cave', 3), ('cave', 40), ('desert', (1, 5)), ('forest', (0, 5)), ('forest', (1, 5)), ('forest', (1, 8)), ('forest_harder', (0, 5)), ('forest_harder', (2, 14)), ('ow', (0, 5)), ('ow', (1, 5)), ('ow', (1, 8)), ('ow', (2, 14)), ('ow', (3, 12)), ('ow', (3, 14)), ('ow', (4, 9)), ('ow', (4, 13)), ('ow', (5, 16)), ('ow_harder', (0, 5)), ('ow_harder', (1, 5)), ('ow_harder', (1, 8)), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('t4', (2, 14)), ('t4', (3, 14)), ('t4', (5, 16)), ('t4_harder', (2, 14))),  # Ogre
-    0x1c: (('cave', 1), ('cave', 2), ('cave', 3), ('cave', 40), ('cave', 41), ('cave', 42), ('cave', 43), ('cave', 44), ('cave', 45), ('cave', 46), ('forest', (1, 5)), ('forest', (1, 8)), ('forest_harder', (0, 5)), ('forest_harder', (2, 14)), ('forest_harder', (4, 9)), ('forest_harder', (4, 13)), ('ow', (1, 5)), ('ow', (1, 8)), ('ow', (2, 14)), ('ow', (3, 12)), ('ow', (3, 14)), ('ow', (4, 9)), ('ow', (4, 13)), ('ow', (5, 16)), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('t4', (2, 14)), ('t4', (3, 14)), ('t4', (5, 16)), ('t4_harder', (2, 14))),  # Ogre Chief
-    0x1d: (('cave', 41), ('cave', 42), ('cave', 43), ('cave', 44), ('cave', 45), ('cave', 46), ('desert', (6, 1)), ('forest', (3, 12)), ('forest', (3, 14)), ('forest_harder', (2, 14)), ('forest_harder', (3, 12)), ('forest_harder', (3, 14)), ('forest_harder', (4, 9)), ('forest_harder', (4, 13)), ('minion', 12), ('ow', (6, 1)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16))),  # Ogre Mage
-    0x1e: (('cave', 1), ('cave', 2), ('desert_harder', (1, 5)), ('forest', (0, 5)), ('ow', (0, 5)), ('ow', (1, 5)), ('ow', (1, 8)), ('ow', (2, 14)), ('ow', (3, 12)), ('ow', (4, 9)), ('ow_harder', (0, 5)), ('ow_harder', (1, 5)), ('ow_harder', (1, 8)), ('t4', (2, 14))),  # Cobra
-    0x1f: (('cave', 1), ('desert', (5, 16)), ('minion', 13), ('ow', (5, 15)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('t4', (5, 16))),  # Anaconda
-    0x20: (('cave', 23), ('cave', 24), ('cave', 25), ('cave', 26), ('cave', 27), ('cave', 28), ('cave', 29), ('cave', 30), ('cave', 37), ('hd', 'sunken'), ('minion', 37), ('oc', 1), ('oc', 2), ('oc', 3), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Sea Snake
-    0x21: (('cave', 41), ('cave', 90), ('cave', 91), ('desert', (5, 16)), ('minion', 18), ('ow', (1, 5)), ('ow', (3, 14)), ('ow', (5, 15)), ('ow', (5, 16)), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('t4', (3, 14)), ('t4', (5, 16))),  # Scorpion
-    0x22: (('cave', 23), ('cave', 24), ('cave', 25), ('cave', 26), ('cave', 27), ('cave', 28), ('cave', 29), ('cave', 30), ('cave', 37), ('hd', 'sunken'), ('oc', 1), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Sea Scorpion
-    0x23: (('cave', 1), ('cave', 2), ('cave', 5), ('cave', 41), ('cave', 45), ('cave', 46), ('desert', (5, 16)), ('forest', (2, 14)), ('forest_harder', (1, 5)), ('forest_harder', (1, 8)), ('ow', (5, 15)), ('ow_harder', (0, 5)), ('ow_harder', (1, 5)), ('ow_harder', (1, 8)), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('t4', (5, 16)), ('t4_harder', (2, 14)), ('t4_harder', (3, 14))),  # Minotaur
-    0x24: (('cave', 78), ('forest_harder', (4, 9)), ('forest_harder', (4, 13)), ('minion', 54), ('minion', 95), ('ow', (8, 0)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1))),  # Minotaur Zombie
-    0x25: (('cave', 2), ('cave', 4), ('cave', 5), ('desert', (5, 16)), ('desert', (6, 1)), ('forest', (1, 5)), ('forest', (1, 8)), ('forest', (2, 14)), ('forest_harder', (0, 5)), ('forest_harder', (4, 9)), ('forest_harder', (4, 13)), ('ow', (5, 15)), ('ow', (6, 0)), ('ow', (6, 1)), ('ow', (8, 0)), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('t4', (5, 16)), ('t4_harder', (2, 14)), ('t4_harder', (3, 14))),  # Troll
-    0x26: (('cave', 23), ('cave', 24), ('cave', 25), ('cave', 26), ('cave', 27), ('cave', 28), ('cave', 29), ('cave', 30), ('cave', 37), ('hd', 'sunken'), ('minion', 59), ('oc', 1), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Sea Troll
-    0x27: (('cave', 89), ('desert_harder', (1, 5)), ('minion', 22), ('minion', 93), ('ow', (4, 9)), ('ow', (4, 13))),  # Shadow
-    0x28: (('cave', 3), ('cave', 4), ('cave', 5), ('cave', 66), ('cave', 67), ('cave', 68), ('forest', (5, 0)), ('forest', (5, 15)), ('forest', (5, 16)), ('forest', (6, 0)), ('forest', (6, 1)), ('hd', 'gurgu'), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Wraith
-    0x29: (('cave', 66), ('cave', 67), ('cave', 68), ('cave', 69), ('cave', 70), ('desert_harder', (6, 1)), ('desert_harder', (7, 0)), ('desert_harder', (7, 1)), ('forest', (5, 0)), ('forest', (5, 15)), ('forest', (5, 16)), ('forest', (6, 0)), ('forest', (6, 1)), ('hd', 'gurgu'), ('minion', 15), ('minion', 46), ('minion', 67), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Specter
-    0x2a: (('cave', 24), ('cave', 28), ('cave', 29), ('minion', 16), ('minion', 52), ('minion', 90), ('minion', 92), ('oc', 4), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Ghost
+    0x15: (('cave', 31), ('cave', 89), ('cave', 90), ('cave', 91), ('forest', (1, 12)), ('forest', (1, 15)), ('minion', 0), ('minion', 10), ('ow', (1, 12)), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21))),  # Skeleton
+    0x16: (('cave', 66), ('cave', 69), ('cave', 70), ('cave', 90), ('cave', 91), ('forest', (1, 12)), ('forest', (1, 15)), ('forest_harder', (3, 19)), ('forest_harder', (3, 21)), ('hd', 'gurgu'), ('minion', 9), ('minion', 55), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23))),  # Bloodbones
+    0x17: (('cave', 31), ('desert', (1, 12)), ('desert_harder', (1, 12)), ('forest', (0, 12)), ('forest_harder', (0, 12)), ('minion', 81), ('ow', (1, 12)), ('ow', (1, 15)), ('ow', (2, 21)), ('ow', (3, 19)), ('ow', (4, 16)), ('ow_harder', (0, 12)), ('ow_harder', (1, 12)), ('ow_harder', (1, 15)), ('t4', (2, 21))),  # Gigas Worm
+    0x18: (('cave', 89), ('cave', 90), ('cave', 91), ('forest', (1, 12)), ('forest', (1, 15)), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21))),  # Crawler
+    0x19: (('cave', 41), ('cave', 42), ('cave', 43), ('cave', 44), ('forest_harder', (0, 12)), ('forest_harder', (4, 16)), ('forest_harder', (4, 20)), ('minion', 42), ('ow', (4, 16)), ('ow', (4, 20)), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23))),  # Hyenadon
+    0x1a: (('cave', 43), ('cave', 44), ('cave', 45), ('cave', 46), ('cave', 81), ('cave', 82), ('desert', (6, 3)), ('forest', (3, 19)), ('forest', (3, 21)), ('forest_harder', (3, 19)), ('forest_harder', (3, 21)), ('ow', (6, 3)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23))),  # Hellhound
+    0x1b: (('cave', 1), ('cave', 2), ('cave', 3), ('cave', 40), ('desert', (1, 12)), ('forest', (0, 12)), ('forest', (1, 12)), ('forest', (1, 15)), ('forest_harder', (0, 12)), ('forest_harder', (2, 21)), ('ow', (0, 12)), ('ow', (1, 12)), ('ow', (1, 15)), ('ow', (2, 21)), ('ow', (3, 19)), ('ow', (3, 21)), ('ow', (4, 16)), ('ow', (4, 20)), ('ow', (5, 23)), ('ow_harder', (0, 12)), ('ow_harder', (1, 12)), ('ow_harder', (1, 15)), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('t4', (2, 21)), ('t4', (3, 21)), ('t4', (5, 23)), ('t4_harder', (2, 21))),  # Ogre
+    0x1c: (('cave', 1), ('cave', 2), ('cave', 3), ('cave', 40), ('cave', 41), ('cave', 42), ('cave', 43), ('cave', 44), ('cave', 45), ('cave', 46), ('forest', (1, 12)), ('forest', (1, 15)), ('forest_harder', (0, 12)), ('forest_harder', (2, 21)), ('forest_harder', (4, 16)), ('forest_harder', (4, 20)), ('ow', (1, 12)), ('ow', (1, 15)), ('ow', (2, 21)), ('ow', (3, 19)), ('ow', (3, 21)), ('ow', (4, 16)), ('ow', (4, 20)), ('ow', (5, 23)), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('t4', (2, 21)), ('t4', (3, 21)), ('t4', (5, 23)), ('t4_harder', (2, 21)), ('tile', 4)),  # Ogre Chief
+    0x1d: (('cave', 41), ('cave', 42), ('cave', 43), ('cave', 44), ('cave', 45), ('cave', 46), ('desert', (6, 3)), ('forest', (3, 19)), ('forest', (3, 21)), ('forest_harder', (2, 21)), ('forest_harder', (3, 19)), ('forest_harder', (3, 21)), ('forest_harder', (4, 16)), ('forest_harder', (4, 20)), ('minion', 12), ('ow', (6, 3)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('tile', 4)),  # Ogre Mage
+    0x1e: (('cave', 1), ('cave', 2), ('desert_harder', (1, 12)), ('forest', (0, 12)), ('ow', (0, 12)), ('ow', (1, 12)), ('ow', (1, 15)), ('ow', (2, 21)), ('ow', (3, 19)), ('ow', (4, 16)), ('ow_harder', (0, 12)), ('ow_harder', (1, 12)), ('ow_harder', (1, 15)), ('t4', (2, 21))),  # Cobra
+    0x1f: (('cave', 1), ('desert', (5, 23)), ('minion', 13), ('ow', (5, 22)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('t4', (5, 23)), ('tile', 91)),  # Anaconda
+    0x20: (('cave', 23), ('cave', 24), ('cave', 25), ('cave', 26), ('cave', 27), ('cave', 28), ('cave', 29), ('cave', 30), ('cave', 37), ('hd', 'sunken'), ('minion', 37), ('oc', 1), ('oc', 2), ('oc', 3), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('tile', 24)),  # Sea Snake
+    0x21: (('cave', 41), ('cave', 90), ('cave', 91), ('desert', (5, 23)), ('minion', 18), ('ow', (1, 12)), ('ow', (3, 21)), ('ow', (5, 22)), ('ow', (5, 23)), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('t4', (3, 21)), ('t4', (5, 23))),  # Scorpion
+    0x22: (('cave', 23), ('cave', 24), ('cave', 25), ('cave', 26), ('cave', 27), ('cave', 28), ('cave', 29), ('cave', 30), ('cave', 37), ('hd', 'sunken'), ('oc', 1), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('tile', 24)),  # Sea Scorpion
+    0x23: (('cave', 1), ('cave', 2), ('cave', 5), ('cave', 41), ('cave', 45), ('cave', 46), ('desert', (5, 23)), ('forest', (2, 21)), ('forest_harder', (1, 12)), ('forest_harder', (1, 15)), ('ow', (5, 22)), ('ow_harder', (0, 12)), ('ow_harder', (1, 12)), ('ow_harder', (1, 15)), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('t4', (5, 23)), ('t4_harder', (2, 21)), ('t4_harder', (3, 21))),  # Minotaur
+    0x24: (('cave', 78), ('forest_harder', (4, 16)), ('forest_harder', (4, 20)), ('minion', 54), ('minion', 95), ('ow', (8, 7)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3))),  # Minotaur Zombie
+    0x25: (('cave', 2), ('cave', 4), ('cave', 5), ('desert', (5, 23)), ('desert', (6, 3)), ('forest', (1, 12)), ('forest', (1, 15)), ('forest', (2, 21)), ('forest_harder', (0, 12)), ('forest_harder', (4, 16)), ('forest_harder', (4, 20)), ('ow', (5, 22)), ('ow', (6, 0)), ('ow', (6, 3)), ('ow', (8, 0)), ('ow', (8, 1)), ('ow', (8, 7)), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('t4', (5, 23)), ('t4_harder', (2, 21)), ('t4_harder', (3, 21))),  # Troll
+    0x26: (('cave', 23), ('cave', 24), ('cave', 25), ('cave', 26), ('cave', 27), ('cave', 28), ('cave', 29), ('cave', 30), ('cave', 37), ('hd', 'sunken'), ('minion', 59), ('oc', 1), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('tile', 24)),  # Sea Troll
+    0x27: (('cave', 89), ('desert_harder', (1, 12)), ('minion', 22), ('minion', 93), ('ow', (4, 16)), ('ow', (4, 20))),  # Shadow
+    0x28: (('cave', 3), ('cave', 4), ('cave', 5), ('cave', 66), ('cave', 67), ('cave', 68), ('forest', (5, 0)), ('forest', (5, 22)), ('forest', (5, 23)), ('forest', (6, 0)), ('forest', (6, 3)), ('hd', 'gurgu'), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7)), ('tile', 88)),  # Wraith
+    0x29: (('cave', 66), ('cave', 67), ('cave', 68), ('cave', 69), ('cave', 70), ('desert_harder', (6, 3)), ('desert_harder', (7, 0)), ('desert_harder', (7, 4)), ('forest', (5, 0)), ('forest', (5, 22)), ('forest', (5, 23)), ('forest', (6, 0)), ('forest', (6, 3)), ('hd', 'gurgu'), ('minion', 15), ('minion', 46), ('minion', 67), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7)), ('tile', 70)),  # Specter
+    0x2a: (('cave', 24), ('cave', 28), ('cave', 29), ('minion', 16), ('minion', 52), ('minion', 90), ('minion', 92), ('oc', 4), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Ghost
     0x2b: (('cave', 31), ('cave', 89), ('cave', 90), ('minion', 1)),  # Zombie
-    0x2c: (('cave', 31), ('cave', 89), ('cave', 90), ('minion', 1), ('ow', (4, 9)), ('ow', (4, 13))),  # Ghoul
-    0x2d: (('cave', 3), ('cave', 4), ('cave', 66), ('cave', 67), ('cave', 68), ('forest', (6, 0)), ('forest', (6, 1)), ('forest_harder', (2, 14)), ('minion', 53), ('ow', (1, 5)), ('ow', (3, 14)), ('ow', (4, 9)), ('ow', (4, 13)), ('ow', (5, 16)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('t4', (3, 14)), ('t4', (5, 16))),  # Ghast
-    0x2e: (('cave', 3), ('cave', 4), ('cave', 66), ('cave', 67), ('cave', 68), ('forest', (6, 0)), ('forest', (6, 1)), ('forest_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Wight
-    0x2f: (('cave', 32), ('cave', 38), ('cave', 39), ('cf', 'chaos_basement'), ('minion', 39), ('minion', 80), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Purple Worm
-    0x30: (('desert', (7, 0)), ('desert', (7, 1)), ('desert', (8, 1)), ('desert_harder', (5, 16)), ('minion', 80), ('minion', 97), ('ow', (6, 0)), ('ow', (7, 0)), ('ow', (7, 1)), ('ow', (8, 1)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('t4_harder', (5, 16))),  # Sand Worm
-    0x31: (('cave', 36), ('cave', 45), ('cave', 46), ('minion', 21), ('minion', 65), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Lava Worm
-    0x32: (('cave', 92), ('cave', 93), ('ff', 'fortress'), ('hd', 'ice'), ('minion', 44), ('minion', 96), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1))),  # Evil Eye
-    0x33: (('cave', 39), ('minion', 44), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Death Eye
-    0x34: (('cave', 78), ('cave', 79), ('cave', 80), ('cave', 82), ('cave', 94), ('cave', 95), ('ff', 'fortress'), ('hd', 'mirage'), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Medusa
-    0x35: (('cave', 35), ('cave', 92), ('cave', 93), ('minion', 19), ('ow_harder', (5, 15)), ('ow_harder', (5, 16))),  # Earth Medusa
-    0x36: (('cave', 80), ('cave', 81), ('cave', 82), ('desert', (7, 0)), ('desert_harder', (5, 16)), ('desert_harder', (6, 1)), ('forest_harder', (4, 9)), ('forest_harder', (4, 13)), ('hd', 'sunken'), ('minion', 31), ('ow', (6, 0)), ('ow', (7, 0)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1))),  # Weretiger
-    0x37: (('cave', 78), ('cave', 79), ('cave', 94), ('cave', 95), ('ff', 'fortress'), ('hd', 'ice'), ('hd', 'mirage'), ('minion', 47), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Rakshasa
-    0x38: (('cave', 41), ('cave', 42), ('desert', (5, 16)), ('minion', 39), ('ow', (5, 15)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('t4', (5, 16))),  # Ankheg
-    0x39: (('cave', 69), ('cave', 70), ('desert', (6, 1)), ('minion', 83), ('ow', (6, 0)), ('ow', (6, 1)), ('ow', (7, 0)), ('ow', (8, 0)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Remorazz
-    0x3a: (('cave', 40), ('desert', (6, 1)), ('forest', (3, 12)), ('forest', (3, 14)), ('forest_harder', (3, 12)), ('forest_harder', (3, 14)), ('ow', (4, 9)), ('ow', (4, 13)), ('ow', (6, 1)), ('ow', (7, 0)), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1))),  # Lesser Tiger
-    0x3b: (('cave', 80), ('cave', 81), ('cave', 82), ('desert', (6, 1)), ('desert_harder', (5, 16)), ('forest', (3, 12)), ('forest', (3, 14)), ('forest_harder', (3, 12)), ('forest_harder', (3, 14)), ('hd', 'sunken'), ('minion', 43), ('ow', (6, 1)), ('ow', (7, 0)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1))),  # Sabertooth
-    0x3c: (('cameo', 60), ('cave', 38), ('cave', 80), ('cave', 81), ('cave', 82), ('forest', (4, 9)), ('forest', (4, 13)), ('forest_harder', (7, 0)), ('forest_harder', (7, 1)), ('hd', 'mirage'), ('minion', 9), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('scripted', 124)),  # Vampire
-    0x3d: (('cave', 33), ('cave', 34), ('cave', 38), ('cave', 39), ('cave', 94), ('cave', 95), ('ff', 'fortress'), ('forest_harder', (7, 0)), ('forest_harder', (7, 1)), ('hd', 'mirage'), ('minion', 34), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Vampire Lord
-    0x3e: (('cave', 1), ('cave', 2), ('cave', 90), ('cave', 91), ('desert_harder', (1, 5)), ('forest', (0, 5)), ('minion', 4), ('ow_harder', (0, 5)), ('ow_harder', (1, 5)), ('ow_harder', (1, 8)), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14))),  # Gargoyle
-    0x3f: (('cave', 41), ('cave', 42), ('cave', 78), ('cave', 79), ('forest_harder', (2, 14)), ('hd', 'ice'), ('minion', 4), ('minion', 98), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16))),  # Horned Devil
-    0x40: (('cave', 5), ('cave', 35), ('forest', (5, 0)), ('forest', (5, 15)), ('forest', (5, 16)), ('minion', 19), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Earth Elemental
-    0x41: (('cave', 36), ('cave', 42), ('cave', 43), ('cave', 44), ('cave', 46), ('minion', 66), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Fire Elemental
-    0x42: (('cave', 32), ('cave', 66), ('cave', 67), ('cave', 68), ('cave', 69), ('cave', 70), ('hd', 'gurgu'), ('hd', 'ice'), ('minion', 48), ('minion', 76), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('t4_harder', (5, 16))),  # White Dragon
-    0x43: (('cave', 36), ('cave', 45), ('cave', 46), ('cf', 'chaos_basement'), ('desert_harder', (6, 1)), ('desert_harder', (8, 1)), ('minion', 20), ('minion', 50), ('minion', 67), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Red Dragon
-    0x44: (('cave', 33), ('cave', 34), ('cave', 38), ('cave', 39), ('cave', 78), ('cave', 79), ('cf', 'chaos_basement'), ('ff', 'fortress'), ('forest_harder', (7, 0)), ('forest_harder', (7, 1)), ('hd', 'ice'), ('minion', 16), ('minion', 33), ('minion', 55), ('oc', 2), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('rr', 0)),  # Dragon Zombie
-    0x45: (('cave', 89), ('cave', 90), ('cave', 91), ('forest', (2, 14)), ('forest_harder', (1, 5)), ('forest_harder', (1, 8)), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('t4_harder', (3, 14))),  # Green Slime
-    0x46: (('cave', 41), ('cave', 42), ('cave', 89), ('cave', 90), ('cave', 91), ('forest', (1, 5)), ('forest', (1, 8)), ('forest', (2, 14)), ('forest_harder', (1, 5)), ('forest_harder', (1, 8)), ('ow_harder', (0, 5)), ('ow_harder', (1, 5)), ('ow_harder', (1, 8)), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16))),  # Gray Ooze
-    0x47: (('cave', 3), ('cave', 4), ('cave', 5), ('forest_harder', (3, 12)), ('forest_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16))),  # Ochre Jelly
-    0x48: (('cave', 32), ('cave', 33), ('cave', 92), ('cave', 93), ('cave', 96), ('ff', 'fortress'), ('forest', (7, 0)), ('forest', (7, 1)), ('forest_harder', (6, 0)), ('forest_harder', (6, 1)), ('hd', 'mirage'), ('minion', 62), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Black Flan
-    0x49: (('cave', 1), ('cave', 31), ('cave', 89), ('cave', 90), ('cave', 91), ('forest', (0, 5)), ('forest', (2, 14)), ('forest_harder', (1, 5)), ('forest_harder', (1, 8)), ('ow', (1, 5)), ('ow', (4, 9)), ('ow', (4, 13)), ('ow_harder', (0, 5)), ('ow_harder', (1, 5)), ('ow_harder', (1, 8)), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14))),  # Black Widow
-    0x4a: (('cave', 1), ('cave', 2), ('cave', 3), ('cave', 4), ('cave', 5), ('cave', 40), ('cave', 89), ('cave', 90), ('cave', 91), ('forest', (0, 5)), ('forest', (2, 14)), ('forest_harder', (1, 5)), ('forest_harder', (1, 8)), ('forest_harder', (3, 12)), ('forest_harder', (3, 14)), ('minion', 6), ('ow', (0, 5)), ('ow', (1, 5)), ('ow', (1, 8)), ('ow', (2, 14)), ('ow', (3, 12)), ('ow', (3, 14)), ('ow', (4, 9)), ('ow', (4, 13)), ('ow', (5, 16)), ('ow_harder', (0, 5)), ('ow_harder', (1, 5)), ('ow_harder', (1, 8)), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('t4', (2, 14)), ('t4', (3, 14)), ('t4', (5, 16))),  # Tarantula
-    0x4b: (('cave', 92), ('cave', 93), ('cave', 94), ('desert', (6, 1)), ('desert_harder', (5, 16)), ('forest', (2, 14)), ('forest_harder', (2, 14)), ('minion', 15), ('minion', 38), ('ow', (6, 0)), ('ow', (6, 1)), ('ow', (7, 0)), ('ow', (8, 0)), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('t4_harder', (5, 16))),  # Manticore
-    0x4c: (('cave', 41), ('desert_harder', (6, 1)), ('forest', (3, 12)), ('forest', (3, 14)), ('ow', (7, 0)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1))),  # Sphinx
-    0x4d: (('desert', (7, 1)), ('desert', (8, 1)), ('desert_harder', (6, 1)), ('desert_harder', (7, 0)), ('desert_harder', (7, 1)), ('forest', (5, 0)), ('forest', (5, 15)), ('forest', (5, 16)), ('forest_harder', (4, 9)), ('forest_harder', (4, 13)), ('minion', 30), ('ow', (6, 1)), ('ow', (7, 0)), ('ow', (7, 1)), ('ow', (8, 1)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Baretta
-    0x4e: (('desert', (6, 1)), ('desert', (7, 1)), ('desert', (8, 1)), ('desert_harder', (7, 0)), ('desert_harder', (7, 1)), ('minion', 75), ('ow', (6, 1)), ('ow', (7, 1)), ('ow', (8, 1)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Desert Baretta
-    0x4f: (('cave', 1), ('cave', 3), ('cave', 5), ('cave', 66), ('cave', 78), ('cave', 79), ('cave', 81), ('cave', 82), ('cave', 83), ('desert_harder', (5, 16)), ('desert_harder', (6, 1)), ('desert_harder', (7, 0)), ('desert_harder', (7, 1)), ('forest_harder', (5, 0)), ('forest_harder', (5, 15)), ('forest_harder', (5, 16)), ('forest_harder', (8, 0)), ('hd', 'gurgu'), ('hd', 'ice'), ('minion', 17), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('t4_harder', (5, 16))),  # Mummy
-    0x50: (('cave', 78), ('cave', 79), ('cave', 81), ('cave', 82), ('cave', 83), ('desert_harder', (6, 1)), ('desert_harder', (7, 0)), ('desert_harder', (7, 1)), ('forest_harder', (5, 0)), ('forest_harder', (5, 15)), ('forest_harder', (5, 16)), ('forest_harder', (8, 0)), ('hd', 'ice'), ('minion', 11), ('minion', 17), ('minion', 89), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # King Mummy
-    0x51: (('cave', 3), ('cave', 4), ('cave', 66), ('cave', 81), ('cave', 82), ('forest_harder', (8, 0)), ('hd', 'gurgu'), ('minion', 5), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Cockatrice
-    0x52: (('cave', 42), ('cave', 43), ('cave', 44), ('cave', 81), ('cave', 82), ('cave', 83), ('forest_harder', (8, 0)), ('minion', 50), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Pyrolisk
-    0x53: (('cave', 82), ('desert', (6, 1)), ('desert', (7, 0)), ('desert', (7, 1)), ('desert', (8, 1)), ('desert_harder', (7, 0)), ('desert_harder', (7, 1)), ('desert_harder', (8, 1)), ('hd', 'mirage'), ('minion', 48), ('oc', 1), ('ow', (6, 0)), ('ow', (6, 1)), ('ow', (7, 0)), ('ow', (7, 1)), ('ow', (8, 0)), ('ow', (8, 1)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Wyvern
-    0x54: (('cave', 82), ('desert', (6, 1)), ('desert_harder', (5, 16)), ('desert_harder', (7, 0)), ('desert_harder', (7, 1)), ('desert_harder', (8, 1)), ('dlc', 32), ('dlc', 33), ('hd', 'mirage'), ('minion', 28), ('minion', 49), ('oc', 1), ('ow', (6, 1)), ('ow', (7, 0)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('t4_harder', (5, 16))),  # Wyrm
-    0x55: (('desert', (7, 1)), ('desert', (8, 1)), ('minion', 79), ('ow', (7, 1)), ('ow', (8, 0)), ('ow', (8, 1)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1))),  # Allosaurus
-    0x56: (('desert', (7, 1)), ('desert', (8, 1)), ('minion', 79), ('ow', (7, 1)), ('ow', (8, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Tyrannosaur
-    0x57: (('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('river', 0)),  # Piranha
-    0x58: (('hd', 'sunken'), ('minion', 24), ('minion', 88), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('river', 0)),  # Red Piranha
-    0x59: (('hd', 'sunken'), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('river', 0)),  # Crocodile
-    0x5a: (('hd', 'sunken'), ('minion', 57), ('minion', 89), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('river', 0)),  # White Croc
-    0x5b: (('ow', (6, 0)), ('ow', (6, 1)), ('ow', (7, 0)), ('ow', (8, 0)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('river', 0), ('t4_harder', (3, 14))),  # Ochu
-    0x5c: (('cave', 95), ('cave', 96), ('forest_harder', (3, 12)), ('forest_harder', (3, 14)), ('minion', 37), ('minion', 90), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('river', 0)),  # Neochu
-    0x5d: (('hd', 'sunken'), ('minion', 51), ('minion', 84), ('ow', (6, 0)), ('ow', (6, 1)), ('ow', (7, 0)), ('ow', (8, 0)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('river', 0), ('t4_harder', (3, 14))),  # Hydra
-    0x5e: (('cave', 42), ('cave', 43), ('cave', 44), ('cave', 45), ('cave', 94), ('cave', 96), ('minion', 51), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('t4_harder', (3, 14))),  # Fire Hydra
+    0x2c: (('cave', 31), ('cave', 89), ('cave', 90), ('minion', 1), ('ow', (4, 16)), ('ow', (4, 20))),  # Ghoul
+    0x2d: (('cave', 3), ('cave', 4), ('cave', 66), ('cave', 67), ('cave', 68), ('forest', (6, 0)), ('forest', (6, 3)), ('forest_harder', (2, 21)), ('minion', 53), ('ow', (1, 12)), ('ow', (3, 21)), ('ow', (4, 16)), ('ow', (4, 20)), ('ow', (5, 23)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7)), ('t4', (3, 21)), ('t4', (5, 23))),  # Ghast
+    0x2e: (('cave', 3), ('cave', 4), ('cave', 66), ('cave', 67), ('cave', 68), ('forest', (6, 0)), ('forest', (6, 3)), ('forest_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Wight
+    0x2f: (('cave', 32), ('cave', 38), ('cave', 39), ('cf', 'chaos_basement'), ('minion', 39), ('minion', 80), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Purple Worm
+    0x30: (('desert', (7, 0)), ('desert', (7, 4)), ('desert', (8, 4)), ('desert_harder', (5, 23)), ('minion', 80), ('minion', 97), ('ow', (6, 0)), ('ow', (7, 0)), ('ow', (7, 4)), ('ow', (7, 5)), ('ow', (8, 5)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('t4_harder', (5, 23))),  # Sand Worm
+    0x31: (('cave', 36), ('cave', 45), ('cave', 46), ('minion', 21), ('minion', 65), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('tile', 42), ('tile', 45)),  # Lava Worm
+    0x32: (('cave', 92), ('cave', 93), ('ff', 'fortress'), ('hd', 'ice'), ('minion', 44), ('minion', 96), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('tile', 68)),  # Evil Eye
+    0x33: (('cave', 39), ('minion', 44), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7)), ('tile', 34)),  # Death Eye
+    0x34: (('cave', 78), ('cave', 79), ('cave', 80), ('cave', 82), ('cave', 94), ('cave', 95), ('ff', 'fortress'), ('hd', 'mirage'), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5))),  # Medusa
+    0x35: (('cave', 35), ('cave', 92), ('cave', 93), ('minion', 19), ('ow_harder', (5, 22)), ('ow_harder', (5, 23))),  # Earth Medusa
+    0x36: (('cave', 80), ('cave', 81), ('cave', 82), ('desert', (7, 0)), ('desert_harder', (5, 23)), ('desert_harder', (6, 3)), ('forest_harder', (4, 16)), ('forest_harder', (4, 20)), ('hd', 'sunken'), ('minion', 31), ('ow', (6, 0)), ('ow', (7, 0)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3))),  # Weretiger
+    0x37: (('cave', 78), ('cave', 79), ('cave', 94), ('cave', 95), ('ff', 'fortress'), ('hd', 'ice'), ('hd', 'mirage'), ('minion', 47), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5))),  # Rakshasa
+    0x38: (('cave', 41), ('cave', 42), ('desert', (5, 23)), ('minion', 39), ('ow', (5, 22)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('t4', (5, 23))),  # Ankheg
+    0x39: (('cave', 69), ('cave', 70), ('desert', (6, 3)), ('minion', 83), ('ow', (6, 0)), ('ow', (6, 3)), ('ow', (7, 0)), ('ow', (8, 0)), ('ow', (8, 1)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5))),  # Remorazz
+    0x3a: (('cave', 40), ('desert', (6, 3)), ('forest', (3, 19)), ('forest', (3, 21)), ('forest_harder', (3, 19)), ('forest_harder', (3, 21)), ('ow', (4, 16)), ('ow', (4, 20)), ('ow', (6, 3)), ('ow', (7, 0)), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3))),  # Lesser Tiger
+    0x3b: (('cave', 80), ('cave', 81), ('cave', 82), ('desert', (6, 3)), ('desert_harder', (5, 23)), ('forest', (3, 19)), ('forest', (3, 21)), ('forest_harder', (3, 19)), ('forest_harder', (3, 21)), ('hd', 'sunken'), ('minion', 43), ('ow', (6, 3)), ('ow', (7, 0)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3))),  # Sabertooth
+    0x3c: (('cameo', 60), ('cave', 38), ('cave', 80), ('cave', 81), ('cave', 82), ('forest', (4, 16)), ('forest', (4, 20)), ('forest_harder', (7, 0)), ('forest_harder', (7, 4)), ('hd', 'mirage'), ('minion', 9), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7)), ('scripted', 124)),  # Vampire
+    0x3d: (('cave', 33), ('cave', 34), ('cave', 38), ('cave', 39), ('cave', 94), ('cave', 95), ('ff', 'fortress'), ('forest_harder', (7, 0)), ('forest_harder', (7, 4)), ('hd', 'mirage'), ('minion', 34), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Vampire Lord
+    0x3e: (('cave', 1), ('cave', 2), ('cave', 90), ('cave', 91), ('desert_harder', (1, 12)), ('forest', (0, 12)), ('minion', 4), ('ow_harder', (0, 12)), ('ow_harder', (1, 12)), ('ow_harder', (1, 15)), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('tile', 31)),  # Gargoyle
+    0x3f: (('cave', 41), ('cave', 42), ('cave', 78), ('cave', 79), ('forest_harder', (2, 21)), ('hd', 'ice'), ('minion', 4), ('minion', 98), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23))),  # Horned Devil
+    0x40: (('cave', 5), ('cave', 35), ('forest', (5, 0)), ('forest', (5, 22)), ('forest', (5, 23)), ('minion', 19), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7)), ('tile', 1), ('tile', 2), ('tile', 3)),  # Earth Elemental
+    0x41: (('cave', 36), ('cave', 42), ('cave', 43), ('cave', 44), ('cave', 46), ('minion', 66), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('tile', 42)),  # Fire Elemental
+    0x42: (('cave', 32), ('cave', 66), ('cave', 67), ('cave', 68), ('cave', 69), ('cave', 70), ('hd', 'gurgu'), ('hd', 'ice'), ('minion', 48), ('minion', 76), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('t4_harder', (5, 23)), ('tile', 70)),  # White Dragon
+    0x43: (('cave', 36), ('cave', 45), ('cave', 46), ('cf', 'chaos_basement'), ('desert_harder', (6, 3)), ('desert_harder', (8, 4)), ('minion', 20), ('minion', 50), ('minion', 67), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7)), ('tile', 46)),  # Red Dragon
+    0x44: (('cave', 33), ('cave', 34), ('cave', 38), ('cave', 39), ('cave', 78), ('cave', 79), ('cf', 'chaos_basement'), ('ff', 'fortress'), ('forest_harder', (7, 0)), ('forest_harder', (7, 4)), ('hd', 'ice'), ('minion', 16), ('minion', 33), ('minion', 55), ('oc', 2), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7)), ('rr', 0), ('tile', 79)),  # Dragon Zombie
+    0x45: (('cave', 89), ('cave', 90), ('cave', 91), ('forest', (2, 21)), ('forest_harder', (1, 12)), ('forest_harder', (1, 15)), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('t4_harder', (3, 21))),  # Green Slime
+    0x46: (('cave', 41), ('cave', 42), ('cave', 89), ('cave', 90), ('cave', 91), ('forest', (1, 12)), ('forest', (1, 15)), ('forest', (2, 21)), ('forest_harder', (1, 12)), ('forest_harder', (1, 15)), ('ow_harder', (0, 12)), ('ow_harder', (1, 12)), ('ow_harder', (1, 15)), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23))),  # Gray Ooze
+    0x47: (('cave', 3), ('cave', 4), ('cave', 5), ('forest_harder', (3, 19)), ('forest_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23))),  # Ochre Jelly
+    0x48: (('cave', 32), ('cave', 33), ('cave', 92), ('cave', 93), ('cave', 96), ('ff', 'fortress'), ('forest', (7, 0)), ('forest', (7, 4)), ('forest_harder', (6, 0)), ('forest_harder', (6, 3)), ('hd', 'mirage'), ('minion', 62), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Black Flan
+    0x49: (('cave', 1), ('cave', 31), ('cave', 89), ('cave', 90), ('cave', 91), ('forest', (0, 12)), ('forest', (2, 21)), ('forest_harder', (1, 12)), ('forest_harder', (1, 15)), ('ow', (1, 12)), ('ow', (4, 16)), ('ow', (4, 20)), ('ow_harder', (0, 12)), ('ow_harder', (1, 12)), ('ow_harder', (1, 15)), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21))),  # Black Widow
+    0x4a: (('cave', 1), ('cave', 2), ('cave', 3), ('cave', 4), ('cave', 5), ('cave', 40), ('cave', 89), ('cave', 90), ('cave', 91), ('forest', (0, 12)), ('forest', (2, 21)), ('forest_harder', (1, 12)), ('forest_harder', (1, 15)), ('forest_harder', (3, 19)), ('forest_harder', (3, 21)), ('minion', 6), ('ow', (0, 12)), ('ow', (1, 12)), ('ow', (1, 15)), ('ow', (2, 21)), ('ow', (3, 19)), ('ow', (3, 21)), ('ow', (4, 16)), ('ow', (4, 20)), ('ow', (5, 23)), ('ow_harder', (0, 12)), ('ow_harder', (1, 12)), ('ow_harder', (1, 15)), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('t4', (2, 21)), ('t4', (3, 21)), ('t4', (5, 23))),  # Tarantula
+    0x4b: (('cave', 92), ('cave', 93), ('cave', 94), ('desert', (6, 3)), ('desert_harder', (5, 23)), ('forest', (2, 21)), ('forest_harder', (2, 21)), ('minion', 15), ('minion', 38), ('ow', (6, 0)), ('ow', (6, 3)), ('ow', (7, 0)), ('ow', (8, 0)), ('ow', (8, 1)), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('t4_harder', (5, 23))),  # Manticore
+    0x4c: (('cave', 41), ('desert_harder', (6, 3)), ('forest', (3, 19)), ('forest', (3, 21)), ('ow', (7, 0)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('tile', 4)),  # Sphinx
+    0x4d: (('desert', (7, 4)), ('desert', (8, 4)), ('desert_harder', (6, 3)), ('desert_harder', (7, 0)), ('desert_harder', (7, 4)), ('forest', (5, 0)), ('forest', (5, 22)), ('forest', (5, 23)), ('forest_harder', (4, 16)), ('forest_harder', (4, 20)), ('minion', 30), ('ow', (6, 3)), ('ow', (7, 0)), ('ow', (7, 4)), ('ow', (7, 5)), ('ow', (8, 5)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5))),  # Baretta
+    0x4e: (('desert', (6, 3)), ('desert', (7, 4)), ('desert', (8, 4)), ('desert_harder', (7, 0)), ('desert_harder', (7, 4)), ('minion', 75), ('ow', (6, 3)), ('ow', (7, 4)), ('ow', (7, 5)), ('ow', (8, 5)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Desert Baretta
+    0x4f: (('cave', 1), ('cave', 3), ('cave', 5), ('cave', 66), ('cave', 78), ('cave', 79), ('cave', 81), ('cave', 82), ('cave', 83), ('desert_harder', (5, 23)), ('desert_harder', (6, 3)), ('desert_harder', (7, 0)), ('desert_harder', (7, 4)), ('forest_harder', (5, 0)), ('forest_harder', (5, 22)), ('forest_harder', (5, 23)), ('forest_harder', (8, 0)), ('forest_harder', (8, 1)), ('forest_harder', (8, 6)), ('hd', 'gurgu'), ('hd', 'ice'), ('minion', 17), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7)), ('t4_harder', (5, 23)), ('tile', 88)),  # Mummy
+    0x50: (('cave', 78), ('cave', 79), ('cave', 81), ('cave', 82), ('cave', 83), ('desert_harder', (6, 3)), ('desert_harder', (7, 0)), ('desert_harder', (7, 4)), ('forest_harder', (5, 0)), ('forest_harder', (5, 22)), ('forest_harder', (5, 23)), ('forest_harder', (8, 0)), ('forest_harder', (8, 1)), ('forest_harder', (8, 6)), ('hd', 'ice'), ('minion', 11), ('minion', 17), ('minion', 89), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7)), ('tile', 24), ('tile', 83)),  # King Mummy
+    0x51: (('cave', 3), ('cave', 4), ('cave', 66), ('cave', 81), ('cave', 82), ('forest_harder', (8, 0)), ('forest_harder', (8, 1)), ('forest_harder', (8, 6)), ('hd', 'gurgu'), ('minion', 5), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Cockatrice
+    0x52: (('cave', 42), ('cave', 43), ('cave', 44), ('cave', 81), ('cave', 82), ('cave', 83), ('forest_harder', (8, 0)), ('forest_harder', (8, 1)), ('forest_harder', (8, 6)), ('minion', 50), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Pyrolisk
+    0x53: (('cave', 82), ('desert', (6, 3)), ('desert', (7, 0)), ('desert', (7, 4)), ('desert', (8, 4)), ('desert_harder', (7, 0)), ('desert_harder', (7, 4)), ('desert_harder', (8, 4)), ('hd', 'mirage'), ('minion', 48), ('oc', 1), ('ow', (6, 0)), ('ow', (6, 3)), ('ow', (7, 0)), ('ow', (7, 4)), ('ow', (7, 5)), ('ow', (8, 0)), ('ow', (8, 1)), ('ow', (8, 5)), ('ow', (8, 7)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Wyvern
+    0x54: (('cave', 82), ('desert', (6, 3)), ('desert_harder', (5, 23)), ('desert_harder', (7, 0)), ('desert_harder', (7, 4)), ('desert_harder', (8, 4)), ('dlc', 32), ('dlc', 33), ('hd', 'mirage'), ('minion', 28), ('minion', 49), ('oc', 1), ('ow', (6, 3)), ('ow', (7, 0)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7)), ('t4_harder', (5, 23))),  # Wyrm
+    0x55: (('desert', (7, 4)), ('desert', (8, 4)), ('minion', 79), ('ow', (7, 4)), ('ow', (7, 5)), ('ow', (8, 5)), ('ow', (8, 7)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3))),  # Allosaurus
+    0x56: (('desert', (7, 4)), ('desert', (8, 4)), ('minion', 79), ('ow', (7, 4)), ('ow', (7, 5)), ('ow', (8, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Tyrannosaur
+    0x57: (('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('river', 0)),  # Piranha
+    0x58: (('hd', 'sunken'), ('minion', 24), ('minion', 88), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('river', 0)),  # Red Piranha
+    0x59: (('hd', 'sunken'), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('river', 0)),  # Crocodile
+    0x5a: (('hd', 'sunken'), ('minion', 57), ('minion', 89), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('river', 0)),  # White Croc
+    0x5b: (('ow', (6, 0)), ('ow', (6, 3)), ('ow', (7, 0)), ('ow', (8, 0)), ('ow', (8, 1)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('river', 0), ('t4_harder', (3, 21))),  # Ochu
+    0x5c: (('cave', 95), ('cave', 96), ('forest_harder', (3, 19)), ('forest_harder', (3, 21)), ('minion', 37), ('minion', 90), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('river', 0)),  # Neochu
+    0x5d: (('hd', 'sunken'), ('minion', 51), ('minion', 84), ('ow', (6, 0)), ('ow', (6, 3)), ('ow', (7, 0)), ('ow', (8, 0)), ('ow', (8, 1)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('river', 0), ('t4_harder', (3, 21))),  # Hydra
+    0x5e: (('cave', 42), ('cave', 43), ('cave', 44), ('cave', 45), ('cave', 94), ('cave', 96), ('minion', 51), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('t4_harder', (3, 21))),  # Fire Hydra
     0x5f: (('cave', 80), ('cave', 81), ('cave', 94), ('cave', 95), ('ff', 'fortress'), ('hd', 'mirage'), ('minion', 68), ('scripted', 76)),  # Guardian
     0x60: (('cave', 94), ('cave', 95), ('ff', 'fortress'), ('hd', 'mirage'), ('minion', 68)),  # Soldier
-    0x61: (('cave', 23), ('cave', 25), ('cave', 26), ('cave', 27), ('cave', 28), ('cave', 29), ('cave', 30), ('cave', 37), ('cf', 'chaos_basement'), ('hd', 'sunken'), ('minion', 26), ('oc', 2), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Water Elemental
-    0x62: (('cave', 38), ('cave', 92), ('cave', 93), ('cave', 95), ('cave', 96), ('cf', 'chaos_basement'), ('ff', 'fortress'), ('forest_harder', (5, 0)), ('forest_harder', (5, 15)), ('forest_harder', (5, 16)), ('hd', 'mirage'), ('hd', 'sunken'), ('minion', 30), ('minion', 63), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Air Elemental
-    0x63: (('cave', 25), ('cave', 26), ('cave', 27), ('cave', 30), ('cave', 37), ('cf', 'chaos_basement'), ('hd', 'sunken'), ('minion', 24), ('minion', 88), ('oc', 2), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Water Naga
-    0x64: (('cave', 92), ('cave', 93), ('cave', 95), ('cave', 96), ('ff', 'fortress'), ('forest_harder', (5, 0)), ('forest_harder', (5, 15)), ('forest_harder', (5, 16)), ('hd', 'mirage'), ('hd', 'sunken'), ('minion', 60), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Spirit Naga
-    0x65: (('cave', 32), ('cave', 33), ('cave', 80), ('cave', 81), ('cave', 93), ('cave', 94), ('forest', (4, 9)), ('forest', (4, 13)), ('minion', 29), ('minion', 63), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('t4_harder', (5, 16))),  # Chimera
-    0x66: (('cave', 33), ('minion', 38), ('minion', 87), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Rhyos
-    0x67: (('cameo', 103), ('cave', 3), ('cave', 4), ('cave', 66), ('hd', 'gurgu'), ('hd', 'ice'), ('minion', 27), ('minion', 36), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('scripted', 28), ('scripted', 156)),  # Piscodemon
-    0x68: (('cave', 38), ('cave', 39), ('cave', 67), ('cave', 68), ('cave', 69), ('cave', 70), ('cave', 78), ('cave', 79), ('cave', 95), ('cave', 96), ('ff', 'fortress'), ('minion', 32), ('minion', 83), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Mindflayer
+    0x61: (('cave', 23), ('cave', 25), ('cave', 26), ('cave', 27), ('cave', 28), ('cave', 29), ('cave', 30), ('cave', 37), ('cf', 'chaos_basement'), ('hd', 'sunken'), ('minion', 26), ('oc', 2), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('tile', 24)),  # Water Elemental
+    0x62: (('cave', 38), ('cave', 92), ('cave', 93), ('cave', 95), ('cave', 96), ('cf', 'chaos_basement'), ('ff', 'fortress'), ('forest_harder', (5, 0)), ('forest_harder', (5, 22)), ('forest_harder', (5, 23)), ('hd', 'mirage'), ('hd', 'sunken'), ('minion', 30), ('minion', 63), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Air Elemental
+    0x63: (('cave', 25), ('cave', 26), ('cave', 27), ('cave', 30), ('cave', 37), ('cf', 'chaos_basement'), ('hd', 'sunken'), ('minion', 24), ('minion', 88), ('oc', 2), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5))),  # Water Naga
+    0x64: (('cave', 92), ('cave', 93), ('cave', 95), ('cave', 96), ('ff', 'fortress'), ('forest_harder', (5, 0)), ('forest_harder', (5, 22)), ('forest_harder', (5, 23)), ('hd', 'mirage'), ('hd', 'sunken'), ('minion', 60), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5))),  # Spirit Naga
+    0x65: (('cave', 32), ('cave', 33), ('cave', 80), ('cave', 81), ('cave', 93), ('cave', 94), ('forest', (4, 16)), ('forest', (4, 20)), ('minion', 29), ('minion', 63), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('t4_harder', (5, 23))),  # Chimera
+    0x66: (('cave', 33), ('minion', 38), ('minion', 87), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5))),  # Rhyos
+    0x67: (('cameo', 103), ('cave', 3), ('cave', 4), ('cave', 66), ('hd', 'gurgu'), ('hd', 'ice'), ('minion', 27), ('minion', 36), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('scripted', 28), ('scripted', 156)),  # Piscodemon
+    0x68: (('cave', 38), ('cave', 39), ('cave', 67), ('cave', 68), ('cave', 69), ('cave', 70), ('cave', 78), ('cave', 79), ('cave', 95), ('cave', 96), ('ff', 'fortress'), ('minion', 32), ('minion', 83), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5))),  # Mindflayer
     0x69: (('cameo', 105), ('hd', 'gurgu'), ('minion', 2), ('minion', 12), ('minion', 36), ('minion', 71), ('scripted', 127)),  # Garland
-    0x6a: (('cave', 34), ('cave', 39), ('cave', 83), ('cf', 'chaos_basement'), ('forest', (7, 0)), ('forest', (7, 1)), ('minion', 77), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Green Dragon
-    0x6b: (('cave', 81), ('cave', 82), ('ff', 'fortress'), ('forest', (6, 0)), ('forest', (6, 1)), ('forest', (7, 0)), ('forest', (7, 1)), ('forest_harder', (5, 0)), ('forest_harder', (5, 15)), ('forest_harder', (5, 16)), ('forest_harder', (6, 0)), ('forest_harder', (6, 1)), ('forest_harder', (8, 0)), ('hd', 'sunken'), ('minion', 28), ('minion', 49), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Blue Dragon
-    0x6c: (('cave', 35), ('cave', 83), ('cave', 95), ('cave', 96), ('ff', 'fortress'), ('forest', (7, 0)), ('forest', (7, 1)), ('forest_harder', (6, 0)), ('forest_harder', (6, 1)), ('minion', 23), ('minion', 73), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Clay Golem
-    0x6d: (('cave', 30), ('cave', 35), ('cave', 38), ('cave', 39), ('cave', 93), ('cave', 94), ('ff', 'fortress'), ('forest', (6, 0)), ('forest', (6, 1)), ('forest', (7, 0)), ('forest', (7, 1)), ('forest_harder', (6, 0)), ('forest_harder', (6, 1)), ('hd', 'mirage'), ('hd', 'sunken'), ('minion', 23), ('minion', 60), ('minion', 72), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('t4_harder', (5, 16))),  # Stone Golem
+    0x6a: (('cave', 34), ('cave', 39), ('cave', 83), ('cf', 'chaos_basement'), ('forest', (7, 0)), ('forest', (7, 4)), ('minion', 77), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Green Dragon
+    0x6b: (('cave', 81), ('cave', 82), ('ff', 'fortress'), ('forest', (6, 0)), ('forest', (6, 3)), ('forest', (7, 0)), ('forest', (7, 4)), ('forest_harder', (5, 0)), ('forest_harder', (5, 22)), ('forest_harder', (5, 23)), ('forest_harder', (6, 0)), ('forest_harder', (6, 3)), ('forest_harder', (8, 0)), ('forest_harder', (8, 1)), ('forest_harder', (8, 6)), ('hd', 'sunken'), ('minion', 28), ('minion', 49), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7)), ('tile', 82)),  # Blue Dragon
+    0x6c: (('cave', 35), ('cave', 83), ('cave', 95), ('cave', 96), ('ff', 'fortress'), ('forest', (7, 0)), ('forest', (7, 4)), ('forest_harder', (6, 0)), ('forest_harder', (6, 3)), ('minion', 23), ('minion', 73), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7)), ('tile', 78)),  # Clay Golem
+    0x6d: (('cave', 30), ('cave', 35), ('cave', 38), ('cave', 39), ('cave', 93), ('cave', 94), ('ff', 'fortress'), ('forest', (6, 0)), ('forest', (6, 3)), ('forest', (7, 0)), ('forest', (7, 4)), ('forest_harder', (6, 0)), ('forest_harder', (6, 3)), ('hd', 'mirage'), ('hd', 'sunken'), ('minion', 23), ('minion', 60), ('minion', 72), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7)), ('t4_harder', (5, 23))),  # Stone Golem
     0x6e: (('cave', 38), ('minion', 69), ('minion', 72), ('rr', 0)),  # Iron Golem
-    0x6f: (('cave', 34), ('cave', 80), ('cave', 92), ('cf', 'chaos_basement'), ('ff', 'fortress'), ('forest', (8, 0)), ('hd', 'mirage'), ('hd', 'sunken'), ('minion', 0), ('minion', 70), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Black Knight
-    0x70: (('cave', 38), ('cave', 39), ('cave', 92), ('cave', 93), ('ff', 'fortress'), ('forest', (5, 0)), ('forest', (5, 15)), ('forest', (5, 16)), ('minion', 8), ('minion', 69), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Death Knight
+    0x6f: (('cave', 34), ('cave', 80), ('cave', 92), ('cf', 'chaos_basement'), ('ff', 'fortress'), ('forest', (8, 0)), ('forest', (8, 1)), ('forest', (8, 6)), ('hd', 'mirage'), ('hd', 'sunken'), ('minion', 0), ('minion', 70), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Black Knight
+    0x70: (('cave', 38), ('cave', 39), ('cave', 92), ('cave', 93), ('ff', 'fortress'), ('forest', (5, 0)), ('forest', (5, 22)), ('forest', (5, 23)), ('minion', 8), ('minion', 69), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5))),  # Death Knight
     0x71: (('cameo', 113), ('hd', 'ice'), ('minion', 14), ('minion', 18), ('minion', 71), ('scripted', 125)),  # Astos
-    0x72: (('cave', 34), ('cave', 39), ('cave', 67), ('cave', 68), ('cave', 69), ('cave', 70), ('hd', 'gurgu'), ('minion', 13), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Dark Wizard
-    0x73: (('cave', 34), ('cave', 39), ('cave', 94), ('cave', 95), ('cave', 96), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Dark Fighter
-    0x74: (('desert', (1, 5)), ('forest', (0, 5)), ('ow', (0, 5)), ('ow', (1, 5)), ('ow_harder', (0, 5))),  # Crazy Horse
-    0x75: (('cave', 38), ('cave', 39), ('cave', 80), ('cave', 83), ('cave', 92), ('cave', 93), ('ff', 'fortress'), ('forest', (5, 0)), ('forest', (5, 15)), ('forest', (5, 16)), ('hd', 'sunken'), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Nightmare
+    0x72: (('cave', 34), ('cave', 39), ('cave', 67), ('cave', 68), ('cave', 69), ('cave', 70), ('hd', 'gurgu'), ('minion', 13), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('tile', 68)),  # Dark Wizard
+    0x73: (('cave', 34), ('cave', 39), ('cave', 94), ('cave', 95), ('cave', 96), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Dark Fighter
+    0x74: (('desert', (1, 12)), ('forest', (0, 12)), ('ow', (0, 12)), ('ow', (1, 12)), ('ow_harder', (0, 12))),  # Crazy Horse
+    0x75: (('cave', 38), ('cave', 39), ('cave', 80), ('cave', 83), ('cave', 92), ('cave', 93), ('ff', 'fortress'), ('forest', (5, 0)), ('forest', (5, 22)), ('forest', (5, 23)), ('hd', 'sunken'), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('tile', 79)),  # Nightmare
     0x76: (('cameo', 118), ('cave', 96), ('cf', 'chaos_basement'), ('ff', 'fortress'), ('scripted', 86)),  # Warmech
     0x77: (('cameo', 119), ('cf', 'chaos_basement'), ('minion', 31), ('minion', 93), ('minion', 98), ('scripted', 122)),  # Lich
     0x78: (('scripted', 115),),  # Lich
@@ -168,56 +168,56 @@ BESTIARY_SOURCES = {
     0x8e: (('dlc_boss', 270),),  # Orthros
     0x8f: (('dlc_boss', 271),),  # Phantom Train
     0x90: (('dlc_boss', 272),),  # Death Gaze
-    0x91: (('cf', 'chaos_basement'), ('dlc', 32), ('dlc', 33), ('forest_harder', (5, 0)), ('forest_harder', (5, 15)), ('forest_harder', (5, 16)), ('forest_harder', (6, 0)), ('forest_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Devil Wizard
-    0x92: (('cf', 'chaos_basement'), ('forest_harder', (8, 0)), ('minion', 81), ('minion', 97)),  # Abyss Worm
-    0x93: (('desert_harder', (5, 16)), ('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('forest', (7, 0)), ('forest', (7, 1)), ('forest_harder', (2, 14)), ('forest_harder', (4, 9)), ('forest_harder', (4, 13)), ('hd', 'gurgu'), ('hd', 'ice'), ('hd', 'mirage'), ('minion', 85), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Elm Gigas
-    0x94: (('cf', 'chaos_basement'), ('dlc', 33), ('forest_harder', (7, 0)), ('forest_harder', (7, 1)), ('minion', 65), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Flare Gigas
+    0x91: (('cf', 'chaos_basement'), ('dlc', 32), ('dlc', 33), ('forest_harder', (5, 0)), ('forest_harder', (5, 22)), ('forest_harder', (5, 23)), ('forest_harder', (6, 0)), ('forest_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Devil Wizard
+    0x92: (('cf', 'chaos_basement'), ('forest_harder', (8, 0)), ('forest_harder', (8, 1)), ('forest_harder', (8, 6)), ('minion', 81), ('minion', 97)),  # Abyss Worm
+    0x93: (('desert_harder', (5, 23)), ('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('forest', (7, 0)), ('forest', (7, 4)), ('forest_harder', (2, 21)), ('forest_harder', (4, 16)), ('forest_harder', (4, 20)), ('hd', 'gurgu'), ('hd', 'ice'), ('hd', 'mirage'), ('minion', 85), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Elm Gigas
+    0x94: (('cf', 'chaos_basement'), ('dlc', 33), ('forest_harder', (7, 0)), ('forest_harder', (7, 4)), ('minion', 65), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Flare Gigas
     0x95: (('dlc', 32),),  # Unicorn
-    0x96: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('forest', (1, 5)), ('forest', (1, 8)), ('forest', (2, 14)), ('forest', (3, 12)), ('forest', (3, 14)), ('forest_harder', (1, 5)), ('forest_harder', (1, 8)), ('minion', 86), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16))),  # Yellow Ogre
-    0x97: (('cf', 'chaos_basement'), ('dlc', 33), ('forest', (6, 0)), ('forest', (6, 1)), ('hd', 'mirage'), ('minion', 86), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('rr', 0)),  # Mad Ogre
-    0x98: (('dlc', 33), ('minion', 29), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Mage Chimera
-    0x99: (('desert_harder', (5, 16)), ('desert_harder', (6, 1)), ('dlc', 21), ('dlc', 31), ('dlc', 32), ('forest', (4, 9)), ('forest', (4, 13)), ('forest_harder', (4, 9)), ('forest_harder', (4, 13)), ('minion', 78), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1))),  # Yellow Dragon
-    0x9a: (('cf', 'chaos_basement'), ('dlc', 33), ('ff', 'fortress'), ('forest_harder', (8, 0)), ('minion', 76), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Holy Dragon
-    0x9b: (('cf', 'chaos_basement'), ('dlc', 33), ('ff', 'fortress'), ('forest_harder', (5, 0)), ('forest_harder', (5, 15)), ('forest_harder', (5, 16)), ('minion', 73), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Mythril Golem
+    0x96: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('forest', (1, 12)), ('forest', (1, 15)), ('forest', (2, 21)), ('forest', (3, 19)), ('forest', (3, 21)), ('forest_harder', (1, 12)), ('forest_harder', (1, 15)), ('minion', 86), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23))),  # Yellow Ogre
+    0x97: (('cf', 'chaos_basement'), ('dlc', 33), ('forest', (6, 0)), ('forest', (6, 3)), ('hd', 'mirage'), ('minion', 86), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7)), ('rr', 0)),  # Mad Ogre
+    0x98: (('dlc', 33), ('minion', 29), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5))),  # Mage Chimera
+    0x99: (('desert_harder', (5, 23)), ('desert_harder', (6, 3)), ('dlc', 21), ('dlc', 31), ('dlc', 32), ('forest', (4, 16)), ('forest', (4, 20)), ('forest_harder', (4, 16)), ('forest_harder', (4, 20)), ('minion', 78), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3))),  # Yellow Dragon
+    0x9a: (('cf', 'chaos_basement'), ('dlc', 33), ('ff', 'fortress'), ('forest_harder', (8, 0)), ('forest_harder', (8, 1)), ('forest_harder', (8, 6)), ('minion', 76), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Holy Dragon
+    0x9b: (('cf', 'chaos_basement'), ('dlc', 33), ('ff', 'fortress'), ('forest_harder', (5, 0)), ('forest_harder', (5, 22)), ('forest_harder', (5, 23)), ('minion', 73), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Mythril Golem
     0x9c: (('cf', 'chaos_basement'), ('dlc', 21), ('dlc', 31), ('hd', 'sunken'), ('minion', 26), ('minion', 58), ('oc', 4)),  # Killer Shark
-    0x9d: (('dlc', 21), ('dlc', 31), ('dlc', 32), ('forest', (4, 9)), ('forest', (4, 13)), ('forest_harder', (4, 9)), ('forest_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1))),  # Death Manticore
-    0x9e: (('dlc', 21), ('dlc', 31), ('dlc', 32), ('forest', (3, 12)), ('forest', (3, 14)), ('forest_harder', (2, 14)), ('minion', 42), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16))),  # Blood Tiger
-    0x9f: (('dlc', 21), ('dlc', 31), ('hd', 'sunken'), ('minion', 46), ('ow_harder', (5, 15)), ('ow_harder', (5, 16))),  # Dark Eye
-    0xa0: (('cf', 'chaos_basement'), ('dlc', 33), ('ff', 'fortress'), ('minion', 45), ('minion', 96), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Bloody Eye
-    0xa1: (('dlc', 32), ('forest', (4, 9)), ('forest', (4, 13)), ('forest', (5, 0)), ('forest', (5, 15)), ('forest', (5, 16)), ('forest', (6, 0)), ('forest', (6, 1)), ('hd', 'ice'), ('hd', 'mirage'), ('minion', 85), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('rr', 0)),  # Flood Gigas
-    0xa2: (('cf', 'chaos_basement'), ('dlc', 32), ('dlc', 33), ('forest', (6, 0)), ('forest', (6, 1)), ('minion', 5), ('minion', 61), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('rr', 0)),  # Poison Eagle
-    0xa3: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('forest', (0, 5)), ('forest', (3, 12)), ('forest', (3, 14)), ('forest', (5, 0)), ('forest', (5, 15)), ('forest', (5, 16)), ('forest', (7, 0)), ('forest', (7, 1)), ('hd', 'mirage'), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Black Goblin
-    0xa4: (('dlc', 32), ('dlc', 33), ('forest', (5, 0)), ('forest', (5, 15)), ('forest', (5, 16)), ('forest', (6, 0)), ('forest', (6, 1)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Knocker
-    0xa5: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16))),  # Desertpede
-    0xa6: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('forest', (2, 14)), ('forest_harder', (0, 5)), ('forest_harder', (2, 14)), ('forest_harder', (7, 0)), ('forest_harder', (7, 1)), ('minion', 6), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Gloom Widow
-    0xa7: (('cf', 'chaos_basement'), ('dlc', 32), ('dlc', 33), ('ff', 'fortress'), ('forest', (6, 0)), ('forest', (6, 1)), ('forest_harder', (7, 0)), ('forest_harder', (7, 1)), ('forest_harder', (8, 0)), ('minion', 35), ('minion', 70), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Duel Knight
-    0xa8: (('cf', 'chaos_basement'), ('dlc', 33), ('forest_harder', (6, 0)), ('forest_harder', (6, 1)), ('minion', 27), ('minion', 56), ('rr', 0)),  # Squidraken
-    0xa9: (('cf', 'chaos_basement'), ('desert_harder', (7, 0)), ('desert_harder', (7, 1)), ('desert_harder', (8, 1)), ('dlc', 32), ('dlc', 33), ('forest', (8, 0)), ('forest_harder', (6, 0)), ('forest_harder', (6, 1)), ('forest_harder', (7, 0)), ('forest_harder', (7, 1)), ('minion', 94), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Pharaoh
-    0xaa: (('cf', 'chaos_basement'), ('desert_harder', (7, 0)), ('desert_harder', (7, 1)), ('desert_harder', (8, 1)), ('dlc', 32), ('dlc', 33), ('forest', (5, 0)), ('forest', (5, 15)), ('forest', (5, 16)), ('forest', (8, 0)), ('forest_harder', (7, 0)), ('forest_harder', (7, 1)), ('hd', 'ice'), ('minion', 10), ('minion', 52), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Bonesnatch
-    0xab: (('cf', 'chaos_basement'), ('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Silver Dragon
-    0xac: (('cf', 'chaos_basement'), ('desert_harder', (8, 1)), ('dlc', 33), ('ff', 'fortress'), ('forest', (7, 0)), ('forest', (7, 1)), ('forest', (8, 0)), ('forest_harder', (7, 0)), ('forest_harder', (7, 1)), ('forest_harder', (8, 0)), ('minion', 33), ('minion', 78), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('rr', 0)),  # Black Dragon
-    0xad: (('dlc', 21), ('dlc', 31), ('forest', (1, 5)), ('forest', (1, 8)), ('forest_harder', (0, 5)), ('forest_harder', (1, 5)), ('forest_harder', (1, 8)), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('t4_harder', (2, 14)), ('t4_harder', (3, 14))),  # Blue Troll
-    0xae: (('cf', 'chaos_basement'), ('desert_harder', (8, 1)), ('dlc', 33), ('forest', (8, 0)), ('forest_harder', (4, 9)), ('forest_harder', (4, 13)), ('forest_harder', (5, 0)), ('forest_harder', (5, 15)), ('forest_harder', (5, 16)), ('forest_harder', (7, 0)), ('forest_harder', (7, 1)), ('minion', 57), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Earth Troll
-    0xaf: (('dlc', 21), ('dlc', 31), ('forest_harder', (3, 12)), ('forest_harder', (3, 14)), ('minion', 59), ('oc', 2), ('ow_harder', (5, 15)), ('ow_harder', (5, 16))),  # Poison Naga
-    0xb0: (('cf', 'chaos_basement'), ('dlc', 33), ('minion', 95), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Earth Plant
-    0xb1: (('cf', 'chaos_basement'), ('dlc', 33), ('hd', 'sunken'), ('minion', 84), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('rr', 0)),  # Yamatano Orochi
-    0xb2: (('cf', 'chaos_basement'), ('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('ff', 'fortress'), ('forest_harder', (6, 0)), ('forest_harder', (6, 1)), ('minion', 40), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Dark Elemental
-    0xb3: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('forest', (1, 5)), ('forest', (1, 8)), ('forest', (2, 14)), ('forest', (5, 0)), ('forest', (5, 15)), ('forest', (5, 16)), ('forest_harder', (0, 5)), ('forest_harder', (1, 5)), ('forest_harder', (1, 8)), ('minion', 40), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('t4_harder', (2, 14)), ('t4_harder', (3, 14))),  # Devil Hound
-    0xb4: (('cf', 'chaos_basement'), ('desert_harder', (8, 1)), ('dlc', 33), ('forest', (8, 0)), ('forest_harder', (7, 0)), ('forest_harder', (7, 1)), ('forest_harder', (8, 0)), ('minion', 43), ('minion', 87), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Sekhret
-    0xb5: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('forest', (7, 0)), ('forest', (7, 1)), ('hd', 'mirage'), ('minion', 61), ('minion', 99), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Catoblepas
-    0xb6: (('cf', 'chaos_basement'), ('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('minion', 82), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Hundlegs
-    0xb7: (('cf', 'chaos_basement'), ('dlc', 33), ('forest', (7, 0)), ('forest', (7, 1)), ('minion', 82), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Undergrounder
-    0xb8: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('forest', (3, 12)), ('forest', (3, 14)), ('forest_harder', (3, 12)), ('forest_harder', (3, 14)), ('minion', 94), ('oc', 2), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16))),  # Death Elemental
-    0xb9: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('forest', (3, 12)), ('forest', (3, 14)), ('forest', (4, 9)), ('forest', (4, 13)), ('forest', (5, 0)), ('forest', (5, 15)), ('forest', (5, 16)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Wild Nakk
-    0xba: (('dlc', 32), ('dlc', 33), ('forest', (7, 0)), ('forest', (7, 1)), ('forest_harder', (4, 9)), ('forest_harder', (4, 13)), ('forest_harder', (5, 0)), ('forest_harder', (5, 15)), ('forest_harder', (5, 16)), ('hd', 'ice'), ('hd', 'mirage'), ('minion', 41), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Dark Wolf
-    0xbb: (('cf', 'chaos_basement'), ('desert_harder', (7, 0)), ('desert_harder', (7, 1)), ('desert_harder', (8, 1)), ('dlc', 32), ('dlc', 33), ('ff', 'fortress'), ('forest', (4, 9)), ('forest', (4, 13)), ('forest', (7, 0)), ('forest', (7, 1)), ('forest', (8, 0)), ('forest_harder', (5, 0)), ('forest_harder', (5, 15)), ('forest_harder', (5, 16)), ('forest_harder', (6, 0)), ('forest_harder', (6, 1)), ('minion', 62), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Rock Gargoyle
-    0xbc: (('cf', 'chaos_basement'), ('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('hd', 'sunken'), ('minion', 56), ('oc', 3), ('oc', 4), ('ow_harder', (7, 0)), ('ow_harder', (7, 1))),  # Sahagin Queen
-    0xbd: (('cf', 'chaos_basement'), ('dlc', 32), ('dlc', 33), ('ff', 'fortress'), ('forest', (8, 0)), ('forest_harder', (8, 0)), ('minion', 22), ('minion', 92), ('minion', 99), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Reaper
-    0xbe: (('desert_harder', (5, 16)), ('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('forest', (3, 12)), ('forest', (3, 14)), ('forest_harder', (1, 5)), ('forest_harder', (1, 8)), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (4, 9)), ('ow_harder', (4, 13)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('t4_harder', (2, 14))),  # Python
-    0xbf: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('forest', (2, 14)), ('forest', (4, 9)), ('forest', (4, 13)), ('forest', (5, 0)), ('forest', (5, 15)), ('forest', (5, 16)), ('forest_harder', (1, 5)), ('forest_harder', (1, 8)), ('hd', 'ice'), ('minion', 11), ('minion', 54), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (5, 15)), ('ow_harder', (5, 16)), ('ow_harder', (6, 0)), ('ow_harder', (6, 1)), ('ow_harder', (7, 0)), ('ow_harder', (7, 1)), ('t4_harder', (2, 14))),  # Skuldier
-    0xc0: (('cf', 'chaos_basement'), ('dlc', 32), ('dlc', 33), ('ff', 'fortress'), ('forest', (8, 0)), ('forest_harder', (7, 0)), ('forest_harder', (7, 1)), ('minion', 64), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Red Flan
-    0xc1: (('cf', 'chaos_basement'), ('dlc', 32), ('dlc', 33), ('ff', 'fortress'), ('minion', 74), ('ow_harder', (8, 0)), ('ow_harder', (8, 1))),  # Prototype
-    0xc2: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('ff', 'fortress'), ('forest', (0, 5)), ('forest', (1, 5)), ('forest', (1, 8)), ('forest_harder', (0, 5)), ('minion', 53), ('ow_harder', (2, 14)), ('ow_harder', (3, 12)), ('ow_harder', (3, 14)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('t4_harder', (2, 14))),  # Revenant
+    0x9d: (('dlc', 21), ('dlc', 31), ('dlc', 32), ('forest', (4, 16)), ('forest', (4, 20)), ('forest_harder', (4, 16)), ('forest_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3))),  # Death Manticore
+    0x9e: (('dlc', 21), ('dlc', 31), ('dlc', 32), ('forest', (3, 19)), ('forest', (3, 21)), ('forest_harder', (2, 21)), ('minion', 42), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23))),  # Blood Tiger
+    0x9f: (('dlc', 21), ('dlc', 31), ('hd', 'sunken'), ('minion', 46), ('ow_harder', (5, 22)), ('ow_harder', (5, 23))),  # Dark Eye
+    0xa0: (('cf', 'chaos_basement'), ('dlc', 33), ('ff', 'fortress'), ('minion', 45), ('minion', 96), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Bloody Eye
+    0xa1: (('dlc', 32), ('forest', (4, 16)), ('forest', (4, 20)), ('forest', (5, 0)), ('forest', (5, 22)), ('forest', (5, 23)), ('forest', (6, 0)), ('forest', (6, 3)), ('hd', 'ice'), ('hd', 'mirage'), ('minion', 85), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7)), ('rr', 0)),  # Flood Gigas
+    0xa2: (('cf', 'chaos_basement'), ('dlc', 32), ('dlc', 33), ('forest', (6, 0)), ('forest', (6, 3)), ('minion', 5), ('minion', 61), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('rr', 0)),  # Poison Eagle
+    0xa3: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('forest', (0, 12)), ('forest', (3, 19)), ('forest', (3, 21)), ('forest', (5, 0)), ('forest', (5, 22)), ('forest', (5, 23)), ('forest', (7, 0)), ('forest', (7, 4)), ('hd', 'mirage'), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Black Goblin
+    0xa4: (('dlc', 32), ('dlc', 33), ('forest', (5, 0)), ('forest', (5, 22)), ('forest', (5, 23)), ('forest', (6, 0)), ('forest', (6, 3)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5))),  # Knocker
+    0xa5: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23))),  # Desertpede
+    0xa6: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('forest', (2, 21)), ('forest_harder', (0, 12)), ('forest_harder', (2, 21)), ('forest_harder', (7, 0)), ('forest_harder', (7, 4)), ('minion', 6), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Gloom Widow
+    0xa7: (('cf', 'chaos_basement'), ('dlc', 32), ('dlc', 33), ('ff', 'fortress'), ('forest', (6, 0)), ('forest', (6, 3)), ('forest_harder', (7, 0)), ('forest_harder', (7, 4)), ('forest_harder', (8, 0)), ('forest_harder', (8, 1)), ('forest_harder', (8, 6)), ('minion', 35), ('minion', 70), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Duel Knight
+    0xa8: (('cf', 'chaos_basement'), ('dlc', 33), ('forest_harder', (6, 0)), ('forest_harder', (6, 3)), ('minion', 27), ('minion', 56), ('rr', 0)),  # Squidraken
+    0xa9: (('cf', 'chaos_basement'), ('desert_harder', (7, 0)), ('desert_harder', (7, 4)), ('desert_harder', (8, 4)), ('dlc', 32), ('dlc', 33), ('forest', (8, 0)), ('forest', (8, 1)), ('forest', (8, 6)), ('forest_harder', (6, 0)), ('forest_harder', (6, 3)), ('forest_harder', (7, 0)), ('forest_harder', (7, 4)), ('minion', 94), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Pharaoh
+    0xaa: (('cf', 'chaos_basement'), ('desert_harder', (7, 0)), ('desert_harder', (7, 4)), ('desert_harder', (8, 4)), ('dlc', 32), ('dlc', 33), ('forest', (5, 0)), ('forest', (5, 22)), ('forest', (5, 23)), ('forest', (8, 0)), ('forest', (8, 1)), ('forest', (8, 6)), ('forest_harder', (7, 0)), ('forest_harder', (7, 4)), ('hd', 'ice'), ('minion', 10), ('minion', 52), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Bonesnatch
+    0xab: (('cf', 'chaos_basement'), ('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5))),  # Silver Dragon
+    0xac: (('cf', 'chaos_basement'), ('desert_harder', (8, 4)), ('dlc', 33), ('ff', 'fortress'), ('forest', (7, 0)), ('forest', (7, 4)), ('forest', (8, 0)), ('forest', (8, 1)), ('forest', (8, 6)), ('forest_harder', (7, 0)), ('forest_harder', (7, 4)), ('forest_harder', (8, 0)), ('forest_harder', (8, 1)), ('forest_harder', (8, 6)), ('minion', 33), ('minion', 78), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7)), ('rr', 0)),  # Black Dragon
+    0xad: (('dlc', 21), ('dlc', 31), ('forest', (1, 12)), ('forest', (1, 15)), ('forest_harder', (0, 12)), ('forest_harder', (1, 12)), ('forest_harder', (1, 15)), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('t4_harder', (2, 21)), ('t4_harder', (3, 21))),  # Blue Troll
+    0xae: (('cf', 'chaos_basement'), ('desert_harder', (8, 4)), ('dlc', 33), ('forest', (8, 0)), ('forest', (8, 1)), ('forest', (8, 6)), ('forest_harder', (4, 16)), ('forest_harder', (4, 20)), ('forest_harder', (5, 0)), ('forest_harder', (5, 22)), ('forest_harder', (5, 23)), ('forest_harder', (7, 0)), ('forest_harder', (7, 4)), ('minion', 57), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Earth Troll
+    0xaf: (('dlc', 21), ('dlc', 31), ('forest_harder', (3, 19)), ('forest_harder', (3, 21)), ('minion', 59), ('oc', 2), ('ow_harder', (5, 22)), ('ow_harder', (5, 23))),  # Poison Naga
+    0xb0: (('cf', 'chaos_basement'), ('dlc', 33), ('minion', 95), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5))),  # Earth Plant
+    0xb1: (('cf', 'chaos_basement'), ('dlc', 33), ('hd', 'sunken'), ('minion', 84), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('rr', 0)),  # Yamatano Orochi
+    0xb2: (('cf', 'chaos_basement'), ('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('ff', 'fortress'), ('forest_harder', (6, 0)), ('forest_harder', (6, 3)), ('minion', 40), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Dark Elemental
+    0xb3: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('forest', (1, 12)), ('forest', (1, 15)), ('forest', (2, 21)), ('forest', (5, 0)), ('forest', (5, 22)), ('forest', (5, 23)), ('forest_harder', (0, 12)), ('forest_harder', (1, 12)), ('forest_harder', (1, 15)), ('minion', 40), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('t4_harder', (2, 21)), ('t4_harder', (3, 21))),  # Devil Hound
+    0xb4: (('cf', 'chaos_basement'), ('desert_harder', (8, 4)), ('dlc', 33), ('forest', (8, 0)), ('forest', (8, 1)), ('forest', (8, 6)), ('forest_harder', (7, 0)), ('forest_harder', (7, 4)), ('forest_harder', (8, 0)), ('forest_harder', (8, 1)), ('forest_harder', (8, 6)), ('minion', 43), ('minion', 87), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Sekhret
+    0xb5: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('forest', (7, 0)), ('forest', (7, 4)), ('hd', 'mirage'), ('minion', 61), ('minion', 99), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Catoblepas
+    0xb6: (('cf', 'chaos_basement'), ('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('minion', 82), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Hundlegs
+    0xb7: (('cf', 'chaos_basement'), ('dlc', 33), ('forest', (7, 0)), ('forest', (7, 4)), ('minion', 82), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Undergrounder
+    0xb8: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('forest', (3, 19)), ('forest', (3, 21)), ('forest_harder', (3, 19)), ('forest_harder', (3, 21)), ('minion', 94), ('oc', 2), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23))),  # Death Elemental
+    0xb9: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('forest', (3, 19)), ('forest', (3, 21)), ('forest', (4, 16)), ('forest', (4, 20)), ('forest', (5, 0)), ('forest', (5, 22)), ('forest', (5, 23)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5))),  # Wild Nakk
+    0xba: (('dlc', 32), ('dlc', 33), ('forest', (7, 0)), ('forest', (7, 4)), ('forest_harder', (4, 16)), ('forest_harder', (4, 20)), ('forest_harder', (5, 0)), ('forest_harder', (5, 22)), ('forest_harder', (5, 23)), ('hd', 'ice'), ('hd', 'mirage'), ('minion', 41), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Dark Wolf
+    0xbb: (('cf', 'chaos_basement'), ('desert_harder', (7, 0)), ('desert_harder', (7, 4)), ('desert_harder', (8, 4)), ('dlc', 32), ('dlc', 33), ('ff', 'fortress'), ('forest', (4, 16)), ('forest', (4, 20)), ('forest', (7, 0)), ('forest', (7, 4)), ('forest', (8, 0)), ('forest', (8, 1)), ('forest', (8, 6)), ('forest_harder', (5, 0)), ('forest_harder', (5, 22)), ('forest_harder', (5, 23)), ('forest_harder', (6, 0)), ('forest_harder', (6, 3)), ('minion', 62), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Rock Gargoyle
+    0xbc: (('cf', 'chaos_basement'), ('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('hd', 'sunken'), ('minion', 56), ('oc', 3), ('oc', 4), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5))),  # Sahagin Queen
+    0xbd: (('cf', 'chaos_basement'), ('dlc', 32), ('dlc', 33), ('ff', 'fortress'), ('forest', (8, 0)), ('forest', (8, 1)), ('forest', (8, 6)), ('forest_harder', (8, 0)), ('forest_harder', (8, 1)), ('forest_harder', (8, 6)), ('minion', 22), ('minion', 92), ('minion', 99), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Reaper
+    0xbe: (('desert_harder', (5, 23)), ('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('forest', (3, 19)), ('forest', (3, 21)), ('forest_harder', (1, 12)), ('forest_harder', (1, 15)), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (4, 16)), ('ow_harder', (4, 20)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('t4_harder', (2, 21))),  # Python
+    0xbf: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('forest', (2, 21)), ('forest', (4, 16)), ('forest', (4, 20)), ('forest', (5, 0)), ('forest', (5, 22)), ('forest', (5, 23)), ('forest_harder', (1, 12)), ('forest_harder', (1, 15)), ('hd', 'ice'), ('minion', 11), ('minion', 54), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (5, 22)), ('ow_harder', (5, 23)), ('ow_harder', (6, 0)), ('ow_harder', (6, 3)), ('ow_harder', (7, 0)), ('ow_harder', (7, 4)), ('ow_harder', (7, 5)), ('t4_harder', (2, 21))),  # Skuldier
+    0xc0: (('cf', 'chaos_basement'), ('dlc', 32), ('dlc', 33), ('ff', 'fortress'), ('forest', (8, 0)), ('forest', (8, 1)), ('forest', (8, 6)), ('forest_harder', (7, 0)), ('forest_harder', (7, 4)), ('minion', 64), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Red Flan
+    0xc1: (('cf', 'chaos_basement'), ('dlc', 32), ('dlc', 33), ('ff', 'fortress'), ('minion', 74), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7))),  # Prototype
+    0xc2: (('dlc', 0), ('dlc', 10), ('dlc', 20), ('dlc', 21), ('dlc', 30), ('dlc', 31), ('dlc', 32), ('ff', 'fortress'), ('forest', (0, 12)), ('forest', (1, 12)), ('forest', (1, 15)), ('forest_harder', (0, 12)), ('minion', 53), ('ow_harder', (2, 21)), ('ow_harder', (3, 19)), ('ow_harder', (3, 21)), ('ow_harder', (8, 0)), ('ow_harder', (8, 1)), ('ow_harder', (8, 5)), ('ow_harder', (8, 7)), ('t4_harder', (2, 21))),  # Revenant
 }
 
 SOURCE_LABELS = {
@@ -283,18 +283,18 @@ SOURCE_LABELS = {
     ('cave', 95): 'Flying Fortress B4',
     ('cave', 96): 'Flying Fortress B5',
     ('cf', 'chaos_basement'): 'Temple of Chaos (past)',
-    ('desert', (1, 5)): 'Desert (Pravoka)',
-    ('desert', (5, 16)): 'Desert (Crescent Lake)',
-    ('desert', (6, 1)): 'Desert (Onrac)',
-    ('desert', (7, 0)): 'Desert (Citadel of Trials, by airship)',
-    ('desert', (7, 1)): 'Desert (Citadel of Trials, northern dock)',
-    ('desert', (8, 1)): 'Desert (Lufenia)',
-    ('desert_harder', (1, 5)): 'Desert (Pravoka)',
-    ('desert_harder', (5, 16)): 'Desert (Crescent Lake)',
-    ('desert_harder', (6, 1)): 'Desert (Onrac)',
-    ('desert_harder', (7, 0)): 'Desert (Citadel of Trials, by airship)',
-    ('desert_harder', (7, 1)): 'Desert (Citadel of Trials, northern dock)',
-    ('desert_harder', (8, 1)): 'Desert (Lufenia)',
+    ('desert', (1, 12)): 'Desert (Pravoka)',
+    ('desert', (5, 23)): 'Desert (Mount Gulg)',
+    ('desert', (6, 3)): 'Desert (Onrac)',
+    ('desert', (7, 0)): 'Desert (Citadel of Trials)',
+    ('desert', (7, 4)): 'Desert (Ryukhan Desert)',
+    ('desert', (8, 4)): 'Desert (Mirage Tower)',
+    ('desert_harder', (1, 12)): 'Desert (Pravoka)',
+    ('desert_harder', (5, 23)): 'Desert (Mount Gulg)',
+    ('desert_harder', (6, 3)): 'Desert (Onrac)',
+    ('desert_harder', (7, 0)): 'Desert (Citadel of Trials)',
+    ('desert_harder', (7, 4)): 'Desert (Ryukhan Desert)',
+    ('desert_harder', (8, 4)): 'Desert (Mirage Tower)',
     ('dlc', 0): 'Earthgift Shrine floors 1-5',
     ('dlc', 10): 'Hellfire Chasm floors 1-10',
     ('dlc', 20): 'Lifespring Grotto floors 1-10',
@@ -321,38 +321,42 @@ SOURCE_LABELS = {
     ('dlc_boss', 271): 'Bonus boss: Phantom Train (Whisperwind Cove)',
     ('dlc_boss', 272): 'Bonus boss: Death Gaze (Whisperwind Cove)',
     ('ff', 'fortress'): 'Flying Fortress',
-    ('forest', (0, 5)): 'Forests (Cornelia)',
-    ('forest', (1, 5)): 'Forests (Pravoka, on foot)',
-    ('forest', (1, 8)): 'Forests (Pravoka, Mount Duergar)',
-    ('forest', (2, 14)): 'Forests (Elfheim)',
-    ('forest', (3, 12)): 'Forests (Western Keep, Mount Duergar)',
-    ('forest', (3, 14)): 'Forests (Western Keep, by ship)',
-    ('forest', (4, 9)): 'Forests (Melmond, Melmond side)',
-    ('forest', (4, 13)): "Forests (Melmond, past Titan's Tunnel)",
-    ('forest', (5, 0)): 'Forests (Crescent Lake, by airship)',
-    ('forest', (5, 15)): 'Forests (Crescent Lake, Crescent side)',
-    ('forest', (5, 16)): 'Forests (Crescent Lake, Mount Gulg side)',
-    ('forest', (6, 0)): 'Forests (Onrac, by airship)',
-    ('forest', (6, 1)): 'Forests (Onrac, northern dock)',
-    ('forest', (7, 0)): 'Forests (Citadel of Trials, by airship)',
-    ('forest', (7, 1)): 'Forests (Citadel of Trials, northern dock)',
-    ('forest', (8, 0)): 'Forests (Lufenia)',
-    ('forest_harder', (0, 5)): 'Forests (Cornelia)',
-    ('forest_harder', (1, 5)): 'Forests (Pravoka, on foot)',
-    ('forest_harder', (1, 8)): 'Forests (Pravoka, Mount Duergar)',
-    ('forest_harder', (2, 14)): 'Forests (Elfheim)',
-    ('forest_harder', (3, 12)): 'Forests (Western Keep, Mount Duergar)',
-    ('forest_harder', (3, 14)): 'Forests (Western Keep, by ship)',
-    ('forest_harder', (4, 9)): 'Forests (Melmond, Melmond side)',
-    ('forest_harder', (4, 13)): "Forests (Melmond, past Titan's Tunnel)",
-    ('forest_harder', (5, 0)): 'Forests (Crescent Lake, by airship)',
-    ('forest_harder', (5, 15)): 'Forests (Crescent Lake, Crescent side)',
-    ('forest_harder', (5, 16)): 'Forests (Crescent Lake, Mount Gulg side)',
-    ('forest_harder', (6, 0)): 'Forests (Onrac, by airship)',
-    ('forest_harder', (6, 1)): 'Forests (Onrac, northern dock)',
-    ('forest_harder', (7, 0)): 'Forests (Citadel of Trials, by airship)',
-    ('forest_harder', (7, 1)): 'Forests (Citadel of Trials, northern dock)',
-    ('forest_harder', (8, 0)): 'Forests (Lufenia)',
+    ('forest', (0, 12)): 'Forests (Cornelia)',
+    ('forest', (1, 12)): 'Forests (Pravoka)',
+    ('forest', (1, 15)): 'Forests (Mount Duergar)',
+    ('forest', (2, 21)): 'Forests (Elfheim)',
+    ('forest', (3, 19)): 'Forests (Western Keep / Mount Duergar south)',
+    ('forest', (3, 21)): 'Forests (Western Keep)',
+    ('forest', (4, 16)): 'Forests (Melmond)',
+    ('forest', (4, 20)): "Forests (Sarda's Cave)",
+    ('forest', (5, 0)): 'Forests (Islands south of Mount Gulg)',
+    ('forest', (5, 22)): 'Forests (Crescent Lake)',
+    ('forest', (5, 23)): 'Forests (Mount Gulg)',
+    ('forest', (6, 0)): 'Forests (Northwest continent)',
+    ('forest', (6, 3)): 'Forests (Onrac)',
+    ('forest', (7, 0)): 'Forests (Citadel of Trials)',
+    ('forest', (7, 4)): 'Forests (Ryukhan Desert)',
+    ('forest', (8, 0)): 'Forests (Northeast islands)',
+    ('forest', (8, 1)): 'Forests (Gaia)',
+    ('forest', (8, 6)): 'Forests (Lufenia / Gaia)',
+    ('forest_harder', (0, 12)): 'Forests (Cornelia)',
+    ('forest_harder', (1, 12)): 'Forests (Pravoka)',
+    ('forest_harder', (1, 15)): 'Forests (Mount Duergar)',
+    ('forest_harder', (2, 21)): 'Forests (Elfheim)',
+    ('forest_harder', (3, 19)): 'Forests (Western Keep / Mount Duergar south)',
+    ('forest_harder', (3, 21)): 'Forests (Western Keep)',
+    ('forest_harder', (4, 16)): 'Forests (Melmond)',
+    ('forest_harder', (4, 20)): "Forests (Sarda's Cave)",
+    ('forest_harder', (5, 0)): 'Forests (Islands south of Mount Gulg)',
+    ('forest_harder', (5, 22)): 'Forests (Crescent Lake)',
+    ('forest_harder', (5, 23)): 'Forests (Mount Gulg)',
+    ('forest_harder', (6, 0)): 'Forests (Northwest continent)',
+    ('forest_harder', (6, 3)): 'Forests (Onrac)',
+    ('forest_harder', (7, 0)): 'Forests (Citadel of Trials)',
+    ('forest_harder', (7, 4)): 'Forests (Ryukhan Desert)',
+    ('forest_harder', (8, 0)): 'Forests (Northeast islands)',
+    ('forest_harder', (8, 1)): 'Forests (Gaia)',
+    ('forest_harder', (8, 6)): 'Forests (Lufenia / Gaia)',
     ('hd', 'gurgu'): 'Mount Gulg',
     ('hd', 'ice'): 'Cavern of Ice',
     ('hd', 'mirage'): 'Mirage Tower',
@@ -462,39 +466,45 @@ SOURCE_LABELS = {
     ('oc', 3): 'SW Ocean',
     ('oc', 4): 'SE Ocean',
     ('ocean', 0): 'Starting Ocean',
-    ('ow', (0, 5)): 'Overworld (Cornelia)',
-    ('ow', (1, 5)): 'Overworld (Pravoka, on foot)',
-    ('ow', (1, 8)): 'Overworld (Pravoka, Mount Duergar)',
-    ('ow', (2, 14)): 'Overworld (Elfheim)',
-    ('ow', (3, 12)): 'Overworld (Western Keep, Mount Duergar)',
-    ('ow', (3, 14)): 'Overworld (Western Keep, by ship)',
-    ('ow', (4, 9)): 'Overworld (Melmond, Melmond side)',
-    ('ow', (4, 13)): "Overworld (Melmond, past Titan's Tunnel)",
-    ('ow', (5, 15)): 'Overworld (Crescent Lake, Crescent side)',
-    ('ow', (5, 16)): 'Overworld (Crescent Lake, Mount Gulg side)',
-    ('ow', (6, 0)): 'Overworld (Onrac, by airship)',
-    ('ow', (6, 1)): 'Overworld (Onrac, northern dock)',
-    ('ow', (7, 0)): 'Overworld (Citadel of Trials, by airship)',
-    ('ow', (7, 1)): 'Overworld (Citadel of Trials, northern dock)',
-    ('ow', (8, 0)): 'Overworld (Lufenia, by airship)',
-    ('ow', (8, 1)): 'Overworld (Lufenia, northern dock)',
-    ('ow_harder', (0, 5)): 'Overworld (Cornelia)',
-    ('ow_harder', (1, 5)): 'Overworld (Pravoka, on foot)',
-    ('ow_harder', (1, 8)): 'Overworld (Pravoka, Mount Duergar)',
-    ('ow_harder', (2, 14)): 'Overworld (Elfheim)',
-    ('ow_harder', (3, 12)): 'Overworld (Western Keep, Mount Duergar)',
-    ('ow_harder', (3, 14)): 'Overworld (Western Keep, by ship)',
-    ('ow_harder', (4, 9)): 'Overworld (Melmond, Melmond side)',
-    ('ow_harder', (4, 13)): "Overworld (Melmond, past Titan's Tunnel)",
-    ('ow_harder', (5, 15)): 'Overworld (Crescent Lake, Crescent side)',
-    ('ow_harder', (5, 16)): 'Overworld (Crescent Lake, Mount Gulg side)',
-    ('ow_harder', (6, 0)): 'Overworld (Onrac, by airship)',
-    ('ow_harder', (6, 1)): 'Overworld (Onrac, northern dock)',
-    ('ow_harder', (7, 0)): 'Overworld (Citadel of Trials, by airship)',
-    ('ow_harder', (7, 1)): 'Overworld (Citadel of Trials, northern dock)',
-    ('ow_harder', (8, 0)): 'Overworld (Lufenia, by airship)',
-    ('ow_harder', (8, 1)): 'Overworld (Lufenia, northern dock)',
-    ('river', 0): 'Rivers and marshes (canoe)',
+    ('ow', (0, 12)): 'Overworld (Cornelia)',
+    ('ow', (1, 12)): 'Overworld (Pravoka)',
+    ('ow', (1, 15)): 'Overworld (Mount Duergar)',
+    ('ow', (2, 21)): 'Overworld (Elfheim)',
+    ('ow', (3, 19)): 'Overworld (Western Keep / Mount Duergar south)',
+    ('ow', (3, 21)): 'Overworld (Western Keep)',
+    ('ow', (4, 16)): 'Overworld (Melmond)',
+    ('ow', (4, 20)): "Overworld (Sarda's Cave)",
+    ('ow', (5, 22)): 'Overworld (Crescent Lake)',
+    ('ow', (5, 23)): 'Overworld (Mount Gulg)',
+    ('ow', (6, 0)): 'Overworld (Northwest continent)',
+    ('ow', (6, 3)): 'Overworld (Onrac)',
+    ('ow', (7, 0)): 'Overworld (Citadel of Trials)',
+    ('ow', (7, 4)): 'Overworld (Ryukhan Desert)',
+    ('ow', (7, 5)): 'Overworld (Ryukhan Desert / Lufenia)',
+    ('ow', (8, 0)): 'Overworld (Northeast islands)',
+    ('ow', (8, 1)): 'Overworld (Gaia)',
+    ('ow', (8, 5)): 'Overworld (Mirage Tower / Lufenia / Gaia)',
+    ('ow', (8, 7)): 'Overworld (Lufenia)',
+    ('ow_harder', (0, 12)): 'Overworld (Cornelia)',
+    ('ow_harder', (1, 12)): 'Overworld (Pravoka)',
+    ('ow_harder', (1, 15)): 'Overworld (Mount Duergar)',
+    ('ow_harder', (2, 21)): 'Overworld (Elfheim)',
+    ('ow_harder', (3, 19)): 'Overworld (Western Keep / Mount Duergar south)',
+    ('ow_harder', (3, 21)): 'Overworld (Western Keep)',
+    ('ow_harder', (4, 16)): 'Overworld (Melmond)',
+    ('ow_harder', (4, 20)): "Overworld (Sarda's Cave)",
+    ('ow_harder', (5, 22)): 'Overworld (Crescent Lake)',
+    ('ow_harder', (5, 23)): 'Overworld (Mount Gulg)',
+    ('ow_harder', (6, 0)): 'Overworld (Northwest continent)',
+    ('ow_harder', (6, 3)): 'Overworld (Onrac)',
+    ('ow_harder', (7, 0)): 'Overworld (Citadel of Trials)',
+    ('ow_harder', (7, 4)): 'Overworld (Ryukhan Desert)',
+    ('ow_harder', (7, 5)): 'Overworld (Ryukhan Desert / Lufenia)',
+    ('ow_harder', (8, 0)): 'Overworld (Northeast islands)',
+    ('ow_harder', (8, 1)): 'Overworld (Gaia)',
+    ('ow_harder', (8, 5)): 'Overworld (Mirage Tower / Lufenia / Gaia)',
+    ('ow_harder', (8, 7)): 'Overworld (Lufenia)',
+    ('river', 0): 'Rivers (canoe)',
     ('rr', 0): 'Northern rivers (canoe)',
     ('scripted', 28): 'Boss: Piscodemon (Marsh Cave)',
     ('scripted', 76): 'Boss: Guardians',
@@ -513,12 +523,30 @@ SOURCE_LABELS = {
     ('scripted', 126): "Boss: Bikke's Pirates (Pravoka)",
     ('scripted', 127): 'Boss: Garland (Temple of Chaos)',
     ('scripted', 156): 'Boss: Piscodemon pack (Marsh Cave)',
-    ('t4', (2, 14)): 'Grass (Elfheim)',
-    ('t4', (3, 14)): 'Grass (Western Keep)',
-    ('t4', (5, 16)): 'Grass (Crescent Lake)',
-    ('t4_harder', (2, 14)): 'Grass (Elfheim)',
-    ('t4_harder', (3, 14)): 'Grass (Western Keep)',
-    ('t4_harder', (5, 16)): 'Grass (Crescent Lake)',
+    ('t4', (2, 21)): 'Grass (Elfheim)',
+    ('t4', (3, 21)): 'Grass (Western Keep)',
+    ('t4', (5, 23)): 'Grass (Mount Gulg)',
+    ('t4_harder', (2, 21)): 'Grass (Elfheim)',
+    ('t4_harder', (3, 21)): 'Grass (Western Keep)',
+    ('t4_harder', (5, 23)): 'Grass (Mount Gulg)',
+    ('tile', 1): 'Monster Tile (Cavern of Earth B1)',
+    ('tile', 2): 'Monster Tile (Cavern of Earth B2)',
+    ('tile', 3): 'Monster Tile (Cavern of Earth B3)',
+    ('tile', 4): 'Monster Tile (Cavern of Earth B4)',
+    ('tile', 24): 'Monster Tile (Sunken Shrine B2)',
+    ('tile', 31): 'Monster Tile (Temple of Chaos)',
+    ('tile', 34): 'Monster Tile (Temple of Chaos (past) B3)',
+    ('tile', 42): 'Monster Tile (Mount Gulg B2)',
+    ('tile', 45): 'Monster Tile (Mount Gulg B5)',
+    ('tile', 46): 'Monster Tile (Mount Gulg B6)',
+    ('tile', 68): 'Monster Tile (Cavern of Ice B3)',
+    ('tile', 70): 'Monster Tile (Cavern of Ice B5)',
+    ('tile', 78): 'Monster Tile (Citadel of Trials B1)',
+    ('tile', 79): 'Monster Tile (Citadel of Trials B2)',
+    ('tile', 82): 'Monster Tile (Mirage Tower B3)',
+    ('tile', 83): 'Monster Tile (Waterfall Cavern)',
+    ('tile', 88): 'Monster Tile (Western Keep)',
+    ('tile', 91): 'Monster Tile (Marsh Cave B3)',
 }
 
 # (kind, key) -> tracker.SECTIONS key ('bosses' is the Bestiary
@@ -573,18 +601,18 @@ SOURCE_SECTION = {
     ('cave', 95): 'wind',
     ('cave', 96): 'wind',
     ('cf', 'chaos_basement'): 'chaos',
-    ('desert', (1, 5)): 'cornelia',
-    ('desert', (5, 16)): 'fire',
-    ('desert', (6, 1)): 'water',
+    ('desert', (1, 12)): 'cornelia',
+    ('desert', (5, 23)): 'fire',
+    ('desert', (6, 3)): 'water',
     ('desert', (7, 0)): 'lategame',
-    ('desert', (7, 1)): 'lategame',
-    ('desert', (8, 1)): 'lategame',
-    ('desert_harder', (1, 5)): 'cornelia',
-    ('desert_harder', (5, 16)): 'fire',
-    ('desert_harder', (6, 1)): 'water',
+    ('desert', (7, 4)): 'lategame',
+    ('desert', (8, 4)): 'lategame',
+    ('desert_harder', (1, 12)): 'cornelia',
+    ('desert_harder', (5, 23)): 'fire',
+    ('desert_harder', (6, 3)): 'water',
     ('desert_harder', (7, 0)): 'lategame',
-    ('desert_harder', (7, 1)): 'lategame',
-    ('desert_harder', (8, 1)): 'lategame',
+    ('desert_harder', (7, 4)): 'lategame',
+    ('desert_harder', (8, 4)): 'lategame',
     ('dlc', 0): 'bonus',
     ('dlc', 10): 'bonus',
     ('dlc', 20): 'bonus',
@@ -611,38 +639,42 @@ SOURCE_SECTION = {
     ('dlc_boss', 271): 'bosses',
     ('dlc_boss', 272): 'bosses',
     ('ff', 'fortress'): 'wind',
-    ('forest', (0, 5)): 'cornelia',
-    ('forest', (1, 5)): 'cornelia',
-    ('forest', (1, 8)): 'cornelia',
-    ('forest', (2, 14)): 'elfheim',
-    ('forest', (3, 12)): 'elfheim',
-    ('forest', (3, 14)): 'elfheim',
-    ('forest', (4, 9)): 'earth',
-    ('forest', (4, 13)): 'earth',
+    ('forest', (0, 12)): 'cornelia',
+    ('forest', (1, 12)): 'cornelia',
+    ('forest', (1, 15)): 'cornelia',
+    ('forest', (2, 21)): 'elfheim',
+    ('forest', (3, 19)): 'elfheim',
+    ('forest', (3, 21)): 'elfheim',
+    ('forest', (4, 16)): 'earth',
+    ('forest', (4, 20)): 'earth',
     ('forest', (5, 0)): 'fire',
-    ('forest', (5, 15)): 'fire',
-    ('forest', (5, 16)): 'fire',
+    ('forest', (5, 22)): 'fire',
+    ('forest', (5, 23)): 'fire',
     ('forest', (6, 0)): 'water',
-    ('forest', (6, 1)): 'water',
+    ('forest', (6, 3)): 'water',
     ('forest', (7, 0)): 'lategame',
-    ('forest', (7, 1)): 'lategame',
+    ('forest', (7, 4)): 'lategame',
     ('forest', (8, 0)): 'lategame',
-    ('forest_harder', (0, 5)): 'cornelia',
-    ('forest_harder', (1, 5)): 'cornelia',
-    ('forest_harder', (1, 8)): 'cornelia',
-    ('forest_harder', (2, 14)): 'elfheim',
-    ('forest_harder', (3, 12)): 'elfheim',
-    ('forest_harder', (3, 14)): 'elfheim',
-    ('forest_harder', (4, 9)): 'earth',
-    ('forest_harder', (4, 13)): 'earth',
+    ('forest', (8, 1)): 'lategame',
+    ('forest', (8, 6)): 'lategame',
+    ('forest_harder', (0, 12)): 'cornelia',
+    ('forest_harder', (1, 12)): 'cornelia',
+    ('forest_harder', (1, 15)): 'cornelia',
+    ('forest_harder', (2, 21)): 'elfheim',
+    ('forest_harder', (3, 19)): 'elfheim',
+    ('forest_harder', (3, 21)): 'elfheim',
+    ('forest_harder', (4, 16)): 'earth',
+    ('forest_harder', (4, 20)): 'earth',
     ('forest_harder', (5, 0)): 'fire',
-    ('forest_harder', (5, 15)): 'fire',
-    ('forest_harder', (5, 16)): 'fire',
+    ('forest_harder', (5, 22)): 'fire',
+    ('forest_harder', (5, 23)): 'fire',
     ('forest_harder', (6, 0)): 'water',
-    ('forest_harder', (6, 1)): 'water',
+    ('forest_harder', (6, 3)): 'water',
     ('forest_harder', (7, 0)): 'lategame',
-    ('forest_harder', (7, 1)): 'lategame',
+    ('forest_harder', (7, 4)): 'lategame',
     ('forest_harder', (8, 0)): 'lategame',
+    ('forest_harder', (8, 1)): 'lategame',
+    ('forest_harder', (8, 6)): 'lategame',
     ('hd', 'gurgu'): 'fire',
     ('hd', 'ice'): 'fire',
     ('hd', 'mirage'): 'wind',
@@ -652,38 +684,44 @@ SOURCE_SECTION = {
     ('oc', 3): 'earth',
     ('oc', 4): 'fire',
     ('ocean', 0): 'cornelia',
-    ('ow', (0, 5)): 'cornelia',
-    ('ow', (1, 5)): 'cornelia',
-    ('ow', (1, 8)): 'cornelia',
-    ('ow', (2, 14)): 'elfheim',
-    ('ow', (3, 12)): 'elfheim',
-    ('ow', (3, 14)): 'elfheim',
-    ('ow', (4, 9)): 'earth',
-    ('ow', (4, 13)): 'earth',
-    ('ow', (5, 15)): 'fire',
-    ('ow', (5, 16)): 'fire',
+    ('ow', (0, 12)): 'cornelia',
+    ('ow', (1, 12)): 'cornelia',
+    ('ow', (1, 15)): 'cornelia',
+    ('ow', (2, 21)): 'elfheim',
+    ('ow', (3, 19)): 'elfheim',
+    ('ow', (3, 21)): 'elfheim',
+    ('ow', (4, 16)): 'earth',
+    ('ow', (4, 20)): 'earth',
+    ('ow', (5, 22)): 'fire',
+    ('ow', (5, 23)): 'fire',
     ('ow', (6, 0)): 'water',
-    ('ow', (6, 1)): 'water',
+    ('ow', (6, 3)): 'water',
     ('ow', (7, 0)): 'lategame',
-    ('ow', (7, 1)): 'lategame',
+    ('ow', (7, 4)): 'lategame',
+    ('ow', (7, 5)): 'lategame',
     ('ow', (8, 0)): 'lategame',
     ('ow', (8, 1)): 'lategame',
-    ('ow_harder', (0, 5)): 'cornelia',
-    ('ow_harder', (1, 5)): 'cornelia',
-    ('ow_harder', (1, 8)): 'cornelia',
-    ('ow_harder', (2, 14)): 'elfheim',
-    ('ow_harder', (3, 12)): 'elfheim',
-    ('ow_harder', (3, 14)): 'elfheim',
-    ('ow_harder', (4, 9)): 'earth',
-    ('ow_harder', (4, 13)): 'earth',
-    ('ow_harder', (5, 15)): 'fire',
-    ('ow_harder', (5, 16)): 'fire',
+    ('ow', (8, 5)): 'lategame',
+    ('ow', (8, 7)): 'lategame',
+    ('ow_harder', (0, 12)): 'cornelia',
+    ('ow_harder', (1, 12)): 'cornelia',
+    ('ow_harder', (1, 15)): 'cornelia',
+    ('ow_harder', (2, 21)): 'elfheim',
+    ('ow_harder', (3, 19)): 'elfheim',
+    ('ow_harder', (3, 21)): 'elfheim',
+    ('ow_harder', (4, 16)): 'earth',
+    ('ow_harder', (4, 20)): 'earth',
+    ('ow_harder', (5, 22)): 'fire',
+    ('ow_harder', (5, 23)): 'fire',
     ('ow_harder', (6, 0)): 'water',
-    ('ow_harder', (6, 1)): 'water',
+    ('ow_harder', (6, 3)): 'water',
     ('ow_harder', (7, 0)): 'lategame',
-    ('ow_harder', (7, 1)): 'lategame',
+    ('ow_harder', (7, 4)): 'lategame',
+    ('ow_harder', (7, 5)): 'lategame',
     ('ow_harder', (8, 0)): 'lategame',
     ('ow_harder', (8, 1)): 'lategame',
+    ('ow_harder', (8, 5)): 'lategame',
+    ('ow_harder', (8, 7)): 'lategame',
     ('river', 0): 'fire',
     ('rr', 0): 'lategame',
     ('scripted', 28): 'bosses',
@@ -703,12 +741,30 @@ SOURCE_SECTION = {
     ('scripted', 126): 'bosses',
     ('scripted', 127): 'bosses',
     ('scripted', 156): 'bosses',
-    ('t4', (2, 14)): 'elfheim',
-    ('t4', (3, 14)): 'elfheim',
-    ('t4', (5, 16)): 'fire',
-    ('t4_harder', (2, 14)): 'elfheim',
-    ('t4_harder', (3, 14)): 'elfheim',
-    ('t4_harder', (5, 16)): 'fire',
+    ('t4', (2, 21)): 'elfheim',
+    ('t4', (3, 21)): 'elfheim',
+    ('t4', (5, 23)): 'fire',
+    ('t4_harder', (2, 21)): 'elfheim',
+    ('t4_harder', (3, 21)): 'elfheim',
+    ('t4_harder', (5, 23)): 'fire',
+    ('tile', 1): 'earth',
+    ('tile', 2): 'earth',
+    ('tile', 3): 'earth',
+    ('tile', 4): 'earth',
+    ('tile', 24): 'water',
+    ('tile', 31): 'cornelia',
+    ('tile', 34): 'chaos',
+    ('tile', 42): 'fire',
+    ('tile', 45): 'fire',
+    ('tile', 46): 'fire',
+    ('tile', 68): 'fire',
+    ('tile', 70): 'fire',
+    ('tile', 78): 'lategame',
+    ('tile', 79): 'lategame',
+    ('tile', 82): 'wind',
+    ('tile', 83): 'water',
+    ('tile', 88): 'elfheim',
+    ('tile', 91): 'elfheim',
 }
 
 CAVE_MAP_DUNGEON = {1: 'earth', 2: 'earth', 3: 'earth', 4: 'earth', 5: 'earth', 23: 'sunken', 24: 'sunken', 25: 'sunken', 26: 'sunken', 27: 'sunken', 28: 'sunken', 29: 'sunken', 30: 'sunken', 31: 'chaos_f1', 32: 'chaos_basement', 33: 'chaos_basement', 34: 'chaos_basement', 35: 'chaos_basement', 36: 'chaos_basement', 37: 'sunken', 38: 'chaos_basement', 39: 'chaos_basement', 40: 'onrac', 41: 'gurgu', 42: 'gurgu', 43: 'gurgu', 44: 'gurgu', 45: 'gurgu', 46: 'gurgu', 66: 'ice', 67: 'ice', 68: 'ice', 69: 'ice', 70: 'ice', 78: 'trials', 79: 'trials', 80: 'mirage', 81: 'mirage', 82: 'mirage', 83: 'waterfall', 89: 'marsh', 90: 'marsh', 91: 'marsh', 92: 'fortress', 93: 'fortress', 94: 'fortress', 95: 'fortress', 96: 'fortress'}
@@ -733,7 +789,7 @@ HARDER_TARGET = {'chaos_f1': 'marsh', 'marsh': 'earth', 'earth': 'gurgu', 'gurgu
 # Dungeon names whose harder-mode pools are authored in
 # iso_patcher rather than rolled into zones_caves. Derived
 # from the hd/cf/ff rows above, so the two cannot disagree.
-AUTHORED_HARDER_DUNGEONS = frozenset({'ice', 'mirage', 'gurgu', 'fortress', 'sunken', 'chaos_basement'})
+AUTHORED_HARDER_DUNGEONS = frozenset({'mirage', 'chaos_basement', 'fortress', 'gurgu', 'ice', 'sunken'})
 
 # The one map whose encounters are switched on by an option
 # rather than existing in vanilla (iso_patcher._CF_GATE_MAP).
@@ -769,11 +825,163 @@ SOURCE_GATE = {
     'scripted': (),
     't4': (('harder_ow', False),),
     't4_harder': (('harder_ow', True),),
+    'tile': (),
 }
 
 # EXTRA gate for ONE key, ANDed with its kind's gate above.
 SOURCE_KEY_GATE = {
     ('cave', 39): (('chaos_floor', True),),
+}
+
+# (kind, key) -> {mon: LOWEST 8-slot roll index the monster
+# occupies there}. The engine's slot roll is weighted
+# 12/12/12/12/6/6/3/1 of 64 (logic.SLOT_ODDS_PCT), so slot 6
+# is a 4.7% fight and slot 7 a 1.6% one. Sources with no
+# entry (scripted / bonus bosses) are guaranteed. The rolled
+# ow/cave tables override these at runtime (logic.*_sources).
+SOURCE_BEST_SLOT = {
+    ('cave', 1): {0x1b: 4, 0x1c: 4, 0x1e: 3, 0x1f: 0, 0x23: 2, 0x3e: 5, 0x49: 6, 0x4a: 6, 0x4f: 7},
+    ('cave', 2): {0x03: 4, 0x04: 4, 0x09: 7, 0x1b: 3, 0x1c: 3, 0x1e: 0, 0x23: 1, 0x25: 6, 0x3e: 2, 0x4a: 5},
+    ('cave', 23): {0x12: 2, 0x14: 2, 0x20: 0, 0x22: 0, 0x26: 1, 0x61: 4},
+    ('cave', 24): {0x0d: 2, 0x0e: 2, 0x12: 5, 0x14: 5, 0x20: 0, 0x22: 1, 0x26: 0, 0x2a: 3},
+    ('cave', 25): {0x0d: 5, 0x0e: 5, 0x11: 3, 0x12: 3, 0x20: 1, 0x22: 0, 0x26: 0, 0x61: 2, 0x63: 2},
+    ('cave', 26): {0x0d: 5, 0x0e: 5, 0x11: 3, 0x12: 3, 0x20: 1, 0x22: 0, 0x26: 0, 0x61: 2, 0x63: 2},
+    ('cave', 27): {0x0d: 5, 0x0e: 5, 0x11: 3, 0x12: 3, 0x20: 1, 0x22: 0, 0x26: 0, 0x61: 2, 0x63: 2},
+    ('cave', 28): {0x0d: 2, 0x0e: 2, 0x11: 0, 0x12: 0, 0x14: 5, 0x20: 1, 0x22: 7, 0x26: 7, 0x2a: 3, 0x61: 6},
+    ('cave', 29): {0x0d: 2, 0x0e: 2, 0x11: 0, 0x12: 0, 0x14: 5, 0x20: 1, 0x22: 7, 0x26: 7, 0x2a: 3, 0x61: 6},
+    ('cave', 3): {0x03: 0, 0x04: 0, 0x1b: 1, 0x1c: 1, 0x28: 4, 0x2d: 3, 0x2e: 3, 0x47: 7, 0x4a: 7, 0x4f: 6, 0x51: 5, 0x67: 2},
+    ('cave', 30): {0x0e: 7, 0x12: 7, 0x20: 2, 0x22: 0, 0x26: 3, 0x61: 4, 0x63: 4, 0x6d: 5},
+    ('cave', 31): {0x00: 6, 0x01: 6, 0x02: 5, 0x03: 5, 0x04: 7, 0x15: 0, 0x17: 4, 0x2b: 2, 0x2c: 3, 0x49: 1},
+    ('cave', 32): {0x2f: 0, 0x42: 2, 0x48: 7, 0x65: 5},
+    ('cave', 33): {0x05: 2, 0x0a: 2, 0x3d: 7, 0x44: 0, 0x48: 6, 0x65: 4, 0x66: 4},
+    ('cave', 34): {0x3d: 7, 0x44: 7, 0x6a: 2, 0x6f: 0, 0x72: 5, 0x73: 5},
+    ('cave', 35): {0x08: 7, 0x35: 1, 0x40: 4, 0x6c: 0, 0x6d: 0},
+    ('cave', 36): {0x07: 2, 0x0b: 2, 0x31: 0, 0x41: 6, 0x43: 7},
+    ('cave', 37): {0x0e: 4, 0x12: 4, 0x14: 6, 0x20: 1, 0x22: 1, 0x26: 1, 0x61: 0, 0x63: 7},
+    ('cave', 38): {0x2f: 1, 0x3c: 2, 0x3d: 2, 0x44: 5, 0x62: 0, 0x68: 6, 0x6d: 3, 0x6e: 7, 0x70: 4, 0x75: 4},
+    ('cave', 39): {0x2f: 0, 0x33: 5, 0x3d: 4, 0x44: 4, 0x68: 1, 0x6a: 6, 0x6d: 2, 0x70: 3, 0x72: 7, 0x73: 7, 0x75: 3},
+    ('cave', 4): {0x01: 5, 0x04: 5, 0x06: 5, 0x09: 5, 0x25: 3, 0x28: 2, 0x2d: 1, 0x2e: 1, 0x47: 7, 0x4a: 7, 0x51: 4, 0x67: 0},
+    ('cave', 40): {0x03: 2, 0x1b: 0, 0x1c: 0, 0x3a: 5, 0x4a: 7},
+    ('cave', 41): {0x19: 3, 0x1c: 3, 0x1d: 3, 0x21: 5, 0x23: 5, 0x38: 4, 0x3f: 2, 0x46: 7, 0x4c: 0},
+    ('cave', 42): {0x06: 2, 0x09: 2, 0x19: 1, 0x1c: 1, 0x1d: 1, 0x38: 3, 0x3f: 0, 0x41: 7, 0x46: 6, 0x52: 4, 0x5e: 5},
+    ('cave', 43): {0x06: 0, 0x09: 0, 0x19: 1, 0x1a: 2, 0x1c: 1, 0x1d: 1, 0x41: 7, 0x52: 4, 0x5e: 3},
+    ('cave', 44): {0x06: 0, 0x09: 0, 0x19: 1, 0x1a: 2, 0x1c: 1, 0x1d: 1, 0x41: 7, 0x52: 4, 0x5e: 3},
+    ('cave', 45): {0x07: 6, 0x0b: 4, 0x1a: 0, 0x1c: 5, 0x1d: 5, 0x23: 3, 0x31: 2, 0x43: 7, 0x5e: 1},
+    ('cave', 46): {0x07: 6, 0x0b: 3, 0x1a: 4, 0x1c: 2, 0x1d: 2, 0x23: 1, 0x31: 0, 0x41: 5, 0x43: 7},
+    ('cave', 5): {0x09: 4, 0x23: 3, 0x25: 0, 0x28: 1, 0x40: 7, 0x47: 6, 0x4a: 2, 0x4f: 5},
+    ('cave', 66): {0x16: 4, 0x28: 6, 0x29: 5, 0x2d: 6, 0x2e: 6, 0x42: 7, 0x4f: 2, 0x51: 2, 0x67: 0},
+    ('cave', 67): {0x05: 6, 0x0a: 6, 0x28: 0, 0x29: 0, 0x2d: 5, 0x2e: 5, 0x42: 7, 0x68: 2, 0x72: 4},
+    ('cave', 68): {0x05: 6, 0x0a: 6, 0x28: 0, 0x29: 0, 0x2d: 5, 0x2e: 5, 0x42: 7, 0x68: 2, 0x72: 4},
+    ('cave', 69): {0x05: 4, 0x0a: 4, 0x16: 0, 0x29: 2, 0x39: 5, 0x42: 6, 0x68: 3, 0x72: 1},
+    ('cave', 70): {0x05: 4, 0x0a: 4, 0x16: 0, 0x29: 2, 0x39: 5, 0x42: 6, 0x68: 3, 0x72: 1},
+    ('cave', 78): {0x24: 0, 0x34: 3, 0x37: 4, 0x3f: 2, 0x44: 7, 0x4f: 5, 0x50: 5, 0x68: 6},
+    ('cave', 79): {0x34: 1, 0x37: 2, 0x3f: 0, 0x44: 7, 0x4f: 3, 0x50: 3, 0x68: 5},
+    ('cave', 80): {0x34: 5, 0x36: 6, 0x3b: 5, 0x3c: 2, 0x5f: 4, 0x65: 3, 0x6f: 0, 0x75: 0},
+    ('cave', 81): {0x1a: 1, 0x36: 5, 0x3b: 6, 0x3c: 3, 0x4f: 4, 0x50: 4, 0x51: 4, 0x52: 4, 0x5f: 2, 0x65: 0, 0x6b: 7},
+    ('cave', 82): {0x1a: 0, 0x34: 4, 0x36: 2, 0x3b: 4, 0x3c: 1, 0x4f: 3, 0x50: 3, 0x51: 3, 0x52: 3, 0x53: 5, 0x54: 5, 0x6b: 7},
+    ('cave', 83): {0x4f: 4, 0x50: 4, 0x52: 6, 0x6a: 7, 0x6c: 1, 0x75: 0},
+    ('cave', 89): {0x04: 7, 0x15: 4, 0x18: 4, 0x27: 0, 0x2b: 3, 0x2c: 3, 0x45: 2, 0x46: 5, 0x49: 5, 0x4a: 5},
+    ('cave', 90): {0x03: 7, 0x04: 7, 0x15: 3, 0x16: 4, 0x18: 3, 0x21: 6, 0x2b: 0, 0x2c: 0, 0x3e: 2, 0x45: 1, 0x46: 5, 0x49: 5, 0x4a: 5},
+    ('cave', 91): {0x03: 7, 0x04: 5, 0x15: 2, 0x16: 2, 0x18: 2, 0x21: 6, 0x3e: 1, 0x45: 0, 0x46: 3, 0x49: 4, 0x4a: 4},
+    ('cave', 92): {0x32: 2, 0x35: 6, 0x48: 7, 0x4b: 5, 0x62: 1, 0x64: 1, 0x6f: 0, 0x70: 4, 0x75: 4},
+    ('cave', 93): {0x32: 1, 0x35: 5, 0x48: 7, 0x4b: 2, 0x62: 0, 0x64: 0, 0x65: 3, 0x6d: 6, 0x70: 4, 0x75: 4},
+    ('cave', 94): {0x34: 1, 0x37: 1, 0x3d: 6, 0x4b: 3, 0x5e: 4, 0x5f: 0, 0x60: 0, 0x65: 2, 0x6d: 5, 0x73: 7},
+    ('cave', 95): {0x34: 0, 0x37: 0, 0x3d: 5, 0x5c: 2, 0x5f: 1, 0x60: 1, 0x62: 3, 0x64: 6, 0x68: 4, 0x6c: 4, 0x73: 7},
+    ('cave', 96): {0x48: 5, 0x5c: 0, 0x5e: 3, 0x62: 1, 0x64: 4, 0x68: 2, 0x6c: 2, 0x73: 6, 0x76: 7},
+    ('cf', 'chaos_basement'): {0x05: 5, 0x07: 5, 0x0a: 5, 0x2f: 7, 0x43: 3, 0x44: 1, 0x61: 3, 0x62: 3, 0x63: 5, 0x6a: 1, 0x6f: 0, 0x76: 7, 0x77: 7, 0x79: 7, 0x7b: 7, 0x7d: 7, 0x80: 6, 0x81: 7, 0x82: 6, 0x83: 7, 0x91: 6, 0x92: 2, 0x94: 0, 0x97: 2, 0x9a: 1, 0x9b: 5, 0x9c: 1, 0xa0: 4, 0xa2: 0, 0xa7: 1, 0xa8: 0, 0xa9: 0, 0xaa: 0, 0xab: 5, 0xac: 3, 0xae: 0, 0xb0: 4, 0xb1: 2, 0xb2: 2, 0xb4: 1, 0xb6: 4, 0xb7: 2, 0xbb: 0, 0xbc: 4, 0xbd: 3, 0xc0: 1, 0xc1: 6},
+    ('desert', (1, 12)): {0x00: 2, 0x01: 2, 0x02: 2, 0x03: 2, 0x06: 0, 0x17: 1, 0x1b: 6, 0x74: 3},
+    ('desert', (5, 23)): {0x09: 3, 0x1f: 2, 0x21: 2, 0x23: 5, 0x25: 1, 0x38: 0},
+    ('desert', (6, 3)): {0x06: 7, 0x09: 7, 0x1a: 4, 0x1d: 4, 0x25: 0, 0x39: 1, 0x3a: 1, 0x3b: 1, 0x4b: 5, 0x4e: 0, 0x53: 2, 0x54: 6},
+    ('desert', (7, 0)): {0x06: 0, 0x08: 7, 0x09: 0, 0x30: 2, 0x36: 5, 0x53: 1},
+    ('desert', (7, 4)): {0x30: 6, 0x4d: 4, 0x4e: 0, 0x53: 1, 0x55: 1, 0x56: 7},
+    ('desert', (8, 4)): {0x30: 6, 0x4d: 4, 0x4e: 0, 0x53: 1, 0x55: 1, 0x56: 7},
+    ('desert_harder', (1, 12)): {0x02: 1, 0x03: 1, 0x06: 0, 0x0c: 2, 0x0f: 3, 0x17: 5, 0x1e: 6, 0x27: 4, 0x3e: 7},
+    ('desert_harder', (5, 23)): {0x30: 4, 0x36: 7, 0x3b: 7, 0x4b: 0, 0x4f: 3, 0x54: 6, 0x93: 1, 0x99: 5, 0xbe: 2},
+    ('desert_harder', (6, 3)): {0x29: 4, 0x36: 2, 0x43: 3, 0x4c: 0, 0x4d: 5, 0x4f: 6, 0x50: 6, 0x99: 1},
+    ('desert_harder', (7, 0)): {0x29: 0, 0x4d: 2, 0x4e: 3, 0x4f: 5, 0x50: 5, 0x53: 7, 0x54: 7, 0xa9: 6, 0xaa: 1, 0xbb: 4},
+    ('desert_harder', (7, 4)): {0x29: 0, 0x4d: 2, 0x4e: 3, 0x4f: 5, 0x50: 5, 0x53: 7, 0x54: 7, 0xa9: 6, 0xaa: 1, 0xbb: 4},
+    ('desert_harder', (8, 4)): {0x43: 2, 0x53: 1, 0x54: 1, 0xa9: 0, 0xaa: 7, 0xac: 4, 0xae: 6, 0xb4: 5, 0xbb: 3},
+    ('dlc', 0): {0x93: 5, 0x96: 2, 0xa3: 0, 0xa5: 1, 0xa6: 0, 0xab: 2, 0xb2: 3, 0xb3: 4, 0xb5: 1, 0xb6: 6, 0xb8: 3, 0xb9: 1, 0xbc: 6, 0xbe: 1, 0xbf: 2, 0xc2: 3},
+    ('dlc', 10): {0x93: 5, 0x96: 2, 0xa3: 0, 0xa5: 1, 0xa6: 0, 0xab: 2, 0xb2: 3, 0xb3: 4, 0xb5: 1, 0xb6: 6, 0xb8: 3, 0xb9: 1, 0xbc: 6, 0xbe: 1, 0xbf: 2, 0xc2: 3},
+    ('dlc', 20): {0x93: 5, 0x96: 2, 0xa3: 0, 0xa5: 1, 0xa6: 0, 0xab: 2, 0xb2: 3, 0xb3: 4, 0xb5: 1, 0xb6: 6, 0xb8: 3, 0xb9: 1, 0xbc: 6, 0xbe: 1, 0xbf: 2, 0xc2: 3},
+    ('dlc', 21): {0x93: 0, 0x96: 3, 0x99: 6, 0x9c: 3, 0x9d: 4, 0x9e: 5, 0x9f: 5, 0xa3: 0, 0xa5: 1, 0xa6: 1, 0xab: 4, 0xad: 0, 0xaf: 1, 0xb2: 5, 0xb3: 2, 0xb5: 0, 0xb6: 4, 0xb8: 1, 0xb9: 1, 0xbc: 3, 0xbe: 1, 0xbf: 2, 0xc2: 3},
+    ('dlc', 30): {0x93: 5, 0x96: 2, 0xa3: 0, 0xa5: 1, 0xa6: 0, 0xab: 2, 0xb2: 3, 0xb3: 4, 0xb5: 1, 0xb6: 6, 0xb8: 3, 0xb9: 1, 0xbc: 6, 0xbe: 1, 0xbf: 2, 0xc2: 3},
+    ('dlc', 31): {0x93: 0, 0x96: 3, 0x99: 6, 0x9c: 3, 0x9d: 4, 0x9e: 5, 0x9f: 5, 0xa3: 0, 0xa5: 1, 0xa6: 1, 0xab: 4, 0xad: 0, 0xaf: 1, 0xb2: 5, 0xb3: 2, 0xb5: 0, 0xb6: 4, 0xb8: 1, 0xb9: 1, 0xbc: 3, 0xbe: 1, 0xbf: 2, 0xc2: 3},
+    ('dlc', 32): {0x54: 0, 0x91: 6, 0x93: 0, 0x95: 2, 0x96: 0, 0x99: 1, 0x9d: 1, 0x9e: 0, 0xa1: 0, 0xa2: 4, 0xa3: 0, 0xa4: 0, 0xa6: 1, 0xa7: 2, 0xa9: 7, 0xaa: 0, 0xab: 4, 0xb2: 0, 0xb3: 1, 0xb5: 0, 0xb6: 3, 0xba: 0, 0xbb: 7, 0xbd: 1, 0xbf: 0, 0xc0: 1, 0xc1: 7, 0xc2: 1},
+    ('dlc', 33): {0x54: 0, 0x91: 1, 0x94: 4, 0x97: 0, 0x98: 4, 0x9a: 7, 0x9b: 6, 0xa0: 3, 0xa2: 0, 0xa4: 0, 0xa7: 2, 0xa8: 2, 0xa9: 5, 0xaa: 3, 0xac: 5, 0xae: 1, 0xb0: 0, 0xb1: 7, 0xb4: 1, 0xb7: 6, 0xba: 1, 0xbb: 2, 0xbd: 1, 0xc0: 1, 0xc1: 5},
+    ('ff', 'fortress'): {0x32: 1, 0x34: 7, 0x37: 7, 0x3d: 3, 0x44: 3, 0x48: 4, 0x5f: 4, 0x60: 4, 0x62: 0, 0x64: 7, 0x68: 3, 0x6b: 1, 0x6c: 3, 0x6d: 5, 0x6f: 2, 0x70: 5, 0x75: 5, 0x76: 3, 0x7b: 6, 0x9a: 0, 0x9b: 2, 0xa0: 2, 0xa7: 1, 0xac: 0, 0xb2: 0, 0xbb: 2, 0xbd: 0, 0xc0: 1, 0xc1: 1, 0xc2: 0},
+    ('forest', (0, 12)): {0x17: 5, 0x1b: 5, 0x1e: 1, 0x3e: 2, 0x49: 3, 0x4a: 3, 0x74: 6, 0xa3: 0, 0xc2: 4},
+    ('forest', (1, 12)): {0x15: 3, 0x16: 3, 0x18: 3, 0x1b: 2, 0x1c: 2, 0x25: 4, 0x46: 6, 0x96: 1, 0xad: 0, 0xb3: 5, 0xc2: 7},
+    ('forest', (1, 15)): {0x15: 3, 0x16: 3, 0x18: 3, 0x1b: 2, 0x1c: 2, 0x25: 4, 0x46: 6, 0x96: 1, 0xad: 0, 0xb3: 5, 0xc2: 7},
+    ('forest', (2, 21)): {0x09: 7, 0x23: 6, 0x25: 6, 0x45: 0, 0x46: 0, 0x49: 0, 0x4a: 0, 0x4b: 2, 0x96: 4, 0xa6: 5, 0xb3: 3, 0xbf: 1},
+    ('forest', (3, 19)): {0x06: 3, 0x09: 3, 0x1a: 5, 0x1d: 5, 0x3a: 4, 0x3b: 4, 0x4c: 0, 0x96: 1, 0x9e: 1, 0xa3: 2, 0xb8: 7, 0xb9: 2, 0xbe: 6},
+    ('forest', (3, 21)): {0x06: 3, 0x09: 3, 0x1a: 5, 0x1d: 5, 0x3a: 4, 0x3b: 4, 0x4c: 0, 0x96: 1, 0x9e: 1, 0xa3: 2, 0xb8: 7, 0xb9: 2, 0xbe: 6},
+    ('forest', (4, 16)): {0x05: 6, 0x0a: 6, 0x3c: 3, 0x65: 7, 0x99: 0, 0x9d: 2, 0xa1: 5, 0xb9: 1, 0xbb: 4, 0xbf: 5},
+    ('forest', (4, 20)): {0x05: 6, 0x0a: 6, 0x3c: 3, 0x65: 7, 0x99: 0, 0x9d: 2, 0xa1: 5, 0xb9: 1, 0xbb: 4, 0xbf: 5},
+    ('forest', (5, 0)): {0x28: 5, 0x29: 5, 0x40: 7, 0x4d: 4, 0x70: 1, 0x75: 1, 0xa1: 6, 0xa3: 0, 0xa4: 0, 0xaa: 6, 0xb3: 3, 0xb9: 2, 0xbf: 6},
+    ('forest', (5, 22)): {0x28: 5, 0x29: 5, 0x40: 7, 0x4d: 4, 0x70: 1, 0x75: 1, 0xa1: 6, 0xa3: 0, 0xa4: 0, 0xaa: 6, 0xb3: 3, 0xb9: 2, 0xbf: 6},
+    ('forest', (5, 23)): {0x28: 5, 0x29: 5, 0x40: 7, 0x4d: 4, 0x70: 1, 0x75: 1, 0xa1: 6, 0xa3: 0, 0xa4: 0, 0xaa: 6, 0xb3: 3, 0xb9: 2, 0xbf: 6},
+    ('forest', (6, 0)): {0x28: 2, 0x29: 2, 0x2d: 2, 0x2e: 2, 0x6b: 5, 0x6d: 3, 0x97: 4, 0xa1: 7, 0xa2: 0, 0xa4: 6, 0xa7: 1},
+    ('forest', (6, 3)): {0x28: 2, 0x29: 2, 0x2d: 2, 0x2e: 2, 0x6b: 5, 0x6d: 3, 0x97: 4, 0xa1: 7, 0xa2: 0, 0xa4: 6, 0xa7: 1},
+    ('forest', (7, 0)): {0x48: 6, 0x6a: 2, 0x6b: 4, 0x6c: 5, 0x6d: 5, 0x93: 0, 0xa3: 0, 0xac: 7, 0xb5: 0, 0xb7: 1, 0xba: 0, 0xbb: 3},
+    ('forest', (7, 4)): {0x48: 6, 0x6a: 2, 0x6b: 4, 0x6c: 5, 0x6d: 5, 0x93: 0, 0xa3: 0, 0xac: 7, 0xb5: 0, 0xb7: 1, 0xba: 0, 0xbb: 3},
+    ('forest', (8, 0)): {0x6f: 0, 0xa9: 4, 0xaa: 4, 0xac: 7, 0xae: 2, 0xb4: 2, 0xbb: 6, 0xbd: 1, 0xc0: 3},
+    ('forest', (8, 1)): {0x6f: 0, 0xa9: 4, 0xaa: 4, 0xac: 7, 0xae: 2, 0xb4: 2, 0xbb: 6, 0xbd: 1, 0xc0: 3},
+    ('forest', (8, 6)): {0x6f: 0, 0xa9: 4, 0xaa: 4, 0xac: 7, 0xae: 2, 0xb4: 2, 0xbb: 6, 0xbd: 1, 0xc0: 3},
+    ('forest_harder', (0, 12)): {0x17: 0, 0x19: 7, 0x1b: 0, 0x1c: 3, 0x25: 4, 0xa6: 1, 0xad: 2, 0xb3: 5, 0xc2: 6},
+    ('forest_harder', (1, 12)): {0x03: 3, 0x04: 3, 0x23: 6, 0x45: 0, 0x46: 0, 0x49: 0, 0x4a: 0, 0x96: 7, 0xad: 4, 0xb3: 5, 0xbe: 2, 0xbf: 1},
+    ('forest_harder', (1, 15)): {0x03: 3, 0x04: 3, 0x23: 6, 0x45: 0, 0x46: 0, 0x49: 0, 0x4a: 0, 0x96: 7, 0xad: 4, 0xb3: 5, 0xbe: 2, 0xbf: 1},
+    ('forest_harder', (2, 21)): {0x1b: 2, 0x1c: 2, 0x1d: 5, 0x2d: 6, 0x2e: 6, 0x3f: 4, 0x4b: 1, 0x93: 7, 0x9e: 3, 0xa6: 0},
+    ('forest_harder', (3, 19)): {0x09: 4, 0x16: 6, 0x1a: 7, 0x1d: 7, 0x3a: 2, 0x3b: 2, 0x47: 0, 0x4a: 0, 0x5c: 5, 0xaf: 1, 0xb8: 1},
+    ('forest_harder', (3, 21)): {0x09: 4, 0x16: 6, 0x1a: 7, 0x1d: 7, 0x3a: 2, 0x3b: 2, 0x47: 0, 0x4a: 0, 0x5c: 5, 0xaf: 1, 0xb8: 1},
+    ('forest_harder', (4, 16)): {0x19: 6, 0x1c: 6, 0x1d: 6, 0x24: 0, 0x25: 0, 0x36: 3, 0x4d: 7, 0x93: 4, 0x99: 1, 0x9d: 2, 0xae: 5, 0xba: 4},
+    ('forest_harder', (4, 20)): {0x19: 6, 0x1c: 6, 0x1d: 6, 0x24: 0, 0x25: 0, 0x36: 3, 0x4d: 7, 0x93: 4, 0x99: 1, 0x9d: 2, 0xae: 5, 0xba: 4},
+    ('forest_harder', (5, 0)): {0x4f: 0, 0x50: 0, 0x62: 1, 0x64: 1, 0x6b: 6, 0x91: 3, 0x9b: 4, 0xae: 2, 0xba: 2, 0xbb: 7},
+    ('forest_harder', (5, 22)): {0x4f: 0, 0x50: 0, 0x62: 1, 0x64: 1, 0x6b: 6, 0x91: 3, 0x9b: 4, 0xae: 2, 0xba: 2, 0xbb: 7},
+    ('forest_harder', (5, 23)): {0x4f: 0, 0x50: 0, 0x62: 1, 0x64: 1, 0x6b: 6, 0x91: 3, 0x9b: 4, 0xae: 2, 0xba: 2, 0xbb: 7},
+    ('forest_harder', (6, 0)): {0x48: 7, 0x6b: 0, 0x6c: 1, 0x6d: 1, 0x91: 3, 0xa8: 2, 0xa9: 6, 0xb2: 4, 0xbb: 5},
+    ('forest_harder', (6, 3)): {0x48: 7, 0x6b: 0, 0x6c: 1, 0x6d: 1, 0x91: 3, 0xa8: 2, 0xa9: 6, 0xb2: 4, 0xbb: 5},
+    ('forest_harder', (7, 0)): {0x3c: 3, 0x3d: 0, 0x44: 0, 0x94: 2, 0xa6: 5, 0xa7: 1, 0xa9: 7, 0xaa: 7, 0xac: 4, 0xae: 6, 0xb4: 6, 0xc0: 5},
+    ('forest_harder', (7, 4)): {0x3c: 3, 0x3d: 0, 0x44: 0, 0x94: 2, 0xa6: 5, 0xa7: 1, 0xa9: 7, 0xaa: 7, 0xac: 4, 0xae: 6, 0xb4: 6, 0xc0: 5},
+    ('forest_harder', (8, 0)): {0x4f: 0, 0x50: 0, 0x51: 0, 0x52: 0, 0x6b: 3, 0x92: 2, 0x9a: 7, 0xa7: 5, 0xac: 3, 0xb4: 1, 0xbd: 6},
+    ('forest_harder', (8, 1)): {0x4f: 0, 0x50: 0, 0x51: 0, 0x52: 0, 0x6b: 3, 0x92: 2, 0x9a: 7, 0xa7: 5, 0xac: 3, 0xb4: 1, 0xbd: 6},
+    ('forest_harder', (8, 6)): {0x4f: 0, 0x50: 0, 0x51: 0, 0x52: 0, 0x6b: 3, 0x92: 2, 0x9a: 7, 0xa7: 5, 0xac: 3, 0xb4: 1, 0xbd: 6},
+    ('hd', 'gurgu'): {0x05: 4, 0x0a: 4, 0x16: 5, 0x28: 0, 0x29: 0, 0x42: 4, 0x4f: 3, 0x51: 3, 0x67: 1, 0x69: 7, 0x72: 2, 0x93: 5},
+    ('hd', 'ice'): {0x05: 0, 0x0a: 0, 0x32: 5, 0x37: 7, 0x3f: 6, 0x42: 1, 0x44: 2, 0x4f: 0, 0x50: 0, 0x67: 7, 0x71: 6, 0x93: 4, 0xa1: 3, 0xaa: 3, 0xba: 4, 0xbf: 3},
+    ('hd', 'mirage'): {0x34: 7, 0x37: 7, 0x3c: 0, 0x3d: 0, 0x48: 2, 0x53: 4, 0x54: 4, 0x5f: 2, 0x60: 2, 0x62: 5, 0x64: 6, 0x6d: 4, 0x6f: 6, 0x93: 1, 0x97: 3, 0xa1: 3, 0xa3: 1, 0xb5: 1, 0xba: 1},
+    ('hd', 'sunken'): {0x0d: 3, 0x0e: 3, 0x11: 6, 0x12: 3, 0x14: 3, 0x20: 0, 0x22: 0, 0x26: 4, 0x36: 6, 0x3b: 6, 0x58: 1, 0x59: 3, 0x5a: 1, 0x5d: 3, 0x61: 0, 0x62: 0, 0x63: 4, 0x64: 0, 0x6b: 2, 0x6d: 5, 0x6f: 3, 0x75: 3, 0x79: 7, 0x9c: 0, 0x9f: 0, 0xb1: 0, 0xbc: 0},
+    ('oc', 1): {0x20: 0, 0x22: 1, 0x26: 0, 0x53: 6, 0x54: 2},
+    ('oc', 2): {0x20: 3, 0x44: 1, 0x61: 2, 0x63: 2, 0xaf: 6, 0xb8: 0},
+    ('oc', 3): {0x0c: 0, 0x0d: 2, 0x0e: 5, 0x10: 3, 0x11: 0, 0x12: 5, 0x13: 0, 0x20: 4, 0xbc: 7},
+    ('oc', 4): {0x0d: 3, 0x0e: 2, 0x11: 1, 0x12: 0, 0x14: 0, 0x2a: 7, 0x9c: 5, 0xbc: 5},
+    ('ocean', 0): {0x0c: 0, 0x0d: 4, 0x10: 2, 0x11: 1, 0x13: 0},
+    ('ow', (0, 12)): {0x00: 0, 0x01: 3, 0x02: 2, 0x03: 2, 0x04: 3, 0x1b: 4, 0x1e: 0, 0x4a: 1, 0x74: 6},
+    ('ow', (1, 12)): {0x00: 2, 0x01: 0, 0x02: 0, 0x03: 0, 0x04: 0, 0x06: 0, 0x15: 0, 0x17: 1, 0x1b: 1, 0x1c: 6, 0x1e: 1, 0x21: 7, 0x2d: 3, 0x49: 1, 0x4a: 5, 0x74: 3},
+    ('ow', (1, 15)): {0x02: 0, 0x03: 0, 0x17: 2, 0x1b: 2, 0x1c: 7, 0x1e: 1, 0x4a: 6},
+    ('ow', (2, 21)): {0x02: 0, 0x03: 0, 0x17: 2, 0x1b: 2, 0x1c: 7, 0x1e: 1, 0x4a: 6},
+    ('ow', (3, 19)): {0x02: 0, 0x03: 0, 0x17: 2, 0x1b: 2, 0x1c: 7, 0x1e: 1, 0x4a: 6},
+    ('ow', (3, 21)): {0x01: 0, 0x02: 4, 0x03: 4, 0x04: 0, 0x1b: 1, 0x1c: 6, 0x21: 7, 0x2d: 3, 0x4a: 5},
+    ('ow', (4, 16)): {0x00: 0, 0x02: 0, 0x03: 0, 0x17: 2, 0x19: 4, 0x1b: 2, 0x1c: 2, 0x1e: 1, 0x27: 1, 0x2c: 0, 0x2d: 0, 0x3a: 6, 0x49: 7, 0x4a: 6},
+    ('ow', (4, 20)): {0x00: 0, 0x03: 5, 0x19: 4, 0x1b: 2, 0x1c: 2, 0x27: 1, 0x2c: 0, 0x2d: 0, 0x3a: 6, 0x49: 7, 0x4a: 7},
+    ('ow', (5, 22)): {0x09: 3, 0x1f: 2, 0x21: 2, 0x23: 5, 0x25: 1, 0x38: 0},
+    ('ow', (5, 23)): {0x01: 0, 0x02: 4, 0x03: 4, 0x04: 0, 0x1b: 1, 0x1c: 6, 0x21: 7, 0x2d: 3, 0x4a: 5},
+    ('ow', (6, 0)): {0x00: 0, 0x05: 3, 0x06: 0, 0x08: 7, 0x09: 0, 0x0a: 3, 0x25: 0, 0x30: 2, 0x36: 5, 0x39: 1, 0x4b: 6, 0x53: 1, 0x5b: 3, 0x5d: 3},
+    ('ow', (6, 3)): {0x05: 3, 0x06: 7, 0x09: 7, 0x0a: 3, 0x1a: 4, 0x1d: 4, 0x25: 0, 0x39: 1, 0x3a: 1, 0x3b: 1, 0x4b: 4, 0x4d: 6, 0x4e: 0, 0x53: 2, 0x54: 0, 0x5b: 2, 0x5d: 5},
+    ('ow', (7, 0)): {0x06: 0, 0x08: 5, 0x09: 0, 0x30: 2, 0x36: 2, 0x39: 7, 0x3a: 2, 0x3b: 2, 0x4b: 4, 0x4c: 0, 0x4d: 6, 0x53: 1, 0x54: 0, 0x5b: 1, 0x5d: 1},
+    ('ow', (7, 4)): {0x30: 6, 0x4d: 4, 0x4e: 0, 0x53: 1, 0x55: 1, 0x56: 7},
+    ('ow', (7, 5)): {0x30: 6, 0x4d: 4, 0x4e: 0, 0x53: 1, 0x55: 1, 0x56: 7},
+    ('ow', (8, 0)): {0x05: 3, 0x06: 7, 0x09: 7, 0x0a: 3, 0x25: 0, 0x39: 1, 0x4b: 6, 0x53: 2, 0x5b: 5, 0x5d: 5},
+    ('ow', (8, 1)): {0x05: 3, 0x06: 7, 0x09: 7, 0x0a: 3, 0x25: 0, 0x39: 1, 0x4b: 6, 0x53: 2, 0x5b: 5, 0x5d: 5},
+    ('ow', (8, 5)): {0x30: 6, 0x4d: 4, 0x4e: 0, 0x53: 1, 0x55: 1, 0x56: 7},
+    ('ow', (8, 7)): {0x00: 0, 0x05: 4, 0x09: 1, 0x24: 0, 0x25: 0, 0x53: 7, 0x55: 6},
+    ('river', 0): {0x57: 2, 0x58: 5, 0x59: 0, 0x5a: 5, 0x5b: 2, 0x5c: 3, 0x5d: 0},
+    ('rr', 0): {0x44: 4, 0x6e: 3, 0x97: 5, 0xa1: 5, 0xa2: 6, 0xa8: 1, 0xac: 2, 0xb1: 0},
+    ('t4', (2, 21)): {0x02: 0, 0x03: 0, 0x17: 2, 0x1b: 2, 0x1c: 7, 0x1e: 1, 0x4a: 6},
+    ('t4', (3, 21)): {0x01: 0, 0x02: 4, 0x03: 4, 0x04: 0, 0x1b: 1, 0x1c: 6, 0x21: 7, 0x2d: 3, 0x4a: 5},
+    ('t4', (5, 23)): {0x01: 0, 0x02: 4, 0x03: 4, 0x04: 0, 0x09: 3, 0x1b: 1, 0x1c: 6, 0x1f: 2, 0x21: 2, 0x23: 5, 0x25: 1, 0x2d: 3, 0x38: 0, 0x4a: 5},
+    ('t4_harder', (2, 21)): {0x1b: 1, 0x1c: 1, 0x23: 4, 0x25: 2, 0xad: 0, 0xb3: 7, 0xbe: 6, 0xbf: 5, 0xc2: 3},
+    ('t4_harder', (3, 21)): {0x03: 4, 0x04: 4, 0x23: 3, 0x25: 6, 0x45: 5, 0x5b: 7, 0x5d: 7, 0x5e: 1, 0xad: 0, 0xb3: 2},
+    ('t4_harder', (5, 23)): {0x30: 2, 0x42: 4, 0x4b: 0, 0x4f: 3, 0x54: 6, 0x65: 1, 0x6d: 7},
 }
 
 # fid -> monsters the formation can SPAWN (max > 0). Lets a rolled
@@ -1399,57 +1607,187 @@ ZONE_ACCESS = {
     3: (7, 0),
     4: (7, 0),
     5: (7, 0),
-    6: (8, 0),
+    6: (8, 1),
     7: (8, 0),
-    8: (6, 1),
-    9: (6, 1),
-    10: (6, 1),
+    8: (6, 3),
+    9: (6, 3),
+    10: (6, 3),
     11: (7, 0),
     12: (7, 0),
-    13: (7, 1),
-    14: (8, 1),
-    15: (8, 0),
-    16: (6, 1),
-    17: (6, 1),
+    13: (7, 4),
+    14: (8, 5),
+    15: (8, 7),
+    16: (6, 3),
+    17: (6, 3),
     19: (7, 0),
-    21: (7, 1),
-    22: (7, 1),
-    23: (8, 0),
+    21: (7, 4),
+    22: (7, 5),
+    23: (8, 7),
     25: (6, 0),
-    27: (1, 5),
-    28: (1, 5),
-    29: (1, 5),
-    30: (8, 0),
-    31: (8, 0),
-    33: (4, 9),
-    34: (4, 9),
-    35: (1, 8),
-    36: (0, 5),
-    37: (1, 5),
-    38: (1, 5),
-    39: (1, 5),
-    40: (4, 13),
-    41: (4, 9),
-    42: (4, 9),
-    43: (3, 12),
-    44: (0, 5),
-    45: (0, 5),
-    46: (1, 5),
-    47: (1, 5),
-    48: (4, 13),
-    49: (4, 9),
-    50: (3, 14),
-    51: (2, 14),
-    52: (2, 14),
-    53: (5, 16),
-    54: (5, 15),
-    55: (5, 15),
-    58: (3, 14),
-    59: (3, 14),
-    60: (2, 14),
-    61: (5, 16),
-    62: (5, 15),
-    63: (5, 15),
+    27: (1, 12),
+    28: (1, 12),
+    29: (1, 12),
+    30: (8, 7),
+    31: (8, 7),
+    33: (4, 16),
+    34: (4, 16),
+    35: (1, 15),
+    36: (0, 12),
+    37: (1, 12),
+    38: (1, 12),
+    39: (1, 12),
+    40: (4, 20),
+    41: (4, 16),
+    42: (4, 16),
+    43: (3, 19),
+    44: (0, 12),
+    45: (0, 12),
+    46: (1, 12),
+    47: (1, 12),
+    48: (4, 20),
+    49: (4, 16),
+    50: (3, 21),
+    51: (2, 21),
+    52: (2, 21),
+    53: (5, 23),
+    54: (5, 22),
+    55: (5, 22),
+    58: (3, 21),
+    59: (3, 21),
+    60: (2, 21),
+    61: (5, 23),
+    62: (5, 22),
+    63: (5, 22),
+}
+
+# (terrain, zone) -> (ZONE_TIER band, access class) for every
+# terrain the zone carries: land / desert / forest / t4. The
+# reverse of the ow/desert/forest/t4 source keys (ff1psp.ow_map).
+TERRAIN_ZONE_ACCESS = {
+    ('desert', 5): (7, 0),
+    ('desert', 8): (6, 3),
+    ('desert', 9): (6, 3),
+    ('desert', 13): (7, 4),
+    ('desert', 14): (8, 4),
+    ('desert', 21): (7, 4),
+    ('desert', 22): (7, 4),
+    ('desert', 37): (1, 12),
+    ('desert', 62): (5, 23),
+    ('forest', 0): (6, 0),
+    ('forest', 1): (6, 0),
+    ('forest', 2): (6, 0),
+    ('forest', 5): (7, 0),
+    ('forest', 6): (8, 1),
+    ('forest', 7): (8, 0),
+    ('forest', 8): (6, 3),
+    ('forest', 9): (6, 3),
+    ('forest', 10): (6, 0),
+    ('forest', 11): (7, 0),
+    ('forest', 12): (7, 0),
+    ('forest', 13): (7, 0),
+    ('forest', 14): (8, 6),
+    ('forest', 15): (8, 0),
+    ('forest', 16): (6, 3),
+    ('forest', 17): (6, 3),
+    ('forest', 19): (7, 0),
+    ('forest', 21): (7, 0),
+    ('forest', 22): (7, 4),
+    ('forest', 27): (1, 12),
+    ('forest', 28): (1, 12),
+    ('forest', 29): (1, 12),
+    ('forest', 30): (8, 0),
+    ('forest', 31): (8, 0),
+    ('forest', 33): (4, 16),
+    ('forest', 34): (4, 16),
+    ('forest', 35): (1, 15),
+    ('forest', 36): (0, 12),
+    ('forest', 37): (1, 12),
+    ('forest', 38): (1, 12),
+    ('forest', 39): (1, 12),
+    ('forest', 40): (4, 20),
+    ('forest', 41): (4, 16),
+    ('forest', 42): (4, 16),
+    ('forest', 43): (3, 19),
+    ('forest', 44): (0, 12),
+    ('forest', 45): (0, 12),
+    ('forest', 46): (1, 12),
+    ('forest', 47): (1, 12),
+    ('forest', 48): (4, 20),
+    ('forest', 49): (4, 16),
+    ('forest', 50): (3, 21),
+    ('forest', 51): (2, 21),
+    ('forest', 52): (2, 21),
+    ('forest', 53): (5, 23),
+    ('forest', 54): (5, 22),
+    ('forest', 55): (5, 22),
+    ('forest', 59): (3, 21),
+    ('forest', 60): (2, 21),
+    ('forest', 61): (5, 0),
+    ('forest', 62): (5, 23),
+    ('forest', 63): (5, 22),
+    ('land', 0): (6, 0),
+    ('land', 1): (6, 0),
+    ('land', 2): (6, 0),
+    ('land', 3): (7, 0),
+    ('land', 4): (7, 0),
+    ('land', 5): (7, 0),
+    ('land', 6): (8, 1),
+    ('land', 7): (8, 0),
+    ('land', 8): (6, 3),
+    ('land', 9): (6, 3),
+    ('land', 10): (6, 3),
+    ('land', 11): (7, 0),
+    ('land', 12): (7, 0),
+    ('land', 13): (7, 4),
+    ('land', 14): (8, 5),
+    ('land', 15): (8, 7),
+    ('land', 16): (6, 3),
+    ('land', 17): (6, 3),
+    ('land', 19): (7, 0),
+    ('land', 21): (7, 4),
+    ('land', 22): (7, 5),
+    ('land', 23): (8, 7),
+    ('land', 25): (6, 0),
+    ('land', 27): (1, 12),
+    ('land', 28): (1, 12),
+    ('land', 29): (1, 12),
+    ('land', 30): (8, 7),
+    ('land', 31): (8, 7),
+    ('land', 33): (4, 16),
+    ('land', 34): (4, 16),
+    ('land', 35): (1, 15),
+    ('land', 36): (0, 12),
+    ('land', 37): (1, 12),
+    ('land', 38): (1, 12),
+    ('land', 39): (1, 12),
+    ('land', 40): (4, 20),
+    ('land', 41): (4, 16),
+    ('land', 42): (4, 16),
+    ('land', 43): (3, 19),
+    ('land', 44): (0, 12),
+    ('land', 45): (0, 12),
+    ('land', 46): (1, 12),
+    ('land', 47): (1, 12),
+    ('land', 48): (4, 20),
+    ('land', 49): (4, 16),
+    ('land', 50): (3, 21),
+    ('land', 51): (2, 21),
+    ('land', 52): (2, 21),
+    ('land', 53): (5, 23),
+    ('land', 54): (5, 22),
+    ('land', 55): (5, 22),
+    ('land', 58): (3, 21),
+    ('land', 59): (3, 21),
+    ('land', 60): (2, 21),
+    ('land', 61): (5, 23),
+    ('land', 62): (5, 22),
+    ('land', 63): (5, 22),
+    ('t4', 51): (2, 21),
+    ('t4', 53): (5, 23),
+    ('t4', 58): (3, 21),
+    ('t4', 59): (3, 21),
+    ('t4', 61): (5, 23),
+    ('t4', 62): (5, 23),
 }
 
 DUNGEON_DISPLAY = {'chaos_basement': 'Temple of Chaos (past)', 'chaos_f1': 'Temple of Chaos', 'earth': 'Cavern of Earth', 'fortress': 'Flying Fortress', 'gurgu': 'Mount Gulg', 'ice': 'Cavern of Ice', 'marsh': 'Marsh Cave', 'mirage': 'Mirage Tower', 'onrac': 'Sabertooth Cave', 'sunken': 'Sunken Shrine', 'trials': 'Citadel of Trials', 'waterfall': 'Waterfall Cavern'}

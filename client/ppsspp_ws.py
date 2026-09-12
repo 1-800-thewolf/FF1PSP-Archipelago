@@ -15,13 +15,12 @@ import asyncio
 import base64
 import collections
 import json
-import os
-import re
-import subprocess
 import time
 
 import requests
 import websockets
+
+from . import hostproc
 
 MATCH_LIST = "https://report.ppsspp.org/match/list"
 SUBPROTOCOL = "debugger.ppsspp.org"
@@ -32,7 +31,6 @@ SUBPROTOCOL = "debugger.ppsspp.org"
 # port instead -- local_ports() below finds the real one without a web call.
 LOCAL_HINT = ("127.0.0.1", 8765)
 
-_NO_WINDOW = 0x08000000 if os.name == "nt" else 0   # CREATE_NO_WINDOW
 
 # local_ports() spawns tasklist+netstat (~0.5s); cache briefly so callers that
 # poll every second (launcher wait) or fire at shutdown don't pay it each time.
@@ -47,40 +45,21 @@ _LAST_GOOD = None
 
 
 def local_ports():
-    """Ports local PPSSPP processes are LISTENING on (Windows netstat scan).
+    """Ports local PPSSPP processes are LISTENING on (netstat on Windows,
+    /proc on Linux, lsof on macOS -- hostproc.listening_ports).
 
     PPSSPP v1.15.3 starts its webserver (which carries the WS debugger) on an
     ephemeral port at boot -- RemoteISOPort in ppsspp.ini is NOT honored -- so
     dialing the pinned LOCAL_HINT alone times out forever. This finds the real
     port purely locally; the match-server discover() stays as a last resort."""
     global _PORTS_CACHE
-    if os.name != "nt":
-        return []
     now = time.monotonic()
     if now - _PORTS_CACHE[0] < _PORTS_TTL:
         return _PORTS_CACHE[1]
-    ports = []
     try:
-        pids = set()
-        for exe in ("PPSSPPWindows64.exe", "PPSSPPWindows.exe"):
-            out = subprocess.run(
-                ["tasklist", "/FI", f"IMAGENAME eq {exe}", "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=3,
-                creationflags=_NO_WINDOW).stdout
-            pids |= set(re.findall(r'^"[^"]+","(\d+)"', out, re.M))
-        if pids:
-            ns = subprocess.run(["netstat", "-ano", "-p", "TCP"],
-                                capture_output=True, text=True, timeout=5,
-                                creationflags=_NO_WINDOW).stdout
-            for ln in ns.splitlines():
-                parts = ln.split()
-                if (len(parts) >= 5 and parts[3] == "LISTENING"
-                        and parts[4] in pids):
-                    m = re.search(r":(\d+)$", parts[1])
-                    if m and int(m.group(1)) not in ports:
-                        ports.append(int(m.group(1)))
+        ports = hostproc.listening_ports()
     except Exception:
-        pass
+        ports = []
     _PORTS_CACHE = (now, ports)
     return ports
 

@@ -1,4 +1,4 @@
-"""Direct process-memory bridge to PPSSPP (Windows).
+"""Direct process-memory bridge to PPSSPP (Windows + Linux).
 
 The WS debugger stalls for whole minutes while the emulator is busy (fresh
 boot JIT warmup, heavy scenes): RPC timeouts starved the client's runtime
@@ -22,18 +22,31 @@ gate from inside every call until it sticks.
 PPSSPP maps the same RAM at several PSP views (cached/uncached mirrors of one
 file mapping); whichever region validates first is used -- they alias the
 same bytes, so the choice is irrelevant.
+
+Linux (2026-09-07, Steam Deck): the same idea over /proc/<pid>/maps (RW
+regions) and /proc/<pid>/mem (pread/pwrite). It matters MORE there than on
+Windows: current PPSSPP runs every websocket memory.read/write inside
+Core_RunOnCPUThread + LockMemory, so a WS-only client interrupts the
+emulation thread on every poll and the game crawled at ~35% speed. Reading
+/proc/<pid>/mem needs ptrace access to the process: same uid AND
+kernel.yama.ptrace_scope permitting (SteamOS/Arch default 1 = ancestors
+only; the flatpak wrapper exits, so PPSSPPSDL is often NOT our descendant).
+A denied open is diagnosed once, with the one-line sysctl fix, and the
+client stays on the WS fallback until it is granted.
 """
 import ctypes
 import os
-import re
 import struct
-import subprocess
+import sys
 import time
 
 import logging
 logger = logging.getLogger("Client")
 # Diagnostic tier; never reaches the client window. See ApClient.dlog.
 dlog = logging.getLogger("FF1PSP")
+
+IS_WINDOWS = os.name == "nt"
+IS_LINUX = sys.platform.startswith("linux")
 
 # PSP address window served by this transport (RAM incl. our cave/tag).
 PSP_RAM_LO = 0x08000000
@@ -45,9 +58,8 @@ TAG_MAGIC = b"F1AP"
 # Emulated-RAM commit sizes seen from PPSSPP (24 MB retail / 32 MB).
 MIN_REGION = 0x01800000
 
-_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
-if os.name == "nt":
+if IS_WINDOWS:
     _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
     class _MBI(ctypes.Structure):   # MEMORY_BASIC_INFORMATION (x64 layout)
@@ -70,53 +82,125 @@ class MemUnavailable(Exception):
 
 
 def _ppsspp_pids():
-    pids = []
-    for exe in ("PPSSPPWindows64.exe", "PPSSPPWindows.exe"):
+    """PIDs of every live PPSSPP -- any platform, see hostproc. Kept under
+    this name because debug_bundle imports it."""
+    from .hostproc import ppsspp_pids
+    return ppsspp_pids()
+
+
+def parse_proc_maps(text: str, min_size: int = MIN_REGION):
+    """RW regions (start, size) of a /proc/<pid>/maps dump, largest-first.
+    Pure -- tested offline. PPSSPP's emulated RAM is a big rw-p/rw-s mapping
+    (a memfd/shm view on Linux); mirrors of it appear as separate rows and
+    all validate against the tag equally."""
+    out = []
+    for ln in text.splitlines():
+        parts = ln.split()
+        if len(parts) < 2 or "-" not in parts[0]:
+            continue
+        if not parts[1].startswith("rw"):
+            continue
         try:
-            out = subprocess.run(
-                ["tasklist", "/FI", f"IMAGENAME eq {exe}", "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=3,
-                creationflags=_NO_WINDOW).stdout
-            pids += [int(p) for p in re.findall(r'^"[^"]+","(\d+)"', out, re.M)]
-        except Exception:
-            pass
-    return pids
+            lo, hi = (int(x, 16) for x in parts[0].split("-", 1))
+        except ValueError:
+            continue
+        if hi - lo >= min_size:
+            out.append((lo, hi - lo))
+    out.sort(key=lambda r: -r[1])
+    return out
+
+
+def ptrace_scope() -> str:
+    """kernel.yama.ptrace_scope as a string ('' when Yama is absent)."""
+    try:
+        with open("/proc/sys/kernel/yama/ptrace_scope", "r") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+PTRACE_FIX = ("sudo sysctl kernel.yama.ptrace_scope=0    (permanent: "
+              "echo kernel.yama.ptrace_scope=0 | sudo tee "
+              "/etc/sysctl.d/10-ptrace.conf ; Steam Deck: set a password "
+              "first with  passwd  in Konsole)")
 
 
 class PPSSPPMem:
-    """Sync Win32 process-memory I/O behind the async PPSSPP transport API."""
+    """Sync process-memory I/O behind the async PPSSPP transport API.
+    Windows: ReadProcessMemory. Linux: /proc/<pid>/mem."""
 
     def __init__(self):
         self.pid = None
-        self.handle = None
+        self.handle = None         # Win32 HANDLE, or the /proc/<pid>/mem fd
         self.host_base = None      # host addr - psp addr (host ptr = base + psp_addr)
         self._next_attach = 0.0    # monotonic gate: don't hammer attach attempts
         self.proc_seen = True      # last attach scan found SOME PPSSPP process
                                    # (optimistic before the first scan so the WS
                                    # fallback still carries the fresh-boot window)
+        self.denied = False        # Linux: open(/proc/<pid>/mem) refused (ptrace)
+        self._denied_logged = False
 
-    # ---------------- attach / locate ----------------
+    # ---------------- backend primitives ----------------
+    def _open_process(self, pid):
+        """Handle for pid, or None. Linux lets PermissionError through so
+        attach can tell 'denied' from 'gone'."""
+        if IS_WINDOWS:
+            return _k32.OpenProcess(_PROC_RIGHTS, False, pid) or None
+        if IS_LINUX:
+            return os.open(f"/proc/{pid}/mem", os.O_RDWR)
+        return None
+
+    def _release(self, handle):
+        try:
+            if IS_WINDOWS:
+                _k32.CloseHandle(handle)
+            else:
+                os.close(handle)
+        except Exception:
+            pass
+
     def _close_handle(self):
-        if self.handle:
-            try:
-                _k32.CloseHandle(self.handle)
-            except Exception:
-                pass
+        if self.handle is not None:
+            self._release(self.handle)
         self.handle = None
         self.pid = None
         self.host_base = None
 
     def _read_raw(self, handle, host_addr, size):
-        buf = ctypes.create_string_buffer(size)
-        got = ctypes.c_size_t(0)
-        ok = _k32.ReadProcessMemory(handle, ctypes.c_void_p(host_addr), buf,
-                                    ctypes.c_size_t(size), ctypes.byref(got))
-        if not ok or got.value != size:
+        if IS_WINDOWS:
+            buf = ctypes.create_string_buffer(size)
+            got = ctypes.c_size_t(0)
+            ok = _k32.ReadProcessMemory(handle, ctypes.c_void_p(host_addr), buf,
+                                        ctypes.c_size_t(size), ctypes.byref(got))
+            if not ok or got.value != size:
+                return None
+            return buf.raw
+        try:
+            raw = os.pread(handle, size, host_addr)
+        except OSError:                     # EIO: unmapped / process gone
             return None
-        return buf.raw
+        return raw if len(raw) == size else None
 
-    def _regions(self, handle):
+    def _write_raw(self, handle, host_addr, data: bytes) -> bool:
+        if IS_WINDOWS:
+            n = ctypes.c_size_t(0)
+            ok = _k32.WriteProcessMemory(handle, ctypes.c_void_p(host_addr),
+                                         data, ctypes.c_size_t(len(data)),
+                                         ctypes.byref(n))
+            return bool(ok) and n.value == len(data)
+        try:
+            return os.pwrite(handle, data, host_addr) == len(data)
+        except OSError:
+            return False
+
+    def _regions(self, handle, pid=None):
         """Committed RW regions (base, size), largest-first."""
+        if IS_LINUX:
+            try:
+                with open(f"/proc/{pid}/maps", "r") as f:
+                    return parse_proc_maps(f.read())
+            except OSError:
+                return []
         out = []
         addr = 0
         mbi = _MBI()
@@ -135,9 +219,27 @@ class PPSSPPMem:
         out.sort(key=lambda r: -r[1])
         return out
 
+    def _note_denied(self, pid, err):
+        """Linux: /proc/<pid>/mem refused. Say it ONCE, with the fix -- the
+        WS fallback keeps the game playable but slow, and nothing else in the
+        log explains why a Linux session crawls."""
+        self.denied = True
+        if self._denied_logged:
+            return
+        self._denied_logged = True
+        scope = ptrace_scope()
+        logger.error(
+            f"  [bridge] Linux: cannot open PPSSPP's memory (pid {pid}: "
+            f"{getattr(err, 'strerror', None) or err}). "
+            f"kernel.yama.ptrace_scope={scope or '?'}. The game will run SLOW "
+            "on the websocket fallback until this is allowed. One-time fix in "
+            f"a terminal:  {PTRACE_FIX}  -- then reconnect; no need to restart "
+            "PPSSPP.")
+
+    # ---------------- attach / locate ----------------
     def attach(self):
         """Find a PPSSPP whose RAM carries the bake tag. True on success."""
-        if os.name != "nt":
+        if not (IS_WINDOWS or IS_LINUX):
             return False
         now = time.monotonic()
         if now < self._next_attach:
@@ -147,11 +249,17 @@ class PPSSPPMem:
         pids = list(_ppsspp_pids())
         self.proc_seen = bool(pids)
         for pid in pids:
-            handle = _k32.OpenProcess(_PROC_RIGHTS, False, pid)
-            if not handle:
+            try:
+                handle = self._open_process(pid)
+            except PermissionError as e:
+                self._note_denied(pid, e)
+                continue
+            except OSError:
+                continue
+            if handle is None:
                 continue
             found = None
-            for base, size in self._regions(handle):
+            for base, size in self._regions(handle, pid):
                 # Hypothesis: this region IS the RAM block mapped at
                 # PSP_RAM_LO, so host_base = region base - 0x08000000.
                 cand = base - PSP_RAM_LO
@@ -161,8 +269,12 @@ class PPSSPPMem:
                     break
             if found is not None:
                 self.pid, self.handle, self.host_base = pid, handle, found
+                if self.denied:
+                    logger.info("  [bridge] Linux: PPSSPP memory access granted "
+                                "-- direct memory I/O from here on.")
+                self.denied = False
                 return True
-            _k32.CloseHandle(handle)
+            self._release(handle)
         return False
 
     @property
@@ -194,11 +306,7 @@ class PPSSPPMem:
 
     async def write(self, address, data: bytes):
         host = self._host(address, len(data))
-        n = ctypes.c_size_t(0)
-        ok = _k32.WriteProcessMemory(self.handle, ctypes.c_void_p(host),
-                                     data, ctypes.c_size_t(len(data)),
-                                     ctypes.byref(n))
-        if not ok or n.value != len(data):
+        if not self._write_raw(self.handle, host, data):
             self._close_handle()
             raise MemUnavailable("write failed (process gone?)")
 

@@ -1773,7 +1773,9 @@ class FF1PSPWorld(World):
         for mon in b_chosen:
             loc = FF1PSPLocation(self.player, LOGIC.BESTIARY_LOCATION_NAMES[mon],
                                  ID.bestiary_loc_id(mon), menu)
-            if not allow_prog:
+            # rare-only monsters (every place <5%) are Useful/filler only
+            # whatever the option says -- logic.bestiary_rules
+            if not allow_prog or mon in self._bestiary_no_prog:
                 loc.item_rule = lambda item: not item.advancement
             menu.locations.append(loc)
             self._bestiary_locs.append((loc, mon))
@@ -1824,11 +1826,20 @@ class FF1PSPWorld(World):
                 harder=bool(self.options.harder_overworld_encounters.value))
         return self._ow_tables_cache
 
+    def _bestiary_odds(self):
+        """{(mon, source): best slot %} for this seed's ROLLED places, filled
+        by the two derive calls below (logic.SLOT_ODDS_PCT). Baked places
+        answer from bestiary_data.SOURCE_BEST_SLOT instead."""
+        if getattr(self, "_bestiary_odds_cache", None) is None:
+            self._bestiary_odds_cache = {}
+        return self._bestiary_odds_cache
+
     def _bestiary_ow_sources(self):
         """mon -> {('ow', (tier, class))} for THIS seed's rolled overworld."""
         ow, ow_hi = self._overworld_zone_tables()
         return LOGIC.overworld_sources(
-            ow, ow_hi if self.options.harder_overworld_encounters.value else None)
+            ow, ow_hi if self.options.harder_overworld_encounters.value else None,
+            odds=self._bestiary_odds())
 
     def _cave_zone_table(self):
         """This seed's zones_caves (cameos stamped in), or None when it ships
@@ -1854,7 +1865,8 @@ class FF1PSPWorld(World):
             return None
         return LOGIC.cave_sources(cv, {
             "harder_dungeons": bool(
-                self.options.harder_dungeon_encounters.value)})
+                self.options.harder_dungeon_encounters.value)},
+            odds=self._bestiary_odds())
 
     def _bestiary_setup(self):
         """(chosen monster ids, mon -> OR-of-AND access alts) for bestiarysanity;
@@ -1906,12 +1918,19 @@ class FF1PSPWorld(World):
                 plan, opts["bonus_excluded"])
         ow_sources = self._bestiary_ow_sources()
         cave_sources = self._bestiary_cave_sources()
+        odds = self._bestiary_odds()
         rules = {}
+        # Monsters whose every place is a <5% roll: the check exists but may
+        # hold no advancement item (logic.bestiary_rules, user call
+        # 2026-09-04). create_regions pins the item_rule.
+        self._bestiary_no_prog = set()
         for mon in LOGIC.BESTIARY_ELIGIBLE:
-            alts = LOGIC.bestiary_rule_alts(mon, opts, minion_rules, ow_sources,
-                                            cave_sources)
+            alts, prog_ok = LOGIC.bestiary_rules(
+                mon, opts, minion_rules, ow_sources, cave_sources, odds)
             if alts:
                 rules[mon] = alts
+                if not prog_ok:
+                    self._bestiary_no_prog.add(mon)
         hunt = sorted(rules)
         k = max(1, round(len(hunt) * pct / 100))
         chosen = sorted(self.random.sample(hunt, min(k, len(hunt))))
@@ -2259,6 +2278,8 @@ class FF1PSPWorld(World):
             elif chest_token == "TitanFed":
                 extra.append(LOGIC.TITAN_FED)
             set_rule(loc, make_rule(region_rule, extra))
+            if idx in LOGIC.PARTY_GATE_CHEST:
+                gate_party(loc, LOGIC.PARTY_GATE_CHEST[idx])
 
         # Bestiarysanity: each monster's rule = OR over its guaranteed spawn
         # sources under this seed's options (logic.bestiary_rule_alts).
@@ -2297,6 +2318,8 @@ class FF1PSPWorld(World):
             alts = LOGIC.npc_rule_alts(self._npc_ord[loc],
                                        region_rules.get(region, []), extra)
             set_rule(loc, make_rule(alts))
+            if loc.name in LOGIC.PARTY_GATE_NPC:
+                gate_party(loc, LOGIC.PARTY_GATE_NPC[loc.name])
 
         # shop AP stock: town-access tokens only (gil is grindable, not modeled);
         # overrides key on the SHOP name, applying to every offer of that shop

@@ -404,7 +404,15 @@ def _process_section(ctx):
     """Running PPSSPP / client processes. A second emulator or a second client
     is a recurring cause of 'my checks stopped working'."""
     if os.name != "nt":
-        return {"note": "process listing is Windows-only"}
+        from .hostproc import process_table, ppsspp_pids
+        try:
+            rows = process_table()
+        except Exception as e:
+            return {"error": repr(e)}
+        hits = [f"{pid} {name} {cmd[:200]}" for pid, name, cmd in rows
+                if any(n in (name + " " + cmd).lower() for n in
+                       ("ppsspp", "archipelago", "ff1psp", "python"))]
+        return {"matching": hits, "ppsspp_instances": len(ppsspp_pids())}
     try:
         out = subprocess.run(
             ["tasklist", "/fo", "csv", "/nh"], capture_output=True, text=True,
@@ -433,12 +441,34 @@ def _savestate_section(ctx):
                                   "PPSSPP_STATE"))
     home = os.path.expanduser("~")
     roots += [os.path.join(home, "Documents", "PPSSPP", "PSP", "PPSSPP_STATE"),
-              os.path.join(home, ".config", "ppsspp", "PSP", "PPSSPP_STATE")]
+              os.path.join(home, ".config", "ppsspp", "PSP", "PPSSPP_STATE"),
+              os.path.join(home, ".var", "app", "org.ppsspp.PPSSPP", "config",
+                           "ppsspp", "PSP", "PPSSPP_STATE")]
     found = []
     for r in roots:
         for p in glob.glob(os.path.join(r, "*ULUS10251*")):
             found.append(_stat(p))
     return {"searched": roots, "states": found}
+
+
+def _bestiary_section(ctx):
+    """Bestiarysanity as the kill-count loop sees it: per hunted monster, the
+    live count, the floor it must rise above, and the resulting state. The
+    first "killed it but no check" report (2026-09-07) was undiagnosable
+    without this -- the bundle carried the sampled ids and nothing else."""
+    if ctx is None:
+        return {"note": "no client context (bundle built offline)"}
+    fl = getattr(ctx, "_bestiary_floor", None)
+    if not getattr(ctx, "bestiary", None) or fl is None:
+        return {"note": "bestiarysanity off for this seed"}
+    from .monster_names import MONSTER_NAME
+    sent = set()
+    try:
+        sent = ctx._bestiary_sent_mons()
+    except Exception:
+        pass
+    return {"summary": fl.summary(), "rows": fl.rows(sent, MONSTER_NAME),
+            "floor": fl.floor, "counts": fl.snap}
 
 
 def _ap_section(ctx):
@@ -496,8 +526,19 @@ def _ap_section(ctx):
                           is not None
                           and getattr(ctx.psp.mem, "attached", False)
                           else "WS debugger"),
+            "mem_denied": bool(getattr(getattr(getattr(ctx, "psp", None),
+                                               "mem", None), "denied", False)),
+            "ptrace_scope": _ptrace_scope(),
         },
     }
+
+
+def _ptrace_scope():
+    try:
+        from .ppsspp_mem import ptrace_scope
+        return ptrace_scope()
+    except Exception:
+        return ""
 
 
 # ------------------------------------------------------------- RAM snapshot ---
@@ -865,27 +906,38 @@ def _host_section(ctx=None):
     responsiveness + which threads burn CPU -- so it works when the emulator
     is fully hung and every in-emu channel is dead. Read-only. The sleep is
     fine: build_bundle runs collectors in an executor, not the asyncio loop."""
-    if os.name != "nt":
-        return {"note": "host process check is Windows-only"}
     from .ppsspp_mem import _ppsspp_pids
+    from . import hostproc
+    if not (hostproc.IS_WINDOWS or hostproc.IS_LINUX):
+        return {"note": "host process check is Windows/Linux-only"}
     pids = _ppsspp_pids()
     if not pids:
         return {"note": "no PPSSPP process running"}
     import time
     out = {"pids": pids}
     pid = pids[0]                     # snapshot_ram already flags >1 instance
+    if hostproc.IS_WINDOWS:
+        try:
+            wins = _windows_of_pid(pid)
+            out["windows"] = [{"title": t or "(untitled)", "hung": h}
+                              for t, h in wins]
+            hung_any = any(h for _t, h in wins)
+        except Exception as e:
+            out["windows"] = {"error": repr(e)}
+            hung_any = False
+        cpu_times = _thread_cpu_times
+    else:
+        # No window probe on Linux; a stopped/zombie scheduler state is the
+        # nearest "hung" signal. Thread cpu comes from /proc in the same
+        # 100 ns units the Windows collector uses, so the math below is shared.
+        state = hostproc.linux_proc_state(pid)
+        out["state"] = state
+        hung_any = state in ("Z", "T")
+        cpu_times = hostproc.linux_thread_cpu_times
     try:
-        wins = _windows_of_pid(pid)
-        out["windows"] = [{"title": t or "(untitled)", "hung": h}
-                          for t, h in wins]
-        hung_any = any(h for _t, h in wins)
-    except Exception as e:
-        out["windows"] = {"error": repr(e)}
-        hung_any = False
-    try:
-        a = _thread_cpu_times(pid)
+        a = cpu_times(pid)
         time.sleep(HOST_GAP_S)
-        b = _thread_cpu_times(pid)
+        b = cpu_times(pid)
         deltas = {tid: b[tid] - a.get(tid, b[tid]) for tid in b}
         # 100 ns units -> percent of one core over the gap
         busy = sorted(((tid, d / (HOST_GAP_S * 1e7) * 100.0)
@@ -918,7 +970,9 @@ def _ppsspp_log(ctx=None):
                   os.path.join(d, "PSP", "SYSTEM")]
     home = os.path.expanduser("~")
     roots += [os.path.join(home, "Documents", "PPSSPP", "PSP", "SYSTEM"),
-              os.path.join(home, ".config", "ppsspp", "PSP", "SYSTEM")]
+              os.path.join(home, ".config", "ppsspp", "PSP", "SYSTEM"),
+              os.path.join(home, ".var", "app", "org.ppsspp.PPSSPP", "config",
+                           "ppsspp", "PSP", "SYSTEM")]
     try:
         roots += [os.path.dirname(p) for p in (find_inis(exe) if exe else [])]
     except Exception:
@@ -1069,6 +1123,22 @@ def _render_report(m):
         p(f"key items held   : {ram.get('key_items_held')}")
     p(f"map (field/loaded/bonus): {ram.get('field_map_id')} / "
       f"{ram.get('loaded_map_id')} / {ram.get('bonus_map_id')}")
+    bst = m.get("bestiary")
+    if isinstance(bst, dict) and bst.get("rows") is not None:
+        p()
+        p("-- bestiarysanity " + "-" * 42)
+        s = bst.get("summary") or {}
+        p(f"floor            : {'set' if s.get('floor_present') else 'NOT set'}"
+          f"{' (junk on server)' if s.get('floor_malformed') else ''}, server "
+          f"{'answered' if s.get('server_answered') else 'silent'}, "
+          f"{s.get('under_floor')} entries under floor, last decision "
+          f"{(s.get('last_decision') or {}).get('kind')} "
+          f"{(s.get('last_decision') or {}).get('detail') or ''}")
+        if s.get("rejected_frames"):
+            p(f"rejected frames  : {s.get('rejected_frames')}")
+        for r in bst["rows"]:
+            p(f"  {r.get('name'):<16} kills {r.get('count')!s:>4}  "
+              f"floor {r.get('floor')!s:>4}  {r.get('state')}")
     p()
     p("Full detail: manifest.json, ap_state.json, ram_snapshot.json, and the "
       "client logs in this zip.")
@@ -1138,6 +1208,7 @@ def build_bundle(ctx=None, ram=None, wedge=None, out_dir=None):
         "processes": _safe(_process_section, ctx),
         "savestates": _safe(_savestate_section, ctx),
         "archipelago": _safe(_ap_section, ctx),
+        "bestiary": _safe(_bestiary_section, ctx),
         "ram": ram if ram is not None else {"note": "not collected"},
         "cpu": wedge if wedge is not None else {"note": "not collected"},
         "host": _safe(_host_section, ctx),

@@ -48,6 +48,8 @@ from . import trap_store as TS
 # being swapped, so it must already be in memory before that can happen.
 from . import apworld_watch as APWATCH
 from .monster_names import MONSTER_NAME as MON_NAME
+from .bestiary_floor import BestiaryFloor
+from . import catchup as CU
 from .ppsspp_ws import PPSSPP, USER_RAM_BASE, USER_RAM_SIZE
 from .. import data as DATA
 from .. import trap_data as TD
@@ -190,6 +192,19 @@ OW_SCAN_WINDOWS = ((0x09800000, 0x00800000),
 # relocation (no town/dungeon excursion) that the canary can't see because the stale
 # freed buffer still holds our edits. One narrow-window scan every this-many seconds.
 OW_REANCHOR_S = 6.0
+# Re-entry grace (v325): for this long after the loop first sees the overworld
+# again (post battle / town / death-reload) a missed rescan neither grows the
+# miss-backoff nor waits out the full-sweep gate. Player report 2026-09-05: saved
+# ON a foot-trail bridge, died, reloaded -- the map id read 9 before the arena
+# was decompressed, the first scans missed, `wait` climbed 3->6->12->24 and the
+# 24 MB fallback was gated 30 s, so the bridge under the party painted 42 s after
+# the load and the party stood frozen on an ocean cell the whole time.
+OW_REENTRY_GRACE_S = 20.0
+# Outside the grace window (arena genuinely absent: game-over screen, title
+# with the map id still 9) the backoff still grows, but caps well under the old
+# 30 s so a reload the edge detector never saw is repainted within ~12 s.
+OW_MISS_WAIT_CAP_S = 12.0
+OW_FULL_SWEEP_GAP_S = 15.0
 # Shop AP-slot purchase watcher: one 2-byte mailbox-head read per tick, and the
 # ring + inventory only when the head has moved (i.e. only on a real purchase).
 SHOP_POLL_S = 0.5
@@ -331,6 +346,29 @@ class FF1PSPCommandProcessor(ClientCommandProcessor):
                            "  (write NOT verified -- PPSSPP bridge down?)"))
         c.run_async(apply())
 
+    def _cmd_bestiary(self):
+        """Show what the Bestiarysanity tracker sees: each hunted monster's
+        kill count, the floor it must rise above, and why a check has or has
+        not been sent. Paste this with a report if a kill did not count."""
+        if not isinstance(self.ctx, FF1PSPContext):
+            return
+        c = self.ctx
+        fl = c._bestiary_floor
+        if not c.bestiary or fl is None:
+            self.output("Bestiarysanity is off for this seed.")
+            return
+        s = fl.summary()
+        self.output(
+            f"bestiary: floor {'set' if s['floor_present'] else 'NOT set'}"
+            f"{' (junk on server)' if s['floor_malformed'] else ''}, "
+            f"server {'answered' if s['server_answered'] else 'silent'}, "
+            f"save {'read' if s['snapshot_present'] else 'not read yet'}, "
+            f"{s['under_floor'] if s['under_floor'] is not None else '?'} "
+            f"entries under floor, last: {s['last_decision']['kind']}")
+        for r in fl.rows(c._bestiary_sent_mons(), MON_NAME):
+            self.output(f"  {r['name']:<16} kills {r['count']!s:>4}  "
+                        f"floor {r['floor']!s:>4}  {r['state']}")
+
     def _cmd_psp(self):
         """Show the PPSSPP bridge status."""
         if isinstance(self.ctx, FF1PSPContext):
@@ -341,7 +379,10 @@ class FF1PSPCommandProcessor(ClientCommandProcessor):
             self.output("memory transport: "
                         + ("direct process memory"
                            if mem is not None and mem.attached
-                           else "WS debugger (fallback)"))
+                           else "WS debugger (fallback)")
+                        + (" -- /proc/<pid>/mem DENIED (ptrace scope); "
+                           "game runs slow, see the [bridge] error above"
+                           if getattr(mem, "denied", False) else ""))
             r = remote_psp_target()
             if r:
                 self.output(f"remote PPSSPP target: {r[0]}"
@@ -867,19 +908,17 @@ class FF1PSPContext(CommonContext):
         # this seed ships no zones_caves, so the caves are vanilla and the rows
         # baked into bestiary_data already describe them exactly.
         self._ow_sources_cache = None
+        self._ow_zone_cache = None
         self._cave_sources_built = False
         self._cave_sources_cache = None
+        self._bestiary_odds = {}         # {(mon, source): best slot %} for
+                                          # the tab's rarity tag (logic.SLOT_ODDS_PCT)
         self.bestiary = None              # slot_data "bestiary" dict (bestiarysanity):
                                           # {"monsters": [mon ids], "progression": b,
                                           # "opts": {...}}; None = option off/old seed
-        self._bestiary_baseline = None    # list[203] kill counts at first connect of
-                                          # this seed (server DataStorage; new kills
-                                          # only -- NG+ carryover never auto-checks)
-        self._bestiary_base_known = False  # True once Retrieved/SetReply answered
-                                          # (baseline may legitimately be None until
-                                          # the first stable snapshot is stored)
-        self._bestiary_snap = None        # last raw counts read (tab display +
-                                          # snapshot stability gate)
+        self._bestiary_floor = None       # bestiary_floor.BestiaryFloor: the kill-
+                                          # count floor (server DataStorage, follows
+                                          # a drop), last frame, decision state
         self.death_link_on = False        # yaml death_link: DeathLink tag + wipe loop
         self.death_link_severity = 3      # yaml: living members killed per received death
         self._trap_queue = []             # received trap items awaiting their battle:
@@ -1717,8 +1756,34 @@ class FF1PSPContext(CommonContext):
                     hi = base64.b64decode(enc["zones_overworld_hi"])
                 except Exception:
                     hi = None
-            self._ow_sources_cache = TRACKER.LOGIC.overworld_sources(ow, hi)
+            self._ow_sources_cache = TRACKER.LOGIC.overworld_sources(
+                ow, hi, odds=self._bestiary_odds)
         return self._ow_sources_cache
+
+    def _bestiary_ow_zone_tables(self):
+        """(ow_zones, zone_rows) for THIS seed -- see logic.overworld_zone_sources.
+
+        The heading keys _bestiary_ow_sources builds are reachability NODES, and
+        13 of the 19 land nodes span several 32x32 encounter zones with entirely
+        different rows, so a heading lists their union. These two tables carry
+        the per-zone truth the Map tab needs to stop promising a monster that
+        rolls three zones away (live report 2026-09-07). Cached with the same
+        reasoning: the table cannot change within a session."""
+        if getattr(self, "_ow_zone_cache", None) is None:
+            enc = (self.slot_data or {}).get("shuffle_tables") or {}
+            try:
+                ow = base64.b64decode(enc["zones_overworld"])
+            except Exception:
+                return {}, {}
+            hi = None
+            if enc.get("zones_overworld_hi"):
+                try:
+                    hi = base64.b64decode(enc["zones_overworld_hi"])
+                except Exception:
+                    hi = None
+            self._ow_zone_cache = (TRACKER.LOGIC.overworld_zone_sources(ow, hi),
+                                   TRACKER.LOGIC.overworld_zone_rows(ow, hi))
+        return self._ow_zone_cache
 
     def _bestiary_cave_sources(self):
         """mon -> dungeon places, from THIS seed's zones_caves, or None.
@@ -1738,14 +1803,17 @@ class FF1PSPContext(CommonContext):
                     cv = None
                 if cv:
                     self._cave_sources_cache = TRACKER.LOGIC.cave_sources(
-                        cv, (self.bestiary or {}).get("opts") or {})
+                        cv, (self.bestiary or {}).get("opts") or {},
+                        odds=self._bestiary_odds)
         return self._cave_sources_cache
 
     def _bestiary_payload(self):
         bst = self.bestiary
         checked, killed, flags = set(), set(), {}
         if bst:
-            base, snap = self._bestiary_baseline, self._bestiary_snap
+            fl = self._bestiary_floor
+            base = fl.floor if fl is not None else None
+            snap = fl.snap if fl is not None else None
             for m in bst.get("monsters") or []:
                 m = int(m)
                 lid = ID.bestiary_loc_id(m)
@@ -1758,12 +1826,15 @@ class FF1PSPContext(CommonContext):
                 if info is not None:
                     flags[m] = int(getattr(info, "flags", 0) or 0)
         sd = self.slot_data or {}
+        ow_zones, zone_rows = self._bestiary_ow_zone_tables()
         return TRACKER.bestiary_view(
             bst, sd.get("boss_minions_plan"), killed, checked, flags,
             tokens=self._tracker_tokens,
             party_cap=int(sd.get("party_logic_cap") or 0),
             ow_sources=self._bestiary_ow_sources(),
-            cave_sources=self._bestiary_cave_sources())
+            cave_sources=self._bestiary_cave_sources(),
+            odds=self._bestiary_odds,
+            ow_zones=ow_zones, zone_rows=zone_rows)
 
     def refresh_bestiary(self):
         """Rebuild + repaint the Bestiary tab. Cheap and idempotent."""
@@ -2048,12 +2119,13 @@ class FF1PSPContext(CommonContext):
             self.party_jobs = list(sd.get("party_jobs") or [None, None, None, None])
             self.thief_steal = bool(sd.get("thief_steal", False))
             # bestiarysanity: sampled monster ids + option context (None on old
-            # seeds / option off). The kill-count BASELINE is server DataStorage
+            # seeds / option off). The kill-count FLOOR is server DataStorage
             # (like bought hints): new kills only, so it must survive client
             # restarts without trusting the save (NG+ carries the bestiary over).
             self.bestiary = sd.get("bestiary") or None
-            self._bestiary_baseline = None
-            self._bestiary_base_known = False
+            self._bestiary_floor = (
+                BestiaryFloor(D.BESTIARY_KILLS_N, self.bestiary.get("monsters"))
+                if self.bestiary else None)
             if self.bestiary:
                 logger.info(f"  bestiarysanity: {len(self.bestiary.get('monsters') or [])} "
                             f"monster checks this seed")
@@ -2218,13 +2290,14 @@ class FF1PSPContext(CommonContext):
                     (args.get("keys") or {})[self._trap_store_key()])
             elif cmd == "SetReply" and args.get("key") == self._trap_store_key():
                 self._trap_apply_stored(args.get("value"))
-        # bestiarysanity baseline: Retrieved answers the connect Get; SetReply
-        # echoes our own store (confirms the snapshot landed on the server).
-        if self.bestiary:
+        # bestiarysanity floor: Retrieved answers the connect Get; SetReply
+        # echoes our own store/rebase (confirms it landed on the server).
+        if self.bestiary and self._bestiary_floor is not None:
             if cmd == "Retrieved" and self._bestiary_key() in (args.get("keys") or {}):
-                self._bestiary_apply_base((args.get("keys") or {})[self._bestiary_key()])
+                self._bestiary_floor.apply_server(
+                    (args.get("keys") or {})[self._bestiary_key()])
             elif cmd == "SetReply" and args.get("key") == self._bestiary_key():
-                self._bestiary_apply_base(args.get("value"))
+                self._bestiary_floor.apply_server(args.get("value"))
         # A check anywhere can empty a hinted tile, which retires its row.
         if cmd in ("Connected", "RoomUpdate") and self.hint_rows:
             self._hint_dirty = True
@@ -3665,12 +3738,14 @@ class FF1PSPContext(CommonContext):
         # it folds into bake_hash32 so toggling harder re-bakes the forest tables).
         if feats.get("dangerous_forests"):
             feats["harder_encounters"] = bool((self.slot_data or {}).get("harder_encounters"))
-        # crystals_needed < 4: bake context for the bikke_ship_split wrapper
-        # cave (crystal-count leg; see [[crystal-count-re]]). Not a FEATURES
-        # key; folds into bake_hash32 so a different N re-bakes. 0 is valid
-        # (orb opens immediately) -- gate on None, not truthiness.
+        # crystals_needed: bake context for the bikke_ship_split wrapper cave
+        # (crystal-count leg; see [[crystal-count-re]]). Not a FEATURES key;
+        # bake_hash32 folds the VALUE so a different N re-bakes. 0 is valid
+        # (orb opens immediately) -- gate on None, not truthiness. Passed at
+        # EVERY N since v328 (N=4 included): the vanilla Chaos Shrine scripts
+        # only check three fiends, so the leg is what makes 4 mean 4.
         _cn = (self.slot_data or {}).get("crystals_needed")
-        if _cn is not None and int(_cn) < 4:
+        if _cn is not None:
             feats["crystals_needed"] = int(_cn)
         # bonus_dungeon_crystals: bake context for the SAME wrapper cave -- flips its
         # counting source from the four Fiend flags to the 4 client-set shadow bits
@@ -3858,75 +3933,74 @@ class FF1PSPContext(CommonContext):
         except Exception as e:
             dlog.info(f"  [bestiary] baseline read failed ({e!r})")
 
-    def _bestiary_apply_base(self, value):
-        self._bestiary_base_known = True
-        if isinstance(value, list) and len(value) == D.BESTIARY_KILLS_N:
-            self._bestiary_baseline = [int(v) for v in value]
-
-    async def _bestiary_store_base(self, counts):
-        """Store the baseline create-if-missing: `default` seeds the key only
-        when absent and the no-op `default` operation materializes it, so a
-        concurrent client can never overwrite an established baseline. The
-        SetReply echo is what installs it locally."""
+    async def _bestiary_store_floor(self, counts, replace=False):
+        """Store the floor. Default is create-if-missing: `default` seeds the
+        key only when absent and the no-op `default` operation materializes
+        it, so a second client can never clobber an established floor; the
+        SetReply echo is what installs it locally. `replace` is for a rebase
+        (the floor legitimately moved) or for junk found under our key."""
+        vec = [int(c) for c in counts]
+        op = ({"operation": "replace", "value": vec} if replace else
+              {"operation": "default", "value": 0})
         try:
             await self.send_msgs([{
-                "cmd": "Set", "key": self._bestiary_key(),
-                "default": [int(c) for c in counts], "want_reply": True,
-                "operations": [{"operation": "default", "value": 0}]}])
+                "cmd": "Set", "key": self._bestiary_key(), "default": vec,
+                "want_reply": True, "operations": [op]}])
         except Exception as e:
-            dlog.info(f"  [bestiary] baseline store failed ({e!r})")
+            dlog.info(f"  [bestiary] floor store failed ({e!r})")
+
+    def _bestiary_sent_mons(self):
+        """Sampled monster ids whose check already went out."""
+        fl = self._bestiary_floor
+        return ({m for m in fl.sampled
+                 if ID.bestiary_loc_id(m) in self.sent_locations}
+                if fl is not None else set())
 
     async def _bestiary_loop(self):
         """Poll the save-resident bestiary kill counts (u16[203] @ save+0x1198,
         monster-id indexed) and send a check for each sampled monster whose
-        count rises above the seed's first-connect baseline. NEW KILLS ONLY by
-        design: an NG+ start carries the bestiary over pre-filled, and even a
-        carried-over entry stays checkable because one more kill still bumps
-        its COUNT. The baseline snapshot commits only after two consecutive
-        identical sane reads (title/load transitions can expose stale bytes)."""
-        stable = {"prev": None}
-
+        count rises above the FLOOR. The floor is the seed's first stable
+        snapshot, persisted per slot on the server -- and it FOLLOWS A DROP:
+        a kill count never decreases inside one save, so any entry below the
+        floor means a different save is on screen (New Game, another file,
+        a savestate rewind) and the floor is rebased to that frame. NEW KILLS
+        ONLY otherwise: an NG+ start carries the bestiary over pre-filled, and
+        a carried entry stays checkable because one more kill still bumps its
+        COUNT. Decisions live in bestiary_floor.BestiaryFloor (pure, tested);
+        every one of them waits for two consecutive identical sane reads."""
         async def tick():
             if not self.bestiary:
                 return False              # option off this seed -- end the loop
-            if self.save_delta is None or not self._bestiary_base_known:
+            fl = self._bestiary_floor
+            if self.save_delta is None or fl is None:
                 return
             raw = await self.psp.read(self.sa(D.BESTIARY_KILLS_SA),
                                       D.BESTIARY_KILLS_N * 2)
-            counts = [int.from_bytes(raw[i:i + 2], "little")
-                      for i in range(0, D.BESTIARY_KILLS_N * 2, 2)]
-            if any(c > 999 for c in counts):
-                stable["prev"] = None     # mid-load garbage -- not a bestiary frame
-                return
-            prev_snap = self._bestiary_snap
-            self._bestiary_snap = counts
-            if prev_snap != counts:
+            kind, detail = fl.step(raw, self._bestiary_sent_mons())
+            if fl.snap_changed:
                 self.refresh_bestiary()
-            if self._bestiary_baseline is None:
-                if stable["prev"] == counts:
-                    dlog.info(f"  [bestiary] baseline stored "
-                                f"({sum(1 for c in counts if c)}/{D.BESTIARY_KILLS_N} "
-                                f"entries pre-filled)")
-                    await self._bestiary_store_base(counts)
-                    stable["prev"] = None
-                else:
-                    stable["prev"] = list(counts)
-                return
-            base = self._bestiary_baseline
-            lids = []
-            for mon in self.bestiary.get("monsters") or []:
-                mon = int(mon)
-                if not (0 <= mon < D.BESTIARY_KILLS_N):
-                    continue
-                lid = ID.bestiary_loc_id(mon)
-                if lid in self.sent_locations:
-                    continue
-                if counts[mon] > base[mon]:
+            if kind == "reject":
+                if fl.rejected.get(detail) == 1:
+                    dlog.info(f"  [bestiary] frame rejected: {detail}")
+            elif kind == "snapshot":
+                dlog.info(f"  [bestiary] floor stored "
+                            f"({sum(1 for c in detail if c)}/{fl.n} entries "
+                            f"pre-filled)"
+                            + (" -- replacing junk under the key"
+                               if fl.malformed else ""))
+                await self._bestiary_store_floor(detail, replace=fl.malformed)
+            elif kind == "rebase":
+                dlog.info(f"  [bestiary] kill counts dropped ({len(detail)} "
+                            f"species) -> save changed, floor rebased")
+                await self._bestiary_store_floor(fl.floor, replace=True)
+            elif kind == "fire":
+                lids = []
+                for mon in detail:
+                    lid = ID.bestiary_loc_id(mon)
                     self.sent_locations.add(lid)
                     lids.append(lid)
                     dlog.info(f"  [bestiary] {MON_NAME.get(mon, hex(mon))} "
                                 f"defeated -> check")
-            if lids:
                 await self.check_locations(lids)
 
         await self._poll(2.0, "bestiary", tick)
@@ -5775,6 +5849,10 @@ class FF1PSPContext(CommonContext):
         ow_baked = bool(getattr(self, "bake_ok", False)) and bool(
             ((getattr(self, "_bake", None) or {}).get("features")
              or {}).get("_ow_map"))
+        # The Map tab draws every world change whether it is baked or poked,
+        # so it gets the toggle edits BEFORE the bake drops them from the
+        # runtime set (map_edits below).
+        map_toggle_edits = dict(grid_edits)
         if ow_baked and grid_edits:
             dlog.info(f"  [openworld] {len(grid_edits)} grid edits are on "
                         f"disc (baked) -- skipping the runtime grid rescan")
@@ -5885,6 +5963,17 @@ class FF1PSPContext(CommonContext):
                 canary = min(edits) if edits else None
             cur["canary"] = canary
             cur["val"] = edits[canary] if canary is not None else None
+            # Map tab: the picture follows the world -- toggle edits (baked or
+            # not), the canal bridge once open, held world items, the Gulg
+            # seal -- plus the carved canoe rivers' class cells.
+            ui = getattr(self, "ui", None)
+            if ui is not None and hasattr(ui, "update_map_edits"):
+                try:
+                    tiles = dict(map_toggle_edits)
+                    tiles.update(edits)
+                    ui.update_map_edits(tiles, dict(class_edits))
+                except Exception as ex:
+                    dlog.info(f"  [openworld] map edits push failed: {ex!r}")
 
         canal_state = {"open": False}
 
@@ -5923,7 +6012,7 @@ class FF1PSPContext(CommonContext):
         # the loop silently maintains a dead buffer while the live arena stays
         # vanilla -> the intermittent "river not connected". Force a fresh rescan
         # on every overworld re-entry so grid_base tracks the live arena.
-        map_state = {"away": True, "verify": 0.0}
+        map_state = {"away": True, "verify": 0.0, "reentry": -1e9}
         # apply() runs on every re-anchor/re-decompress (every few seconds on the
         # overworld) and the base set is almost always identical -- remember what
         # we last announced and only log when the arena actually relocates.
@@ -5954,6 +6043,9 @@ class FF1PSPContext(CommonContext):
             if now - last_scan["window"] < last_scan["wait"]:
                 return
             last_scan["window"] = now
+            # Re-entry grace: see OW_REENTRY_GRACE_S. Misses in this window keep
+            # the 3 s cadence and may run the full sweep every time.
+            grace = (now - map_state["reentry"]) < OW_REENTRY_GRACE_S
             narrow = OW_SCAN_WINDOWS[0]
             if last_hit["base"] is not None:
                 nsize = OW_SCAN_WINDOWS[0][1]
@@ -5963,9 +6055,17 @@ class FF1PSPContext(CommonContext):
                 lo = min(lo, USER_RAM_BASE + USER_RAM_SIZE - nsize)
                 narrow = (lo, nsize)
             windows = [narrow]
-            if not narrow_only and now - last_scan["full"] >= 30.0:
+            # The arena has been seen both below and above the static window
+            # (0x9775dda vs 0x9d75dda in ONE session, 2026-09-05: a re-centred
+            # narrow window on the first address cannot see the second). The
+            # static window is one more cheap 8 MB read -- try it before the
+            # 24 MB sweep instead of waiting out the full-sweep gate.
+            if narrow != OW_SCAN_WINDOWS[0]:
+                windows.append(OW_SCAN_WINDOWS[0])
+            if not narrow_only and (grace or
+                                    now - last_scan["full"] >= OW_FULL_SWEEP_GAP_S):
                 last_scan["full"] = now
-                windows = [narrow] + list(OW_SCAN_WINDOWS[1:])
+                windows = windows + list(OW_SCAN_WINDOWS[1:])
             for start, size in windows:
                 t0 = loop.time()
                 blob = await (self.psp_scan or self.psp).read_chunked(
@@ -5990,7 +6090,10 @@ class FF1PSPContext(CommonContext):
                     last_scan["wait"] = 3.0
                     last_hit["base"] = grid_base
                     return
-            last_scan["wait"] = min(last_scan["wait"] * 2, 30.0)
+            if grace:
+                last_scan["wait"] = 3.0
+            else:
+                last_scan["wait"] = min(last_scan["wait"] * 2, OW_MISS_WAIT_CAP_S)
 
         def class_addr(xy):
             x, y = xy
@@ -6186,6 +6289,10 @@ class FF1PSPContext(CommonContext):
                 # made the canal bridge lapse for 35 s after a battle. Bounded: one
                 # extra sweep per excursion, and only when the narrow scan misses.
                 last_scan["full"] = 0.0
+                # ...and open the grace window (OW_REENTRY_GRACE_S): the arena
+                # is often NOT decompressed yet on this first tick after a load,
+                # and one miss must not put the fast cadence to sleep.
+                map_state["reentry"] = loop.time()
             if grid_base is None:
                 await rescan()
                 if grid_base is None:
@@ -6326,6 +6433,55 @@ class FF1PSPContext(CommonContext):
             return False
         radius = max(radius, D.PREARM_MIN_RADIUS)
         return abs(x - ow_x) <= radius and abs(y - ow_y) <= radius
+
+    async def _ow_xy(self):
+        """(grid_x, grid_y) of the party ON THE OVERWORLD, else None.
+
+        The same reads as _at_ow_tile: the FINE map id pins us to the
+        overworld (a dungeon's same-numbered tile can never match), then the
+        field struct's live coords. Field x is the AMD grid x PLUS ONE
+        (ff1_data.GULG_TILE), so the map cell is (x - 1, y). Any read failure
+        -- bridge down, save block not located yet -- answers None rather
+        than raising: this feeds a display, never a decision."""
+        if getattr(self, "psp", None) is None or self.save_delta is None:
+            return None
+        try:
+            fine = struct.unpack("<I", await self.psp.read(
+                self.sa(D.FIELD_MAP_ID_SA), 4))[0]
+            if fine != D.OVERWORLD_FIELD_MAP_ID:
+                return None
+            fbase = struct.unpack("<I", await self.psp.read(
+                D.FIELD_STRUCT_PTR, 4))[0]
+            if not (0x08000000 <= fbase < 0x0A000000):
+                return None
+            x = struct.unpack("<H", await self.psp.read(
+                fbase + D.FIELD_PARTY_X_OFF, 2))[0]
+            y = struct.unpack("<H", await self.psp.read(
+                fbase + D.FIELD_PARTY_Y_OFF, 2))[0]
+        except Exception:
+            return None
+        gx, gy = x - 1, y
+        if 0 <= gx < 255 and 0 <= gy < 255:
+            return (gx, gy)
+        return None
+
+    async def _owmap_loop(self):
+        """Feed the Map tab the party's overworld cell about once a second,
+        so its "you are here" dot and "You are in:" line follow the walk.
+        Off the overworld the tab is told None (the dot hides). Pushes only
+        on CHANGE: a parked party, or one inside a dungeon, costs the GUI
+        nothing. Three small reads per tick, no writes, no state."""
+        last = {"pos": ()}
+
+        async def tick():
+            ui = getattr(self, "ui", None)
+            if ui is None or not hasattr(ui, "update_map_pos"):
+                return
+            pos = await self._ow_xy()
+            if pos != last["pos"]:
+                last["pos"] = pos
+                ui.update_map_pos(pos)
+        await self._poll(1.0, "owmap_loop", tick)
 
     # ---------------- NPC story-event location (Princess) ----------------
     async def _npc_loop(self):
@@ -10622,6 +10778,9 @@ class FF1PSPContext(CommonContext):
         announced = set()
         killed = set()                  # rows enforced at least once this run
                                         # (a later hp>0 = a revival to re-kill)
+        last_gil = None                 # previous tick's gil: a drop in the same
+                                        # tick a held row came back = the player
+                                        # PAID for it (church) and deserves a word
         while not self.exit_event.is_set():
             await asyncio.sleep(self._MEMBER_TICK)
             try:
@@ -10712,6 +10871,9 @@ class FF1PSPContext(CommonContext):
                                     f"missing member in slot 1 down to slot "
                                     f"{tgt + 1}")
                         continue        # rows moved; recompute next tick
+                gil_now = await self.read_gil()
+                paid = last_gil is not None and gil_now < last_gil
+                last_gil = gil_now
                 for row in enforce:
                     b = await self.psp.read(
                         self.sa(D.party_addr_sa(row, D.P_HP)), 4)
@@ -10723,13 +10885,20 @@ class FF1PSPContext(CommonContext):
                         await self.psp.write(
                             self.sa(D.party_addr_sa(row, D.P_HP)),
                             (0).to_bytes(2, "little"))
-                        if row in killed:
-                            # a held row came back to life = a church/Life/
-                            # Phoenix revival landed -> re-kill + tell the
-                            # player why their gil did nothing
+                        if row in killed and paid:
+                            # a held row came back to life AND gil dropped
+                            # this tick = the player paid a church for it ->
+                            # re-kill + say why their gil did nothing. Unpaid
+                            # revivals (a tent/inn heal reaching the row on a
+                            # bake older than v323, a scripted full heal)
+                            # are ours to undo quietly: printing this on
+                            # every rest was the 2026-09-04 report.
                             logger.info("  [party] a MISSING member cannot be "
                                         "revived -- find their item in the "
                                         "multiworld instead")
+                        elif row in killed:
+                            dlog.info(f"  [party] held row{row} healed to "
+                                      f"{hp} HP without a gil drop -- re-held")
                         killed.add(row)
                     st = (await self.psp.read(
                         self.sa(D.status_addr_sa(row)), 1))[0]
@@ -10773,6 +10942,90 @@ class FF1PSPContext(CommonContext):
                             f"  [party] {jn} JOINS the party (member "
                             f"{pr + 1})! Lv {lvl} lands at the next "
                             "battle victory")
+            except Exception:
+                # transient read failures (save block relocating) are expected
+                await asyncio.sleep(2.0)
+
+    # ---------------- level catch-up EXP (always on, no option) -------------
+    _CATCHUP_TICK = 0.5
+    # One battle's EXP award, sanity bound. Real awards stay far under this
+    # (even the Soul-of-Chaos superbosses pay five figures); a bigger jump is
+    # a savestate load, a Continue onto a further-along file, or the member
+    # loop's own join floor -- multiplying any of those would mint levels out
+    # of nothing, so a frame like that only ever REBASES the snapshot.
+    _CATCHUP_SANE_DELTA = 200_000
+
+    async def _catchup_loop(self):
+        """A member who is behind the rest of the party earns multiplied EXP
+        until the gap closes: 3x under 50% of the others' average level, 2x
+        under 70%, normal after that (see client/catchup.py for the math and
+        the reasoning).
+
+        Born for `starting_party_members`: the join level is rolled at
+        GENERATION (10..30), so a 4th member found next to a 65/65/50 party
+        arrives at Lv13 and is dead weight (live report 2026-09-08). The join
+        level itself is deliberately NOT touched -- it is the save-resident
+        join latch (P_EXP >= exp_for_level(join_level), see _member_loop), and
+        a level recomputed live would re-fire the join on every reload. The
+        member joins low and climbs fast instead. Nothing here is specific to
+        missing members: any row that falls behind catches up the same way.
+
+        MECHANISM: sample every row's P_EXP on FIELD frames only (records are
+        engine-owned in battle). A field frame that follows a battle and shows
+        a positive delta IS that battle's award, so the bonus is
+        `delta * (mult - 1)` written straight into P_EXP. The engine only
+        recomputes levels at a victory, so the bonus lands as levels at the
+        NEXT fight -- a one-fight lag, never a lost level.
+
+        WHAT IS DELIBERATELY NOT AWARDED: a delta with no battle behind it
+        (an EXP-bag item through grant_exp, the join floor write), a negative
+        delta anywhere (savestate rewind / Continue on another file) and an
+        implausibly large one. Each of those rebases the snapshot silently.
+        Held rows earn nothing to multiply and are excluded from every
+        average (their record still reads Lv1).
+
+        The state machine itself lives in CU.CatchupTracker so it can be
+        pinned offline (test_catchup.py) -- this loop only reads the game and
+        writes what step() hands back. A write that throws leaves the
+        tracker's snapshot ABOVE the real EXP, so the next frame reads a
+        negative delta and rebases: a lost bonus, never a doubled one."""
+        trk = CU.CatchupTracker(D.EXP_CAP, self._CATCHUP_SANE_DELTA)
+        self._catchup = trk             # debug-bundle / inspection handle
+        while not self.exit_event.is_set():
+            await asyncio.sleep(self._CATCHUP_TICK)
+            try:
+                if self.save_delta is None:
+                    trk.reset()
+                    continue
+                if await self._in_battle():
+                    trk.saw_non_field()
+                    continue
+                levels, exps = [], []
+                for r in range(D.PARTY_COUNT):
+                    levels.append(await self.psp.read_u32(
+                        self.sa(D.party_addr_sa(r, D.P_LEVEL))))
+                    exps.append(await self.psp.read_u32(
+                        self.sa(D.party_addr_sa(r, D.P_EXP))))
+                _kind, awards, caught = trk.step(
+                    levels, exps, self._member_missing_rows())
+                for row, (bonus, mult, avg, new, announce) in sorted(
+                        awards.items()):
+                    await self.psp.write_u32(
+                        self.sa(D.party_addr_sa(row, D.P_EXP)), new)
+                    # DEBUG LOG ONLY (user call 2026-09-09): the catch-up is
+                    # meant to be felt, not narrated -- a player-facing line
+                    # every tier change reads like a cheat notice.
+                    if announce:
+                        dlog.info(
+                            f"  [catchup] member {row + 1} is Lv{levels[row]} "
+                            f"against a party average of {avg:.0f} -- earning "
+                            f"{mult}x EXP up to Lv{CU.catchup_target(avg)}")
+                    else:
+                        dlog.info(f"  [catchup] row{row} +{bonus} EXP "
+                                  f"({mult}x, party avg {avg:.0f})")
+                for row in caught:
+                    dlog.info(f"  [catchup] member {row + 1} has caught up "
+                              "with the party -- normal EXP from here")
             except Exception:
                 # transient read failures (save block relocating) are expected
                 await asyncio.sleep(2.0)
@@ -12717,6 +12970,7 @@ class FF1PSPContext(CommonContext):
         Returns True to continue the bridge, False to abort it."""
         import functools
         from .launcher import kill_ppsspp, ensure_ppsspp
+        from .hostproc import stray_process_hint
         say = notify or (lambda m: logger.info(f"[FF1 PSP] {m}"))
         loop = asyncio.get_event_loop()
         say("The running game is patched for a DIFFERENT seed (bake tag "
@@ -12750,9 +13004,9 @@ class FF1PSPContext(CommonContext):
             "!!!  shop rows and item-name banks belong to another seed --",
             "!!!  checks would go missing and key items would be the vanilla",
             "!!!  ones, so the bridge is stopped instead.",
-            "!!!  FIX: close EVERY PPSSPP window (check Task Manager for a",
-            "!!!  stray PPSSPPWindows64.exe), do NOT load a savestate made on",
-            "!!!  another seed (use an in-game save), then reconnect.",
+            f"!!!  FIX: close EVERY PPSSPP window ({stray_process_hint()}),",
+            "!!!  do NOT load a savestate made on another seed (use an",
+            "!!!  in-game save), then reconnect.",
             "!!!  STILL BROKEN? Type  /logs  -- it saves one zip with",
             "!!!  everything needed to diagnose this; send it to whoever",
             "!!!  maintains this apworld.",
@@ -12927,6 +13181,9 @@ class FF1PSPContext(CommonContext):
             # starting_party_members: keep missing members soft-dead (field +
             # battle) and revive them when their job item arrives. See _member_loop.
             ("member", self._member_loop),
+            # level catch-up: a member behind the party's average earns 3x/2x
+            # EXP per battle until the gap closes. See _catchup_loop.
+            ("catchup", self._catchup_loop),
             # class rename: scroll-gated custom class names in the status menu
             ("classname", self._classname_loop),
             # scroll-gated custom party sprites: pins job_sprites art over the
@@ -12938,6 +13195,8 @@ class FF1PSPContext(CommonContext):
             ("movement", self._movement_loop),
             ("flags", self._flags_loop),
             ("openworld", self._openworld_loop),
+            # Map tab: the party's live overworld cell, ~1/s, change-driven
+            ("owmap", self._owmap_loop),
             ("grant", self._grant_loop),
             # poll-based chest detection (tier2-poll-chests): reads the chest
             # bitfield; no exec breakpoints, so JIT block-linking stays enabled
@@ -13136,13 +13395,14 @@ class FF1PSPContext(CommonContext):
                                         "features (dabble) restored")
             except Exception as e:
                 if "CPU not started" in repr(e) and not warned:
+                    from .hostproc import stray_process_hint
                     logger.error(
                         "  [ppsspp] Attached to PPSSPP but NO GAME is running "
                         "(CPU not started). This is usually PPSSPP's "
                         "'Could not load game. Memory init failed' error, caused "
                         "by a DUPLICATE/STALE PPSSPP instance holding the PSP "
-                        "memory. FIX: close ALL PPSSPP windows (check Task Manager "
-                        "for stray PPSSPPWindows64.exe), then relaunch so the game "
+                        f"memory. FIX: close ALL PPSSPP windows ({stray_process_hint()}), "
+                        "then relaunch so the game "
                         "actually boots. Nothing (party, items, shuffles) can apply "
                         "until the game is running.")
                     warned = True
@@ -13152,7 +13412,7 @@ class FF1PSPContext(CommonContext):
                 # attempt per 60s, three strikes then we stand down and tell
                 # the player. Remote targets are never auto-launched.
                 from .launcher import ppsspp_process_running, relaunch_last, \
-                    remote_psp_target
+                    remote_psp_target, state_dir
                 now = time.monotonic()
                 if (not remote_psp_target()
                         and not ppsspp_process_running()
@@ -13176,7 +13436,7 @@ class FF1PSPContext(CommonContext):
                         logger.error(
                             "  [ppsspp] Auto-relaunch failed 3 times -- giving "
                             "up. Start PPSSPP manually (the patched ISO is in "
-                            "ProgramData/Archipelago/ff1psp) or reconnect.")
+                            f"{state_dir()}) or reconnect.")
             await asyncio.sleep(3.0)
 
     async def _guard(self, loop_fn, name):
