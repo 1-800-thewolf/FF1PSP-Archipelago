@@ -310,6 +310,33 @@ class PPSSPPMem:
             self._close_handle()
             raise MemUnavailable("write failed (process gone?)")
 
+    async def write_guarded(self, address, data: bytes, guards=()):
+        """Write `data` only while every `(addr, expected)` guard still reads
+        exactly `expected`. True = written, False = a guard moved (nothing
+        written).
+
+        The guard reads and the write run back to back inside this one call
+        with no await in between, so no other client coroutine can run in the
+        gap and the window against the emulator thread is a few microseconds.
+        That is the point: engine heaps and resource banks are recycled the
+        moment the engine frees them, and the next pack's COMPRESSED stream is
+        staged at the tail of the recycled chunk -- a check-await-write gap was
+        long enough for v330's overworld paint to land in Crescent Lake's
+        stream mid-load (Eridose 2026-10-05, RA 0x088fba28)."""
+        for gaddr, want in guards:
+            raw = self._read_raw(self.handle, self._host(gaddr, len(want)),
+                                 len(want))
+            if raw is None:
+                self._close_handle()
+                raise MemUnavailable("read failed (process gone?)")
+            if raw != want:
+                return False
+        host = self._host(address, len(data))
+        if not self._write_raw(self.handle, host, data):
+            self._close_handle()
+            raise MemUnavailable("write failed (process gone?)")
+        return True
+
     async def read_u32(self, address):
         return struct.unpack("<I", await self.read(address, 4))[0]
 
@@ -378,6 +405,9 @@ class HybridPSP:
 
     async def write(self, address, data):
         return await self._memory_op("write", address, data)
+
+    async def write_guarded(self, address, data, guards=()):
+        return await self._memory_op("write_guarded", address, data, guards)
 
     async def read_u32(self, address):
         return await self._memory_op("read_u32", address)

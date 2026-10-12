@@ -1039,6 +1039,16 @@ def bake_hash32(bake: dict) -> int:
     if feats.get("_ow_hi"):
         h.update(b"owhi=")
         h.update(bytes(feats["_ow_hi"]))
+    # The open-progression grid bake (_ow_map) and the world_gates bake context
+    # (_world_gates) are dicts of toggles: the truthy-name fold above only sees
+    # the KEY, so two seeds differing in WHICH toggles are on hashed the same
+    # and shared a cached ISO carrying the other layout (gap closed 2026-09-14
+    # together with world_gates). Fold the values.
+    for ctx_key in ("_ow_map", "_world_gates"):
+        ctx = feats.get(ctx_key)
+        if isinstance(ctx, dict):
+            h.update((ctx_key + "=" + ",".join(
+                f"{k}:{int(bool(v))}" for k, v in sorted(ctx.items()))).encode())
     # crystals_needed changes the wrapper cave's baked threshold -> fold the
     # VALUE in explicitly (the truthy-name fold above would hash 3 == 2, and
     # would drop 0 entirely -- 0 is a meaningful value: orb opens immediately).

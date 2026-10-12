@@ -3430,6 +3430,8 @@ def apply_boss_minions(elf: bytearray, feats=None):
         swap_table += struct.pack("<H", int(fid)) + vanilla + adds
         assert len(swap_table) % _BMA_ENTRY_LEN == 0
     _bma_install(elf, swap_table)
+    from .ms2_bake import redirect_fids
+    _bma_install_pack_redirect(elf, redirect_fids(plan))
 
 
 def _bma_install(elf, swap_table):
@@ -3489,6 +3491,62 @@ def _bma_install(elf, swap_table):
         A.j(_BMA_READ_HOOK + 12), A.nop(),            # past the jal's delay slot
     ])
     E.install_detour(elf, _BMA_READ_HOOK, E.add_segment_cave(elf, read))
+
+
+# ONE SPRITE PACK PER DLC FORMATION (player report 2026-10-11, v333: Atomos +
+# Hundlegs at light -- Atomos drew as a purple Hundlegs over its own shadow).
+# The per-kind loader 0x08876F60 releases the battle's single pack handle and
+# loads each kind's pack at the same arena base, keeping pointers into it (full
+# RE in ms2_bake's ONE PACK PER FORMATION note), so every kind of a formation
+# must load the SAME pack. Its boss branch builds the name at 0x0887701C
+# (`jal sprintf` with a1 = "boss_%02x.pck", delay `move a2,s0` = mon-0x80);
+# the call is retargeted at a cave that, for a fid in the baked mask, swaps in
+# "ms2_%03x.pck" + the formation fid (the same [s3]+0x68A6 read the normal
+# branch makes) and tail-jumps to sprintf. ms2_bake mints that MS2_<fid> with
+# the boss's boss_xx.gim pair, so the following lookups resolve unchanged.
+# Mask bit n = fid 0x100+n, from ms2_bake.redirect_fids -- the bake's own
+# creation list, so the ELF can never name a pack the dpk lacks. Fids outside
+# the mask (no adds, vanilla bosses) keep the vanilla call byte-for-byte.
+_BPR_HOOK = 0x0887701C          # jal 0x08813B74 (sprintf)
+_BPR_SPRINTF = 0x08813B74
+_BPR_FMT_LO_W = 0x24A5BFAC      # @0x08877018 addiu a1,a1,-0x4054 -> "boss_%02x.pck"
+_BPR_DELAY_W = 0x02003021       # @0x08877020 move a2,s0 (mon - 0x80)
+_BPR_MS2_FMT = 0x0898BFDC       # "ms2_%03x.pck" (the normal branch's own string)
+_BPR_FID_OFF = 0x68A6           # lhu fid,0x68a6([s3]) -- as at 0x08877158
+
+
+def _bma_install_pack_redirect(elf, fids):
+    if not fids:
+        return
+    mask = 0
+    for fid in fids:
+        assert 0x100 <= fid <= 0x110, hex(fid)
+        mask |= 1 << (fid - 0x100)
+    got = (_read_word(elf, _BPR_HOOK - 4), _read_word(elf, _BPR_HOOK),
+           _read_word(elf, _BPR_HOOK + 4))
+    if got != (_BPR_FMT_LO_W, 0x0C000000 | (_BPR_SPRINTF >> 2), _BPR_DELAY_W):
+        raise ValueError("unexpected boss pack-name site @%#x: %s" % (
+            _BPR_HOOK, " ".join("%#010x" % w for w in got)))
+    fo = E.ram2file(_BPR_MS2_FMT)
+    if bytes(elf[fo:fo + 13]) != b"ms2_%03x.pck\0":
+        raise ValueError(f"ms2 pack format string moved from {_BPR_MS2_FMT:#x}")
+    cave = A.asm_labels([
+        A.lw("t0", 0, "s3"),
+        A.lhu("t0", _BPR_FID_OFF, "t0"),              # t0 = formation fid
+        A.addiu("t1", "t0", -0x100),
+        A.sltiu("t2", "t1", 0x11),
+        ("beq", "t2", "zero", "BPR_PLAIN"), A.nop(),  # not a DLC fid
+        A.li("t3", mask),
+        A.srlv("t3", "t3", "t1"),
+        A.andi("t3", "t3", 1),
+        ("beq", "t3", "zero", "BPR_PLAIN"), A.nop(),  # DLC fid without adds
+        A.li("a1", _BPR_MS2_FMT),
+        A.addu("a2", "t0", "zero"),                   # ms2_<fid>.pck
+        ("label", "BPR_PLAIN"),
+        A.j(_BPR_SPRINTF), A.nop(),                   # ra still = hook + 8
+    ])
+    struct.pack_into("<I", elf, E.ram2file(_BPR_HOOK),
+                     struct.unpack("<I", A.jal(E.add_segment_cave(elf, cave)))[0])
 
 
 # --- feature: minion death serializer (multi-kill dissolve-freeze fix) -----------
@@ -9850,6 +9908,227 @@ def apply_trap_round_zero(elf: bytearray, feats=None):
                      E.add_segment_cave(elf, _trap_cave(mb_vaddr)))
 
 
+
+# --- world_gates (v331): engine-native world-changing AP items ----------------
+# The Lufenian span, the two trail boulders and the Mount Gulg seal used to be
+# client-side grid paints (ApClient._openworld_loop). Those lose every race
+# against the overworld scene init: fn 0x0883d864 re-derives the vehicle mode
+# from the ATT low byte of the tile under the party (0x0f -> ship), and it runs
+# on the freshly decompressed VANILLA grid seconds before the client repaints --
+# a save loaded on the painted pier woke the party up in a free ship
+# (MeyrimeFF1, 2026-09-14). The engine's own world-change mechanism is a TILE-ID
+# REMAP chosen at map load (fn 0x08839cb4, the block below): story flag 11
+# (canal open) set -> no remap; else flag 3 (bridge built) ? TABLE_A : TABLE_B.
+# The map init stores the pointer at map+0x1ac and the tile getter 0x08895428
+# runs every id through it -- the unbuilt Cornelia bridge IS this (0x171 ->
+# 0x184 under TABLE_B); the tables differ in exactly six ids. This cave
+# replaces the selection: it copies the vanilla choice (identity when there is
+# none) into its own 512-entry buffer, then writes one entry per baked
+# WORLD_GATE_ROW -- remap[gate_id] = open_id while the row's bit is set in the
+# client-owned save byte save+0x834 (bits 4-7; 0-3 are the bonus-crystal
+# shadow bits), closed_id otherwise -- and hands the buffer back in s4. The
+# grid on disc holds the gate ids at the gated cells (map_bake), so the state
+# is resolved by the engine before anything reads a tile: no client timing,
+# no relocation, and the byte rides the save file. The client sets the bits on
+# item receipt (re-asserted from its sticky won-set) and pokes the live buffer
+# for immediacy (WGAT mailbox: header, rows, buffer at WG_MB_BUF_OFF).
+#
+# Static RE 2026-09-14 (see the ow-scene-init-vehicle-derivation and
+# ow-map-object-grid-pointer memories). Hook block audit: no branch or jump
+# from outside targets 0x08839D40..0x08839D70; the block's own beql/b targets
+# all lie inside it; the join 0x08839D74 (bnel s1,zero) expects s4 = table ptr.
+# s0 = save-struct pointer at the hook (set at 0x08839CE8, callee-saved across
+# the getStoryFlag calls the block itself makes).
+_WG_HOOK = 0x08839D3C
+_WG_JOIN = 0x08839D74
+_WG_BLOCK = (0x0E219E47, 0x2404000B, 0x50400003, 0x24040003, 0x10000009,
+             0x0000A021, 0x0E219E47, 0x00000000, 0x50400004, 0x3C140894,
+             0x3C140894, 0x10000002, 0x26945254, 0x26944E54)
+_WG_TABLE_A = 0x08945254        # canal plugged, bridge built
+_WG_TABLE_B = 0x08944E54        # canal plugged, bridge unbuilt
+_WG_TABLE_A_ROWS = {0x163: 0x012, 0x164: 0x0E1, 0x165: 0x010,
+                    0x173: 0x022, 0x174: 0x0F1, 0x175: 0x02F}
+_WG_TABLE_B_EXTRA = {0x160: 0x018, 0x161: 0x019, 0x162: 0x01A,
+                     0x170: 0x183, 0x171: 0x184, 0x172: 0x185}
+_WG_FLAG_CANAL = 11
+_WG_FLAG_BRIDGE = 3
+_WG_MB_MAGIC = b"WGAT"
+_WG_MAX_ROWS = 15               # == len(openworld_data.WORLD_GATE_IDS)
+_WG_ROW_LEN = 8                 # u16 gate, u16 open, u16 closed, u8 mask, u8 0
+_WG_HDR_LEN = 8                 # magic, u16 nrows, u16 0
+WG_MB_BUF_OFF = _WG_HDR_LEN + _WG_MAX_ROWS * _WG_ROW_LEN   # 128
+_WG_ENTRIES = 512
+_WG_CODE_OFF = WG_MB_BUF_OFF + _WG_ENTRIES * 2             # 1152
+
+
+def _wg_rows(feats):
+    from . import openworld_data as OW
+    ctx = (feats or {}).get("_world_gates") or {}
+    rows = OW.world_gate_rows(trails=bool(ctx.get("trails")),
+                              gulg=bool(ctx.get("gulg")))
+    if len(rows) > _WG_MAX_ROWS:
+        raise ValueError(f"world_gates: {len(rows)} rows > {_WG_MAX_ROWS}")
+    return rows
+
+
+def _wg_cave(base, rows):
+    """Mailbox header + rows + remap buffer + code, assembled for `base`."""
+    from . import openworld_data as OW
+    data = bytearray(_WG_MB_MAGIC + struct.pack("<HH", len(rows), 0))
+    for gid, o, c, m, _cells in rows:
+        data += struct.pack("<HHHBB", gid, o, c, m, 0)
+    data += b"\0" * (WG_MB_BUF_OFF - len(data))
+    data += b"\0" * (_WG_ENTRIES * 2)
+    assert len(data) == _WG_CODE_OFF
+    rows_addr = base + _WG_HDR_LEN
+    buf_addr = base + WG_MB_BUF_OFF
+    code = A.asm_labels([
+        A.addiu("sp", "sp", -0x10),
+        A.sw("ra", 0, "sp"),
+        # vanilla choice: canal open -> identity; else bridge built ? A : B
+        A.addiu("a0", "zero", _WG_FLAG_CANAL),
+        A.jal(_BSS_GETSTORYFLAG), A.nop(),
+        ("bne", "v0", "zero", "WG_IDENT"), A.nop(),
+        A.addiu("a0", "zero", _WG_FLAG_BRIDGE),
+        A.jal(_BSS_GETSTORYFLAG), A.nop(),
+        ("beq", "v0", "zero", "WG_TABB"), A.nop(),
+        A.li("t0", _WG_TABLE_A),
+        ("beq", "zero", "zero", "WG_COPY"), A.nop(),
+        ("label", "WG_TABB"),
+        A.li("t0", _WG_TABLE_B),
+        ("beq", "zero", "zero", "WG_COPY"), A.nop(),
+        ("label", "WG_IDENT"),
+        A.addu("t0", "zero", "zero"),
+        # copy 512 entries (identity when t0 == 0) into our buffer
+        ("label", "WG_COPY"),
+        A.li("t1", buf_addr),
+        A.addu("t2", "zero", "zero"),
+        ("label", "WG_CLOOP"),
+        A.sll("t3", "t2", 1),
+        ("beq", "t0", "zero", "WG_CID"),
+        A.addu("t4", "t2", "zero"),                 # delay: identity value
+        A.addu("t5", "t0", "t3"),
+        A.lhu("t4", 0, "t5"),
+        ("label", "WG_CID"),
+        A.addu("t5", "t1", "t3"),
+        A.sh("t4", 0, "t5"),
+        A.addiu("t2", "t2", 1),
+        A.sltiu("t6", "t2", _WG_ENTRIES),
+        ("bne", "t6", "zero", "WG_CLOOP"), A.nop(),
+        # gates: remap[gate] = (save_byte & mask) ? open : closed
+        A.lbu("t4", OW.WORLD_GATE_BYTE_OFF, "s0"),
+        A.li("t5", rows_addr),
+        A.addiu("t6", "zero", len(rows)),
+        ("beq", "t6", "zero", "WG_DONE"), A.nop(),
+        ("label", "WG_RLOOP"),
+        A.lhu("t7", 0, "t5"),
+        A.lhu("t8", 2, "t5"),
+        A.lhu("t9", 4, "t5"),
+        A.lbu("t3", 6, "t5"),
+        A.and_("t3", "t3", "t4"),
+        ("bne", "t3", "zero", "WG_OPEN"), A.nop(),
+        A.addu("t8", "t9", "zero"),
+        ("label", "WG_OPEN"),
+        A.sll("t7", "t7", 1),
+        A.addu("t7", "t1", "t7"),
+        A.sh("t8", 0, "t7"),
+        A.addiu("t5", "t5", _WG_ROW_LEN),
+        A.addiu("t6", "t6", -1),
+        ("bne", "t6", "zero", "WG_RLOOP"), A.nop(),
+        ("label", "WG_DONE"),
+        A.addu("v0", "t1", "zero"),
+        A.lw("ra", 0, "sp"),
+        A.jr("ra"),
+        A.addiu("sp", "sp", 0x10),
+    ])
+    return bytes(data) + code
+
+
+def apply_world_gates(elf: bytearray, feats=None):
+    got = tuple(_read_word(elf, _WG_HOOK + 4 * i) for i in range(len(_WG_BLOCK)))
+    if got != _WG_BLOCK:
+        raise ValueError("world_gates: remap-selection block @0x08839D3C is not "
+                         "vanilla: " + " ".join(f"{w:08x}" for w in got))
+    for tbl, want in ((_WG_TABLE_A, _WG_TABLE_A_ROWS),
+                      (_WG_TABLE_B, {**_WG_TABLE_A_ROWS, **_WG_TABLE_B_EXTRA})):
+        for tid, mapped in want.items():
+            v = struct.unpack_from("<H", elf, E.ram2file(tbl + tid * 2))[0]
+            if v != mapped:
+                raise ValueError(f"world_gates: remap table @{tbl:#x}[{tid:#x}] "
+                                 f"reads {v:#x}, expected {mapped:#x}")
+    rows = _wg_rows(feats)
+    base = E.add_segment_cave(elf, _wg_cave(0, rows))
+    E.cave_write(elf, base, _wg_cave(base, rows))
+    entry = base + _WG_CODE_OFF
+    hook = A.assemble([
+        A.jal(entry), A.nop(),
+        A.beq("zero", "zero", (_WG_JOIN - (_WG_HOOK + 8 + 4)) // 4),
+        A.addu("s4", "v0", "zero"),                 # delay: s4 = our table
+    ]) + A.nop() * (len(_WG_BLOCK) - 4)
+    E.apply_patches(elf, [(_WG_HOOK, hook)])
+
+
+# --- foot_stays_foot (v331, reworked v332, always-on) ------------------------
+# Overworld scene init fn 0x0883d864: for vehicle modes 0/1/2 it re-derives
+# save+0x2A8 from the ATT low byte of the tile under the party (0x0f -> ship 2,
+# 0x09/0x0a/0x0b -> canoe 1, 0x11 -> keep, else foot 0). Vanilla NEEDS that for
+# mode 0: Exit / Teleport / Emergency Exit out of a dungeon entered by ship or
+# canoe (Lifespring Grotto, Waterfall Cavern) lands the party on the entrance
+# tile on foot and this re-derive is what boards the vehicle.
+#
+# Our canal crossing (map_bake.CANAL_CROSS_ID) is ATT 0x000F, walk + sail -- a
+# tile class vanilla does not have (its only 0x0f tiles are 0xF00F, foot-
+# blocked ocean; whole table checked 2026-10-03). The init read the low byte,
+# saw "ship", and a party saved on foot on the deck woke up in a free ship.
+#
+# v331 answered with a one-word retarget that skipped the re-derive for EVERY
+# mode-0 load, which also killed the Exit boarding above: the party stood on
+# the water beside the ship, softlocked (MeyrimeFF1, 2026-10-03). v332 teaches
+# the init the missing class instead: low byte 0x0f AND foot-legal (ATT high
+# nibble != 0xF) AND mode 0 -> keep; everything else runs the vanilla chain.
+# No vanilla tile satisfies that, so vanilla behaviour is untouched by
+# construction, and any walk+sail tile we add later is covered with no list.
+# (The Lufenian span needs none of this: world_gates resolves it to 0x171,
+# ATT 0x0011, which the vanilla chain already keeps.)
+#
+# Detour on the two words after the ATT getter returns (v0 = full ATT u16;
+# t0/t1 are dead across the jal). Neither word is a branch target.
+_FSF_HOOK = 0x0883D9E4
+_FSF_HOOK_W = (0x304300FF,      # andi  v1,v0,0xff
+               0x2402000B)      # addiu v0,zero,0xb
+_FSF_BACK = _FSF_HOOK + 8
+_FSF_KEEP = 0x0883DB84          # lh v1,0x2a0(s0): the chain's common exit
+_FSF_MODE_OFF = 0x2A8
+
+
+def _fsf_cave():
+    return A.asm_labels([
+        A.andi("v1", "v0", 0xFF),                   # displaced
+        A.addiu("t0", "zero", 0x0F),
+        ("bne", "v1", "t0", "FSF_BACK"),            # not a sail tile
+        A.srl("t1", "v0", 12),                      # delay: foot-block nibble
+        ("beq", "t1", "t0", "FSF_BACK"),            # 0xF00F ocean -> vanilla
+        A.lw("t1", _FSF_MODE_OFF, "s0"),            # delay
+        ("bne", "t1", "zero", "FSF_BACK"),          # ship/canoe -> vanilla
+        A.nop(),
+        A.j(_FSF_KEEP), A.nop(),                    # on foot, walk+sail: keep
+        ("label", "FSF_BACK"),
+        A.j(_FSF_BACK),
+        A.addiu("v0", "zero", 0x0B),                # delay: displaced
+    ])
+
+
+def apply_foot_stays_foot(elf: bytearray, feats=None):
+    got = (_read_word(elf, _FSF_HOOK), _read_word(elf, _FSF_HOOK + 4))
+    if (got[0] >> 26) == 0x02 and got[1] == 0:
+        return                                      # already patched (j cave)
+    if got != _FSF_HOOK_W:
+        raise ValueError(f"foot_stays_foot: {_FSF_HOOK:#x} reads "
+                         f"{got[0]:#010x} {got[1]:#010x}, expected "
+                         f"{_FSF_HOOK_W[0]:#010x} {_FSF_HOOK_W[1]:#010x}")
+    E.install_detour(elf, _FSF_HOOK, E.add_segment_cave(elf, _fsf_cave()))
+
+
 FEATURES = {
     # Super Dash: hold-the-button speed boost on every surface, always baked
     # (options.ON_DISC_ALWAYS). Gated at RUNTIME on the Config Dash bit + dash
@@ -9947,6 +10226,14 @@ FEATURES = {
     # starting_party_members Phase 3: held-row hiding in the pause panel +
     # battle status window, char-select paging skips, RPMK mask mailbox.
     "reduced_party": apply_reduced_party,
+    # Engine-native world-changing AP items (span / boulders / Gulg seal
+    # resolved by the map-load remap from the client-owned save byte). Rides
+    # unlockable_northern_foot_trails or mount_gulg_key; bake context
+    # feats["_world_gates"] = {"trails": bool, "gulg": bool} picks the rows.
+    "world_gates": apply_world_gates,
+    # A party on foot on a walk+sail tile (the canal crossing) stays on foot
+    # at scene init -- always-on (options.ON_DISC_ALWAYS); vanilla-neutral.
+    "foot_stays_foot": apply_foot_stays_foot,
     # MUST STAY LAST: reserves the cave segment's bss tail; add_segment_cave
     # refuses to append after it (see eboot_patch.cave_bss_tail).
     "spell_tomes": apply_spell_tomes,
@@ -10475,7 +10762,8 @@ def assert_no_dpk_collisions(iso_path):
 # patched-ISO cache key: without it, a fixed/retuned feature would silently keep
 # reusing a stale cached ISO built by the OLD code (iso size+mtime+feature names
 # all unchanged).
-PATCHER_VERSION = 330 # v330: BLOOD MAGIC READS THE ENGINE'S OWN ITEM COMMIT TABLE (2026-09-10). Both battle item menus (inventory list, equipped submenu) end their confirm by writing the row's {cat, id, slot} to ctx+0x683C+row*3, and the table survives untouched until the next round's menu (live-proven). The cave now reads that entry for the acting row and charges when the gear's +7 proc equals the committed spell -- no ticket, no resolver stamp leg, no C+0x57 pair, no state of our own; the equipment_rune_gate detour is the gate alone again. Replaces v221's global ticket and v329's per-row ticket. See _BLOOD_COMMIT_TBL.
+PATCHER_VERSION = 333 # v333: DLC BOSS + ADDS LOAD ONE SPRITE PACK (player report 2026-10-11: Atomos at boss_minions=light drew as a purple Hundlegs, Atomos' own big shadow still under it). The per-kind battle sprite loader 0x08876F60 keeps ONE pack handle (battle+0x80), releases it before each kind and keeps pointers INTO the loaded pack; releasing a bank's last file resets its arena cursor, so the next kind's pack lands on the same base. Vanilla survives because every kind reloads the same pack; a DLC boss (BOSS_0C) then a normal add (MS2_10C) overwrote the boss's GIM with Hundlegs' (both first bodies at +0x60) while the boss's palette was already taken. Every DLC fid with adds now gets an MS2_<fid> carrying the boss's (and any boss-id add's) BOSS pair too, and a cave on the boss branch's name sprintf (0x0887701C) opens ms2_<fid>.pck for exactly those fids (ms2_bake.redirect_fids feeds both halves). Bake changes for every boss_minions seed with DLC adds. // v332: FOOT STAYS FOOT BY TILE CLASS, NOT BLANKET (player report MeyrimeFF1 2026-10-03: Emergency Exit out of Lifespring Grotto / Waterfall Cavern left the party standing on the water beside the ship, softlocked). v331's one-word retarget skipped the scene-init vehicle re-derive for EVERY mode-0 load, but vanilla Exit/Teleport out of a ship/canoe-entered dungeon arrives on foot and relies on that re-derive to board. The 0x0883D9B8 branch is vanilla again; a cave after the ATT getter (0x0883D9E4) keeps mode 0 only on a walk+sail tile (low byte 0x0f, high nibble != 0xF) -- a class vanilla has no member of, ours has one (canal crossing 0x174 = 0x000F). A save made while stranded self-heals on load.
+                      # v331: WORLD GATES + FOOT STAYS FOOT (2026-09-14). The world-changing AP items (Lufenian span, both trail boulders, the Mount Gulg seal) are now resolved by the ENGINE: fn 0x08839cb4 picks a 512-entry tile-id remap at every overworld load (flag 11 canal / flag 3 bridge -- the unbuilt Cornelia bridge is 0x171->0x184 under table B); apply_world_gates hooks that choice, copies it into its own buffer and writes remap[gate_id] = open/closed per WORLD_GATE_ROWS from the client-owned save byte save+0x834 bits 4-7. The trails base paint + gate ids are baked into MAP_00_AMD.BIN (map_bake, feats["_world_gates"]). Fixes the free ship after loading on the pier: the scene init (0x0883d864) re-derives the vehicle mode from the tile under the party and saw vanilla water where the client had not painted yet. foot_stays_foot (always-on) retargets that init's mode-0 branch so a party saved on foot is never put in a ship/canoe by the tile (covers the canal bridge deck). bake_hash32 now folds the _ow_map / _world_gates toggle VALUES. // v330: BLOOD MAGIC READS THE ENGINE'S OWN ITEM COMMIT TABLE (2026-09-10). Both battle item menus (inventory list, equipped submenu) end their confirm by writing the row's {cat, id, slot} to ctx+0x683C+row*3, and the table survives untouched until the next round's menu (live-proven). The cave now reads that entry for the acting row and charges when the gear's +7 proc equals the committed spell -- no ticket, no resolver stamp leg, no C+0x57 pair, no state of our own; the equipment_rune_gate detour is the gate alone again. Replaces v221's global ticket and v329's per-row ticket. See _BLOOD_COMMIT_TBL.
                       # v329: BLOOD MAGIC TAXES INVENTORY ARMOR + PER-ROW TICKET (user report 2026-09-09: Healing Helm activated from the item list cost nothing while Healing/Judgment Staff cost). The v221 ticket only stamped on the EQUIPPED-gear submenu caller and the cave's inventory leg only accepted cat 2, so armor confirmed from the INVENTORY list (cat 3 at C+0x57) was never charged; the single global slot was also burned by any other actor's item action. Ticket is now 4 per-row slots stamped/cleared on BOTH committing callers, and the inventory leg reads cat 2 (weapon table) or cat 3 (armor table). Superseded by v330.
                       # v328: CRYSTALS GATE OWNS ALL FOUR ANSWERS (user report 2026-09-09: crystals_needed=4, tracker 3/4, Black Orb opened). The vanilla Chaos Shrine EVM scripts check only Marilith/Kraken/Tiamat (19/29/34) -- Lich (17) is implied by vanilla story order (Canoe needs Lich), which open progression breaks. The crystal leg in the getStoryFlag wrapper now installs at every N and answers (count >= needed) for all four fiend ids inside the Shrine in BOTH directions, instead of falling through to the real bits when count < needed. Bake changes for every seed. v327: LAND EDGE ZONE CLAMP (follow-up to v326, user call 2026-09-06). apply_terrain_pools (desert + class-9) and apply_northern_river_encounters computed the same unclamped zone as the ocean cave, so the ninth column wrapped onto column 0 one row down for them too. Both now clamp zx and zy to 7. Only 33 non-ocean cells sit in the overhang on the shipped map (21 plain, 12 shallows, zero desert/class-9/river), so this is a rule change rather than a visible fix -- but open_progression edits the grid, so the tile set is not a guarantee. The map and both generators (ow_map.zone_of, gen_bestiary_areas, gen_ow_minimap) clamp to match. NOT changed: plain-land "Overworld" zones are picked by the ENGINE, not by us (we never hook that select), so those 21 cells keep whatever the engine does -- and whether the engine itself wraps has NOT been verified, only assumed from the shared formula. The map clamps them, so if the engine does wrap, the map and the game disagree on 21 grass cells at the extreme east border. Closing that needs an always-on hook on the engine's own land zone select, which was explicitly declined 2026-09-06 as not worth changing vanilla encounters over 21 tiles. // v326: MAP-EDGE ZONE WRAP (player report 2026-09-06, the vertical band on the Bestiary Map right edge). The +7 zone bias yields grid index 8 for coords 249..254. v233 guarded zone >= 64, which covers the ninth ROW, but the ninth COLUMN wraps instead of overflowing: zone = 8 + 8*zy is column 0 of the NEXT row, so zone_of(250,100) == zone_of(0,132) == 32. 1461 east-edge ocean cells read the far-west pool one row south (NW above y=121, SW below), and 1530 south-edge cells fell to vanilla. Both indices are now clamped to 7 in the regional-ocean cave (idx - (idx>>3)), so the edges join the zone beside them. Land features use the same formula and were audited but NOT changed. Mirrored by ow_map.ocean_zone_of. // v325: STARTING LAKE NO LONGER ROLLS SE OCEAN (player report 2026-09-06). Regional Ocean assigned each 32x32 zone by majority vote, so zone 38 -- the bay east of Cornelia outside Pravoka, 150 starting-lake tiles vs 360 outer tiles -- went to the SE pool and the pre-canal lake rolled White Sharks and Sahagin Queens. The generator rule is now a veto (any zone holding a basin tile is pool 0, re_only/build_ocean_regions.compute_zone_pool) and zone 38 is out of _OC_POOL_ZONES[4]; its 360 outer tiles go vanilla with it, the same trade zones 35/36/37/43/52 already make. Zone table is baked on disc, hence the bump. Mirrored in ow_map.OC_POOL_ZONES. // v324: BOSS ADDS ONLY IN SCRIPTED FIGHTS (player report 2026-09-05). A random encounter of a minion-host formation (Marsh Cave Piscodemon 0x1C, every boss cameo) spawned the plan's adds because they live in the formation record. Two caves in apply_boss_minions: the random-encounter commit tail latches RANDOM, the battle-start fid read consumes it and copies slots 1-3 from the vanilla bytes (random) or the adds (scripted). See the _BMA_* block. // v323: REST HEAL SKIPS HELD ROWS (player report 2026-09-04). Tent/Cottage and inn heal loops now skip RPMK-held rows on disc (_RP_REST_T/_I caves), so a rest can no longer revive a soft-dead missing member; closes the "save prompt shows 4 members after a tent" race and the per-rest "MISSING member cannot be revived" log spam. // v322: Northern foot trail, Mt Gulg key, game crash related to missing party members, other smaller bugs // v321: PHANTOM SPELL DOTS ON HELD MAGIC-SHOP ROWS (player report 2026-09-04). The reduced_party leg-13 cave returns jr ra for a held row at the magic shop's member-strip call site 0x08820D8C -- but the helper it skips (0x08820E18) also CLEARS and REBUILDS that row's spell-slot dot word at ctx+0x7080+row*4, and it is the ONLY store to that word in the whole module (scanned 0x08820000..0x08824000). So a held column rendered whatever bits the word last carried: three missing members each showed a filled Lv1 dot while their spell blocks (rec+0x21, u8[8][3]) were all zero. Save state was never wrong -- display only, and only when the stale value is nonzero, which is why the gap shipped with the feature (06a2c63) and went a month unreported. Fix: the held leg now zeroes ctx+0x7080+row*4 before jr ra (a0 = ctx at the call site, v0 = the mask test's dead scratch), so a held row draws three empty slots. Equip-shop twin unchanged -- its helper writes no ctx word. Cave bytes change, hence the bump. // v320: ONE DEAD-SPACE ALLOCATOR + SYMPTOM MACHINERY REMOVED (2026-09-03). dpk_space.DonorPool is built once in stage 3 and handed to every dpk baker: extern/caravan claim() their fixed J1 records up front, job_sprite_bake and ms2_bake free/coalesce/alloc from what remains. An extent leaves the pool exactly once, so two live records cannot overlap by construction; reserved_names, _donor_pool, donors_used and extra_reserved are gone (three collisions in a month were all that convention failing). assert_no_dpk_collisions stays as the invariant. Removed from the disc: the v299/v311 null-holder guards, the v318 STLR recorder and the FF1PSP_FORCE_* harnesses -- all built to chase a symptom of the collision, none needed now that it cannot occur. Cave bytes change, hence the bump. // v319: ROOT CAUSE FIXED -- ms2_bake._donor_pool handed out FM_DBG_ debug donors even when another baker had reserved them (2026-09-03). Reproduced the player's exact bake and party state locally with the v318 recorder: the sprite ctor's caller was fn 0x08877564 (per-row JOB%02x.gim from Job_Normal.pck), Job.oti/Job.aob/JOBxx all resolved null because the pack loaded into slot 3 entry 5 decompressed to MS_14.GIM/MS_14_S.GIM -- MS2_102.PCK (DLC fid 0x102, minted for the player's boss_minions_plan) had been written at 0x2ff6800, the FM_DBG_CAMPJ1 extent that job_sprite_bake had already relocated JOB_NORMAL.PCK onto (and correctly reported). The reserved check in _donor_pool only guarded the FM_*J1/J2 branch, not FM_DBG_. Fix: `n not in reserved` now gates BOTH branches. Plus a LOAD-BEARING post-bake audit (assert_no_dpk_collisions) that raises if any two non-donor records share bytes, so this class can never bake silently again. The on-disc null-holder guards (v311) and the STLR recorder (v318) stay; every earlier mitigation was already retired in v318. Bake output changes, hence the bump. // v318: MITIGATIONS RETIRED, STILLBORN RECORDER SHIPPED (2026-09-03). On-disc state returns to v311 (SNGD guards only). v314-v317 each made one null non-null and relocated the crash one dereference downstream; the final player bundle (RA 0x088fba28, v0 inside our cave, a0 = 0x8746341 garbage) showed the engine mutating the injected objects themselves. Root cause was never identified because nothing recorded WHICH caller handed the ctor a null GIM. New read-only STLR ring at the ctor's loader-failure point (0x088FB88C) records caller RA, GIM ptr, size, a3, t0, kind and obj for the last 8 failures; the client logs and the bundle carries them. Also: Violet's exact bake (her on_disc + boss_minions_plan + real key names, worst-case remote bank) reproduced offline and audited -- ZERO live-vs-live dpk collisions, JOB_NORMAL.PCK at its vanilla offset -- so the 'missing/relocated pack' cause of RA 0x088fba28 is ruled out for her seed. Cave bytes change, hence the bump. // v317: CLOSED SAFE OBJECT GRAPH -- ends the null-deref whack-a-mole (2026-09-03). FIFTH attempt; the previous four each fixed one dereference and were killed by the next one downstream. What finally made the pattern visible: the sentinel cell 0x089E891C is not 'uninitialised bss' and was not 'released to zero' (both earlier diagnoses were WRONG) -- it is EXPLICITLY BORN NULL by `lui v0,0x89f / sw zero,-0x76e4(v0)`, and there are SIX identical initialisers (0x088E7524, 0x088E7C70, 0x088E812C, 0x088E97F8, 0x088E990C, 0x088FC324), one per accessor function. v315/316 hooked the fallback TABLE head inside only ONE of those six functions, so whichever accessor won the race in the player's session left the hook unfired -- the bundle showed fallback_fix_count = 0 and the identical crash. Root shape: consumers dereference the sentinel WITHOUT a null check (`lw a0,(v1); lw t9,8(a0); lw t9,N(t9); jalr t9`, 228 such sites) while the release path DOES null-check it, so null is a meaningful 'no resource' value the consumers simply fail to honour. THE FIX: a closed fixed point rather than another point patch. SAFE_OBJ(0x100) has +0 = itself and +8 = SAFE_VTBL; SAFE_VTBL(0x100) is 64 slots all pointing at SAFE_STUB; and SAFE_STUB RETURNS &SAFE_OBJ (lui/jr/ori, address in the delay slot) instead of 0 -- that return value is what closes the loop, because a consumer that dereferences the RETURN lands back on safe memory instead of on a fresh null, which is exactly how every previous fix relocated the crash one frame later. All six sentinel initialisers now store &SAFE_OBJ instead of zero, so the cell is born VALID regardless of which accessor runs first; the ctor obj+0xC redirect is kept and points at the same SAFE_OBJ. Every other offset of SAFE_OBJ reads 0, which is what the engine's own empty paths expect (counts/sizes -> loops iterate zero times); we deliberately do NOT fabricate a resource with real dimensions, which was v312 and terminated PPSSPP. All 6 sites scanned: identical shape, branch-target clean, none a delay slot. // v316: PIN THE SAFE_ENTRY REFCOUNT (2026-09-03). v315's SAFE_ENTRY started its refcount at 0 and would have survived exactly ONE acquire/release cycle. Caught by walking the deref chain against live PPSSPP RAM rather than trusting static verification: after one simulated acquire, the game's own release path ran and SAFE_ENTRY[+0] came back ZERO on the next read. Cause -- these resource-ref cells are REFCOUNTED, and the release leg at 0x088fb964..0x088fb994 decrements [cell+8], and when the result is not > 0 it calls the destructor and executes `sw zero, (v0)`, nulling the resource pointer at [cell+0]. So a zero-initialised refcount is self-defeating: acquire 0->1, release 1->0, bgtz fails, our +0 pointer is zeroed, and the very next deref crashes exactly as before. This ALSO corrects the v315 root-cause note: 0x089E891C did not read 0 because it was uninitialised bss, it read 0 because it had been released to zero by this same path. Fix: SAFE_ENTRY[+8] is pinned at 0x40000000, so every release takes the `bgtz` branch, the teardown is unreachable, and +0 is never nulled. Value chosen far above any plausible acquire depth and far below overflow so the engine's own arithmetic stays well-defined in both directions. // v315: STILLBORN-SAFE HOLDER + FALLBACK ARRAY (2026-09-03). Player bundle proved v314 alone was insufficient: SBSH counter went up (ctor fix intercepted one stillborn), SNGD counters stayed 0 (guards not needed), but the game still crashed at 0x088fe1f8 with v1 = 0x089E891C. That address is fallback+0xB4 -- the second element of a stride-0xB4 array of static empty resource records. It's reached via a completely different code path than the ctor fix covers: function 0x088fe180 (44 callers) reads a resource pointer by calling obj->vtable[+0x6c] (fn 0x088e97c8), which returns 0x089E8938 (the head of the fallback array) whenever the requested resource index is out of bounds -- which is TRUE for any object with obj[+0x9c] == 0 (a stillborn). The caller then does `lw v1, ([0x089E8938])` = 0x089E891C, `lw a0, ([0x089E891C])` = 0 (bss), and jalr's through 0. v314's obj+0xC fix doesn't help here because this path never touches obj+0xC. Fix v315 adds a SECOND hook at 0x088e987c (inside vtable[+0x6c]'s one-time init sequence; site scanned clean, not a delay slot). Right after the vanilla init writes 0x089E891C to 0x089E8938, our hook OVERWRITES that cell with &SAFE_ENTRY (a 12-byte cave struct whose +0 field holds &SAFE_INTERMEDIATE, so `a0 = [SAFE_ENTRY]` is non-null and the deref chain resolves through cave memory to STUB). The init is gated by a marker byte at 0x089E8928 and never runs a second time, so a single overwrite persists forever. Extended SAFE_ENTRY to 12 bytes to accommodate the fallback-path caller's refcount write at [SAFE_ENTRY+8]; the ctor path doesn't touch +8, and both hooks now share the same struct. SBSH mailbox now has two counters (+4 ctor, +8 fallback) so a bundle names which fix fired. Only `at` and `v0` are clobbered on the second hook's path, and both are dead there (v0 was 0x089F0000 from lui, we restore it explicitly). Site scan clean -- word before is `sw v1, -0x76c8(v0)`, no delay slot. // v314: STILLBORN-SAFE HOLDER -- THE REAL FIX FOR THE NULL-HOLDER CRASH FAMILY (2026-09-03). Live-fired reproduction on the dev machine (FF1PSP_FORCE_STILLBORN=1) crashed on the first battle after boot at 0x089002c0 -- a FOURTH deref site, in function 0x08900218, with the SAME idiom the two v311 guards catch at 0x088FBA14 and 0x088FBA8C (`lw a0,(v0); lw t9,8(a0); lw t9,N(t9); jalr t9`). A module-wide scan showed 228 sites using that pattern -- guarding derefs was never going to end this. Fault is upstream: obj+0xC points at the empty fallback 0x089E8868 whose first word is 0. Fix (v2 -- v1 attempted a .bss init, live-tested and found the engine actively zeroes 0x089E8868 back to 0 during boot, unwinnable) hooks the sprite ctor 0x088fb814 at 0x088FB88C (first insn AFTER `jal 0x88e7370` returns; scanned clean, not a delay slot -- the first draft hooked 0x088FB888 which IS the jal's delay slot and would have been architecturally undefined, caught in static verification). On v0 == 0 the cave writes obj+0xC = &SAFE_HOLDER where SAFE_HOLDER is a cave-resident three-level chain: holder cell contains &INTERMEDIATE, intermediate's +8 slot contains &VTBL, VTBL is 16 slots each pointing at STUB (`jr ra; move v0, zero`). Every downstream deref chain now safely resolves through cave memory to the stub, returning 0. The two v311 null-holder guards become STRUCTURALLY UNREACHABLE because a0 is never null. Only `at` is clobbered on the fix path. LIVE-VERIFIED on the dev machine BEFORE shipping: harness ISO baked with fix, PPSSPP launched, drove into a full battle, SBSH counter = 1 (one intercepted stillborn), SNGD counters = 0/0 (guards never fired), 38 battle-class sprite objects live, PC advancing at 137M cycles/1.2s, no crash. The two earlier v312/v313 attempts shipped to a player untested and both made things worse (v312 killed PPSSPP via texture geometry mismatch, v313 was a revert that didn't fix). This one is proven. Cave bytes are new, hence the bump. // v313: v312 REVERTED -- SUBSTITUTING A TEXTURE IS UNSAFE (2026-09-02). v312 replaced a null/bad GIM with FO_SDW.GIM at 0x088FB87C so the sprite object would build completely. Live result on the player's next session: PPSSPP itself TERMINATED (process gone ~12s into the first cold-arena battle; a hard freeze became an emulator exit, which is strictly worse). Mechanism, hypothesised not proven: the texture is only ONE of the setter's arguments. The loader forwards the CALLER's cell parameters untouched -- 0x088e741c sets a2 = s1 (the ctor's a3) and a3 = s0 (the ctor's t0) and calls vtable+0x1c(obj, texture, a2, a3) -- so a 64x2 stand-in arrives carrying geometry meant for the sprite that failed (512x32 sheets in every census). Out-of-range cell rects reach PPSSPP's own texture path, and a host-side fault exits the process rather than raising the PSP crash screen. The lesson generalises: a substitute asset is only safe if it matches the geometry the caller already committed to, and at this hook that geometry is not knowable. The on-disc state returns to v311 exactly (both null-holder guards, no substitution). The correct shape is to make the object safe WITHOUT an image -- give the stillborn a valid holder whose vtable slots are `jr ra / move v0,zero` stubs, so dims stay 0, count stays 0, no geometry is ever computed, and every dereference returns 0 instead of faulting. Not attempted here. Cave bytes change (one cave removed), hence the bump. // v312: SPRITE ASSET FALLBACK -- THE ROOT FIX FOR THE NULL-HOLDER CRASH FAMILY (2026-09-02). v311 guarded both holder derefs and the game still died, now at a THIRD site (0x088fe1f8, RA 0x088fbaa0, pc 0xafb10008, hard freeze) -- proof that guarding derefs was never going to end it. RE off the retail ELF found the actual defect: the sprite constructor 0x088fb814 hands its (gim_ptr, gim_size) to the asset loader 0x088e7370, which returns 0 without ever calling the object's vtable+0x1c setter on a NULL pointer, a size of 1..3, a first word that is not "MIG." (0x2E47494D, the GIM magic), or a GIM the validator 0x88eb0b4 rejects. That setter is what installs the asset, the dims and a REAL holder, so a 0 return leaves exactly what the base ctor 0x088e5d74 left: holder = the static empty fallback 0x089E8868, asset 0, dims 0x0, count 0 -- the stillborn object measured in both freezes -- and 0x088fb8a0 walks it straight into the epilogue. Nothing on the path null-checks: the kind-3 build loop 0x0892cd9c asks a provider for a sub-image COUNT (vtable+0x14) then per-index data (vtable+0x1c) and size (vtable+0x24), and constructs with a NULL index result anyway, registering the dead object into the sprite array. New cave at 0x088FB87C (site scanned clean: neither displaced word is a branch/jump target or a data word, 0x088fb878 is `move a0,s1` so the hook is not a delay slot) tests a1 for NULL and for the GIM magic and substitutes a small valid GIM plus its size when either fails, so the object builds COMPLETELY and no downstream dereference can meet a null. The substitute is FO_SDW.GIM lifted from the player's own ICOMMON.PCK at bake time (800 B, magic re-checked before use; no game data ships in this repo) -- the very texture this sprite class already builds as the healthy 64x2 kind-3 object in every census, and ICOMMON.PCK is measured byte-identical vanilla vs patched, so no baker relocates it. A new SGAF mailbox counts substitutions so the provider bug stays visible instead of hiding behind the fix. Only at/v0/v1 are clobbered and all three are dead at the hook. The v299/v311 null-holder guards stay as belt-and-braces and should never fire again. Cave bytes are new, hence the bump. // v311: NULL-HOLDER GUARD COVERS BOTH LEGS (2026-09-02). A player bundle showed the v299/v300 guard firing twice and the game dying both times anyway -- "Bad Execution Address, CPU Jump to 00000068, RA 088fbaa0". The party-sprite epilogue dereferences the holder TWICE, not once: the width leg at 0x088FBA14 (guarded since v299, RA 0x088fba28) and a byte-identical height leg at 0x088FBA8C (RA 0x088fbaa0), differing only in the vtable selector that follows (0x30 vs 0x34). Proven against the retail ELF, not inferred: 0x088fba98 is the ONLY call in the 1.86MB module whose RA is 0x088fbaa0; both legs resolve the holder through the same 6-word sequence (vtable +0x64 = the pure leaf 0x088e9424 "return this+0xc"), byte-for-byte identical, so the height leg loads exactly the a0 the width leg just proved null; and [0x088fba28, 0x088fba98) has no path out (three branches, all internal) and one store, swc1 f0,0x86c(s1), into the object's own float field -- it cannot touch the holder pointer at s1+0xc or the null word at [holder+0]. So v299 never mitigated the freeze, it moved it 0x78 bytes. Second cave at 0x088FBA8C (site scanned clean: neither displaced word is a branch/jump target or a data word, 0x088fba88 is a plain lw so the hook is not a delay slot), skipping to 0x088FBAA0 past the jalr and its delay slot. The SNGD mailbox now carries a counter per leg (+4 width, +8 height) so a bundle names WHICH leg saved the session. FF1PSP_FORCE_NULL_HOLDER now zeroes a0 instead of jumping to the skip leg: v299's self-test forced the BRANCH with a valid holder still in a0, so the epilogue ran on healthy data and the unguarded height leg could never fail -- which is exactly why it shipped undiscovered. Cave bytes are new, hence the bump. // v310: bestiarysanity fixes, bugfixes, other improvements // v309: CANAL ART IS NOT BAKEABLE -- BRIDGE GOES BACK TO THE CLIENT (2026-09-01). v308's ASC copy reached the ISO and reached live RAM (the baked bridge signature was read back at 0x164's own ASC entry, attr 0x000f in the live ATT) and the canal rendered unchanged: for a tile id registered in MAP_00_ANM.ATI the animation system supplies the art, so ASC is dead bytes and the only thing an ATI move can do is swap in another record's animation -- which is how the original reskin became a river. The bake is back to the walk+sail attr alone; CANAL_BRIDGE_GRID_EDITS draws the bridge again, keeping its canal-open gate because the AMD grid carries the canal ids in BOTH states. The 35 s of missing bridge that started this is fixed where it belongs: the openworld loop's narrow rescan window now re-centres on the last confirmed arena address instead of guessing 0x09800000 +8MB (two sessions measured at 0x09775dda and 0x09d75dda, one either side of it), and an overworld re-entry no longer rate-limits the full sweep. MAP_00.PCK bytes change, hence the bump. // v308: CANAL BRIDGE AS BAKED ART (2026-09-01, SUPERSEDED by v309). v307 read the live grid as proof that vanilla already drew the bridge and dropped both art layers; it did not -- with nothing painting, the canal renders as open water and the bridge was GONE. The bridge really is the client's two substitute tile ids, and the river in the first report really was this bake's own 0x174 water reskin. So the art moves ON DISC as an ASC copy from those same ids (0x164<-0x161, 0x164's bank, 0x174<-0x171, the channel), which is legal here only because each donor already shares its target's ANM.ATI record -- same overlay in, same overlay out, no ATI edit at all (the water reskin needed a family move, and that move is what made it a river). The tile ids exist in the grid only while the canal is open, so the reskin needs no canal-open gate, no relocating-arena scan and cannot lose a repaint race. MAP_00.PCK bytes change, hence the bump. // v307: CANAL KEPT ITS VANILLA ART (2026-09-01, SUPERSEDED by v308). After Nerrick blew the canal the crossing rendered as animated river water, not the bridge. Two layers were painting over the ROM: this bake re-skinned tile 0x174 with donor 0xA3's ASC art and moved it into the river ANM.ATI family, and the client repainted (94,156)/(94,157)/(94,158) with substitute bridge tile ids behind a canal-open save-block gate. Neither was needed -- the blown canal's own tiles ARE the bridge, which is why the bridge came back on its own the moment the client's edits lapsed (a re-decompressed arena the narrow rescan window could not see). Both are retired; the bake is now one u16, the walk+sail attr on 0x174, and the runtime canal art, its gate and its relocation race are gone. MAP_00.PCK bytes change, hence the bump. // v306: MULTI-TARGET EFFECTS SKIP MISSING MEMBERS (2026-09-01, live follow-up to v305). v305's cursor fix verified live -- the target cursor now snaps past a missing member and a genuinely KO'd member still takes a Phoenix Down -- but a party-wide Heal still floated green numbers over the two EMPTY slots and monster group attacks still landed on them. Cause: the magic executor 0x088846D8 files the party into the result array with an UNROLLED, UNCONDITIONAL block (rows 0,1,2,3), one copy per caster side (party caster 'all allies' mode 0x08 at 0x08884838, monster caster 'all opponents' mode 0x01 at 0x088848A4) -- unlike the enemy side beside it, which filters rows through 0x08871EC4. Vanilla survives that because a REAL KO is filtered DOWNSTREAM per effect handler (entry loop 0x08884A4C -> table 0x0894C0D4), and every one of those tests reads the KO status bit that soft-dead deliberately leaves CLEAR -- so pseudo-KO passed all of them. New cave files 0xFF (the array's own unused marker, pre-set by the executor's init 0x08875500) for held rows, so the apply loop (0x08886118) and the number-popup walk (0x08881A44) both skip the slot through their existing vanilla `== 0xFF` tests: no HP, no number, no message, the effect just has fewer targets. Both block interiors are branch-target clean ELF-wide and share one tail (`b 0x08884960` + `sb zero,0x31(s4)`), so one cave serves both sites. Cave bytes are new, hence the bump. // v305: MISSING MEMBERS ARE NOT BATTLE TARGETS (2026-09-01). Live exploit: Phoenix Down / Life aimed at a held row mid-battle revived a missing member and he took turns for the rest of the fight. The field is guarded by the clear KO byte plus the item-use validity cave, but the BATTLE one-ally cursor 0x0886BCF8 is a bare 0..3 wrap with no validity test at all -- not even the engine's own KO test -- and its confirm writes the row into the actor's unit+0x41 via `sb a0,-0x38ab(v0)`, which is why no 0x41-offset store scan ever found it. Restoring HP is what breaks soft-dead, since HP 0 is what denies turns. Two caves: (17) both one-ally call sites of that cursor (target-select tick 0x0887E738 and init 0x0887EAD0, jal retargets so the delay slot still arms a1) run vanilla and then keep stepping the SAME direction the move went until the landing row is un-held, re-pointing the name-window highlight -- held rows are unreachable, exactly like out of combat; and (18) an entry detour on the HP-result applier 0x088818FC (3 jal callers, zero raw-word refs, both displaced words branch-target clean) makes a held row accept no HP from anything -- revive, single heal, party-wide heal or damage -- returning 1 so the damage leg never stamps BU_STATUS. (18) also closes the party-wide edge Phase 3 accepted (a mass heal handed a held row HP and therefore a turn). Cave bytes are new, hence the bump. // v304: TRAP CAVE AIMS SELF/ALLY ABILITIES (2026-09-01). Target modes 0x04 (self) and 0x10 (one ally) DO read unit+0x41 -- the vanilla enemy caster writes its own row for 0x04 and calls the picker 0x8872294(scene,1) for 0x10 (0x08881E3C-0x08881E8C) -- but the cave picks the caster itself at fire time, so the client cannot name that row when it arms. The mailbox target byte now takes a 0xFE sentinel meaning "the row you picked", and the cave substitutes t4 before the +0x41 store. Unlocks the Temper/Protect/Haste/NulAll/Blink/Saber traps, all six live-verified 2026-09-01 (Haste bumped the caster's +0x07 multi-hit count to 2, NulAll wrote its own 0x3FFF mask to the target's +0x2E). Any other selector value passes through untouched, so the four original traps are byte-identical. Cave bytes change, hence the bump. // v303: v303: public v0.2.0 release? // v302: FORCE A FRESH BAKE PAST A COLLIDING CACHE TAG (2026-08-31). The v301 art fix shipped, the client pinned the new pixels, and the launcher REUSED a cached ISO whose manifest already read patcher_version 301 (baked 19:55:50Z; its JOB01.GIM palette is still the pre-fix layout -- transparent on index 1, custom colours from slot 32). New pixels through the old palette is what drew the scrambled Stealth Thief in battle and on the load screen. The root cause is structural, not the number: the shipped sprite BLOBS were never part of bake_hash32, so art could change under an unchanged cache key. bake_hash32 now folds every shipped job sheet's palette+pixels in, and this bump guarantees a fresh tag against the ISOs already on disk. // v301: CUSTOM SPRITE TRANSPARENCY BACK ON PALETTE INDEX 0 (2026-08-31). A KO'd party member wearing custom art drew a solid BLACK RECTANGLE behind the sprite. merge_palette matched colours by RAW BYTES, and vanilla index 0 carries leftover RGB (82,89,102,0) while the artist path writes (0,0,0,0) -- so the match missed and all ~17k transparent texels of both shipped sheets (job01, job07) were remapped to a NEW slot, index 1. Alpha-correct draw paths were unaffected (battle and the pause menu always looked right), but the paths that colour-key on INDEX 0 drew index 1 as opaque RGB (0,0,0), which is the black box. Transparent entries now compare equal (the _visual rule already used elsewhere in the tool), so custom transparency lands on vanilla's own slot 0; re-merged art measures 49 (job07) / 72 (job01) newly-opaque pixels instead of 17685 / 17208. Baked palettes and shipped pixels both change, hence the bump. // v300: NULL-HOLDER GUARD COUNTS ITS SKIPS (2026-08-31). The v299 guard is silent, so a session that swallowed a null holder is indistinguishable from one that never saw one -- the bug would hide behind its own mitigation. The cave now bumps a u32 in a new SNGD mailbox on every skip and the client logs the count, so "the guard fired" is a number rather than an assumption. Only at/t9 are touched on that path and both are already dead there (vanilla loads t9 twice and calls through it; 0x088FBA28 rewrites a0/a1). Cave bytes change, hence the bump. // v299: BATTLE SPRITE NULL-HOLDER GUARD (2026-08-31). A party-sprite object whose asset never resolved is left STILLBORN and the initializer's epilogue calls through its holder with no null check -- "CPU Jump to 00000000", RA 0x088fba28, at battle intro. Measured in the live freeze: of 19 objects of that class in the battle, 18 had real holders, assets and dims 0x100x0x20 while exactly one had holder = the static empty fallback 0x089E8868, asset 0, dims 0x0 and count 0 -- and that object is s1 in the crash registers. Not pool exhaustion: 110 holder nodes were free. New cave at 0x088FBA14 (hook site scanned clean: neither displaced word is a branch/jump target or a data word, and 0x088FBA10 is a plain lw so the hook is not a delay slot) reads the holder, skips straight past the jalr when it is null, and is a byte-exact replay of the two displaced lw otherwise. This does not fix the unresolved asset -- the client's holder census still logs every starved object -- it just stops one from killing the session. Cave bytes are new, hence the bump. // v298: JOB SPRITE PACKS REPORT EVERY DONOR THEY TOUCH (2026-08-31). A new game crashed with "Bad Execution Address, CPU Jump to 00000000", RA 0x088fba28. Measured on the shipped ISO: 57 OVERLAPPING dpk records (vanilla has 0). job_sprite_bake's _Space.coalesce merges adjacent free extents and kept only the FIRST donor name (prev[2] = prev[2] or ext[2]); the FM_*J1/J2 donors are adjacent on disc, so one merged run covered several donor records and donors_used named only one of them. ms2_bake then handed the unreported records out: JOB_NORMAL.PCK landed across FM_DBG_CAMPJ1/J2 + FM_CAMPJ1/J2 with MS2_07B.PCK written on top of it, M_JOB_NORMAL.PCK across FM_GARELLY_LGJ1/J2 under MS2_102.PCK. The class-sprite load at new game then decompressed a boss pack and jumped through a null object -- the dpk-dead-space-ownership signature, reached from the other side. _Space now records the donor segments as handed in and reports every donor an allocation INTERSECTS, so ms2_bake reserves the whole merged run. Bake output changes, hence the bump. // v297: CLASS SPRITE PALETTES BAKED ON DISC (2026-08-30). Custom party sprites were a pure RAM pin (pixels + palette over every resident JOBxx.GIM) and rendered "golden"/blotchy in battle, on the load screen and after a steal. Measured cause: a resident sheet is NOT the only place a class palette lives -- while a party member is on screen the engine also holds standalone 0x400 palette records in a separate heap (3 copies of the vanilla Thief palette at 0x08da4380/0x08da4810/0x08dadd80, none near any GIM), built at load time from the DISC record, and several draw paths CLUT from those; the resident pixels themselves measured byte-identical to our art, so this was never a torn write, a write-ordering bug or PPSSPP lazy texture caching (all three tested and cleared). job_sprite_bake now splices each shipped class MERGED palette into all five packs that carry its sheet (JOB_NORMAL/M_JOB_NORMAL/JOB_CHANGE/M_JOB_CHANGE/JOB_ALL). The merged palette is a SUPERSET -- every index the vanilla pixels use keeps its exact vanilla colour, custom colours go in the ~225 slots vanilla never references -- so the bake is unconditional and seed-independent, vanilla art is pixel-identical, and the scroll gate stays entirely in the client PIXEL pin (_jobsprite_loop no longer writes palettes at all, and its per-tick palette hunt + battle-edge rescan are gone). A patched pack grows ~112-238 bytes (wp16 greedy is already optimal), so packs relocate: best-fit over their own freed runs plus donor extents, and the donors consumed are handed to ms2_bake as extra_reserved (one region, one owner). // v296: ROUND-ZERO TRAP CAVE DECLINES A PREEMPTIVE ROUND (2026-08-30). Live: an Ink trap fired on a preemptive-strike battle and ATE the player's free round. On preemptive (bb+0x6809 == 1) the enemies are muted but the PARTY is still enqueued, so phase 1 falls through to the hooked leg -- and the cave's cursor=12 then ends the round after its one actor, so the party's queued free strike never runs. The cave now reads bb+0x6809 and takes the vanilla path on any non-zero battle type, so the trap waits for round 2 (the byte clears after round 1) and the first strike survives. Ambush never reached this leg anyway. Cave bytes change, hence the bump. // v295: ROUND-ZERO TRAP CAVE (2026-08-30). AP traps now resolve as REAL monster abilities -- the engine's own targeting, animation, battle message and status apply -- before the party acts. New detour at the phase 1 -> 2 leg 0x0886B2E4 (hook site scanned clean: not a branch/jump target, not a delay slot, not referenced as a data word). On an armed TRP1 mailbox the cave picks a living enemy that passes the advance's can-act gate, commits +0x40/+0x41/+0x42=0x0A/+0x44 into its unit record, parks it at order[12] with cursor 12, and emits phase 4 instead of 2 by handing the ENGINE's own store (0x0886B2F4 `sb v1,-0x2e52(v0)`) a 4 in v1 -- the cave never writes the phase byte itself. Unarmed, it is a byte-exact replay of the two displaced words, which is also how "hold the trap for the next battle" is implemented. bb = s1 + 0x460, proven three ways (an earlier RE pass got this wrong by reading the sort call and missing its +0x7ff8 delay slot). Retires the old client-side status poke, which was invisible and, for Silence, never worked at all. Cave bytes are new, hence the bump. // v294: SCENE-CLASS BATTLE GATE (2026-08-29). _rp_battle_gate trusted [[0x089D7ADC]+0x68B4] as "field struct, 1 outside battle"; live measurement proved 0x089D7ADC is the CURRENT SCENE pointer (the pause menu repoints it at its own context, whose +0x68B4 reads 0) and that the field scene's own +0x68B4 drops to 0 for ANY menu, not just battle. So the gate said "battle" for the whole pause menu and the v292 flatten cave ran there with a0 = ctx+0x450: its row-2 weapon offset 0x96F hit ctx+0xDBF = pause widget record 10 = the FORMATION row-selector cursor, cleared every frame -> the cursor vanished and Formation looked frozen (swaps still worked, blind). The gate now identifies the scene CLASS by its vtable at +4 (fixed rodata): battle-module scene classes pass, the field scene passes only when field logic is not the top layer, every other scene (pause/shop/save/title) is rejected. Fixes the ctor/ctor2/ctor3/flat caves at once. Cave bytes change, hence the bump. // v293: INN-SLEEP SLEEPERS HONOUR THE HELD MASK (2026-08-29). The field event VM's spawn-party-member-actor opcode 0x12 (handler 0x08844414) ran four times regardless of who was present, so held rows walked to inn beds like everyone else -- the last cosmetic hole in reduced_party. New cave on the flag OR that follows the spawn call: the actor is still built and still runs its whole walk script, but a held row gets draw bit 0x2 of the actor's +0xB4 flags cleared, which is exactly what native opcode 0x68 does to the leader's cutscene actor. One write at spawn holds for the entire scene (live-proven). Cave bytes change, hence the bump. // v292: PER-FRAME HELD-LAYER CLEAR AT THE POPUP FLATTEN (2026-08-29). v291's classifier clears only start once the sweep ticks (~0.5s in), so the battle WALK-IN's shadow arming showed held shadows through the intro. New battle-gated cave at flatten entry 0x08887A28 (a0 = bb, runs from the first intro frame, single jal caller) clears act on all held rows' body/shadow/weapon layers (bb+row*124+0x497/0x687/0x877) every frame; the classifier cave reverts to the pure virtual-KO bit. Cave bytes change, hence the bump.
                       # v291: CLASSIFIER CAVE ALSO CLEARS HELD LAYER ACT BYTES (2026-08-29). The dead-state dispatch the virtual KO triggers re-arms the row's popup layers with the collapsed pose -- a third activation site the v280 ctor hooks (pool builds only) never covered; the deleted client act pokes had been papering over it, so v290 showed held members lying KO'd in the grass. The wipe cave's held branch now clears act on layers row/row+4/row+8 (ctx+layer*124+0x497) every classify tick. Cave bytes change, hence the bump.
@@ -11235,6 +11523,12 @@ SIGNATURES = {
     # bits are `j` (000010) only when patched (vanilla `lhu a3,0(v0)`, opcode
     # 100101 -> 0x9400). Opcode-only -> holds wherever the cave lands.
     "super_dash": (_SD_TABLE_HOOK + 2, 0xFC00, 0x0800),
+    # Remap-selection block: word 3 becomes `b join` (0x1000000B); vanilla's
+    # third word is `beql v0,zero` (0x50400003). (Word 1 is a jal in BOTH.)
+    "world_gates": (_WG_HOOK + 10, 0xFFFF, 0x1000),
+    # Post-ATT-getter hook overwritten with `j cave`: opcode-only, as
+    # super_dash (vanilla `andi v1,v0,0xff`, upper u16 0x3043).
+    "foot_stays_foot": (_FSF_HOOK + 2, 0xFC00, 0x0800),
     # Thief's start-stats MP u16 (@_START_TAB + class1*16 - 2) is
     # DABBLE_START_MP only when patched (vanilla Thief starts with 0 MP).
     # NB: can't use a learn bit -- those follow the seed's magic shuffle now.
@@ -11648,13 +11942,18 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
     # path for seeds whose ISO predates this bake, and on a baked ISO it writes the
     # values that are already there -- so a failure here is degraded, not fatal:
     # soft guard, loop covers it.
-    _ow_map = feats.get("_ow_map")
-    if _ow_map:
+    _ow_map = feats.get("_ow_map") or {}
+    # world_gates (v331): the trails base paint and the gate ids ride the same
+    # grid bake (map_bake._ow_edits); the cave above resolves the gate ids.
+    _wg = feats.get("_world_gates") or {}
+    if _ow_map or _wg:
         def _bake_ow_grid():
             from . import map_bake
             map_bake.bake_openworld_grid(iso_out, bool(_ow_map.get("early")),
                                          bool(_ow_map.get("extended")),
-                                         bool(_ow_map.get("docks")))
+                                         bool(_ow_map.get("docks")),
+                                         trails=bool(_wg.get("trails")),
+                                         gulg=bool(_wg.get("gulg")))
         sub("open-progression map edits…")
         _soft("open-progression grid", _bake_ow_grid)
     # LOAD-BEARING -- spell_tomes / remote_chest_names: grow the item NAME/DESC
@@ -11919,6 +12218,20 @@ def _gatecheck_iso(iso_out, feats, remote_names, caravan_baked=None,
             raise ValueError(f"gatecheck: caravan row reads {got!r}, "
                              f"baked {caravan_baked[0]!r} (donor collision?)")
     if feats.get("boss_minions") and feats.get("boss_minions_plan"):
+        # the ELF redirects these fids' boss branch to MS2_<fid>.PCK: a missing
+        # pack, or one without the boss pair, is a null sprite at battle swirl.
+        from .ms2_bake import redirect_fids, parse_pack
+        for fid in redirect_fids(feats["boss_minions_plan"]):
+            name = f"MS2_{fid:03X}.PCK"
+            if name not in recs:
+                raise ValueError(f"gatecheck: {name} absent but the boss "
+                                 f"pack-name cave redirects fid {fid:#x} to it")
+            _ro, off, size = recs[name]
+            got = {e["name"].upper() for e in
+                   parse_pack(wp16.decompress(bytes(dpk[off:off + size])))}
+            want = f"BOSS_{fid - 0x100:02X}.GIM"
+            if want not in got:
+                raise ValueError(f"gatecheck: {name} lacks {want}")
         # every planned fid the plan adds monsters to must have its MS2 pack.
         for entry in feats["boss_minions_plan"]:
             fid, groups = entry[0], entry[1]

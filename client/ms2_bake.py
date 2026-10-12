@@ -34,6 +34,23 @@ STEAL a donor's index record outright: write the new pack into the donor's
 space, rewrite that record's name/hash to MS2_<fid>.PCK, and re-sort the
 index. The donor pack becomes unreachable (it was never loaded anyway).
 
+ONE PACK PER FORMATION (player report 2026-10-11: Atomos + Hundlegs at light
+drew Atomos as a purple Hundlegs, with Atomos' own big shadow still under it).
+The per-kind sprite loader 0x08876F60 keeps ONE pack handle for the whole
+battle (battle+0x80): before each kind it RELEASES that handle, then loads the
+kind's pack -- boss_<mon-0x80>.pck for 0x80-0x90, ms2_<fid>.pck otherwise --
+and keeps pointers INTO the pack buffer (0x08913B04 copies nothing). Release
+of a bank's last resident file resets its arena cursor (0x08913C24), so the
+next load lands at the SAME base. Vanilla is safe only because every kind of a
+formation reloads the same bytes. A DLC boss (BOSS_0C) followed by a normal add
+(MS2_10C) put Hundlegs' GIM exactly where Atomos' pointer was (both packs have
+2 entries -> first body at +0x60); the palette had already been taken at sprite
+creation, the shadow sat past MS2's end and survived. The fix keeps the
+vanilla invariant: a DLC fid with adds gets an MS2 pack that ALSO carries the
+boss's (and any boss-id add's) BOSS_xx GIM pairs, and apply_boss_minions'
+pack-name cave makes the boss branch open ms2_<fid>.pck for those fids
+(redirect_fids() is the single source of that set for both halves).
+
 Source GIMs come from the per-monster singles MS_<gim>.PCK (same gids as the
 formation packs use).
 """
@@ -135,11 +152,34 @@ def _gim_id(mon: int) -> int:
 
 
 def _is_boss_id(mon: int) -> bool:
-    """DLC boss ids 0x80-0x90: the engine loads their sprites per-MONSTER
-    from BOSS_<mon-0x80>.PCK in any slot (live-proven: Echidna +
-    Two-Headed Dragon add rendered with no MS2 support) -- they never need
-    GIM injection."""
+    """DLC boss ids 0x80-0x90: the engine's boss branch looks up
+    boss_<mon-0x80>.gim (not ms_XX.gim), in BOSS_<mon-0x80>.PCK -- or, for a
+    redirect fid, in MS2_<fid>.PCK, which then carries that pair (see the
+    ONE PACK PER FORMATION note)."""
     return 0x80 <= int(mon) <= 0x90
+
+
+DLC_FIDS = range(0x100, 0x111)
+
+
+def redirect_fids(plan):
+    """DLC boss fids whose boss branch must open ms2_<fid>.pck instead of the
+    boss pack: every one that spawns ANY add (normal or boss-id -- two different
+    BOSS packs alias each other exactly like BOSS + MS2 do). Shared by
+    iso_patcher's pack-name cave and the bake below, so the ELF never redirects
+    to a pack the dpk does not carry."""
+    return sorted({int(e[0]) for e in plan or ()
+                   if int(e[0]) in DLC_FIDS and e[1]})
+
+
+def _add_boss_gims(f, recs, entries, mon):
+    """Merge BOSS_<mon-0x80>.PCK's entries (boss_XX.gim + its _s shadow) into
+    entries, verbatim (names and gids are what the boss branch looks up)."""
+    have = {e["name"] for e in entries}
+    for se in parse_pack(_read_pack(f, recs[f"BOSS_{int(mon) - 0x80:02X}.PCK"])):
+        if se["name"] not in have:
+            entries.append(se)
+            have.add(se["name"])
 
 
 def _steal_record(f, donor, new_name, off, csz, dsz):
@@ -213,9 +253,27 @@ def bake_minion_packs(iso_path: str, plan, pool: DonorPool) -> None:
         # GIM lookups -- a creation's index re-sort (PASS 3) would otherwise
         # invalidate it mid-loop.
         inplace, reloc, creations = [], [], []
+        redirect = set(redirect_fids(plan))
         for entry in plan:
             fid, groups = entry[0], entry[1]
             tname = f"MS2_{int(fid):03X}.PCK"
+            if int(fid) in redirect:
+                # the ONE pack every kind of this formation loads: the boss's
+                # own pair, every boss-id add's pair, every normal add's pair.
+                if tname in recs:
+                    raise RuntimeError(f"boss_minions: DLC fid {int(fid):#x} "
+                                       f"already has {tname} on disc")
+                entries = []
+                _add_boss_gims(f, recs, entries, 0x80 + int(fid) - 0x100)
+                for g in groups:
+                    if _is_boss_id(g[0]):
+                        _add_boss_gims(f, recs, entries, g[0])
+                _add_gims(f, recs, entries, groups)
+                newdec = build_pack(entries)
+                newcmp = wp16.compress(newdec)
+                assert wp16.decompress(newcmp) == newdec
+                creations.append([tname, newcmp, newdec, None, tname])
+                continue
             if tname not in recs:
                 if not groups:
                     continue

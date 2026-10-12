@@ -1,7 +1,7 @@
 """One-click troubleshooting bundle -- the `/logs` command.
 
-A player who sees something strange runs one command and gets ONE zip on their
-desktop, with a README telling them to hand it to whoever maintains this
+A player who sees something strange runs one command and gets ONE .logs file
+(a zip archive under another extension) on their desktop, with a README telling them to hand it to whoever maintains this
 apworld. Everything in it exists because a real playtest report needed it and
 it had to be extracted by hand over several rounds of back-and-forth:
 
@@ -51,6 +51,7 @@ import traceback
 import zipfile
 
 BUNDLE_PREFIX = "FF1PSP_debug"
+BUNDLE_EXT = ".logs"             # a zip archive; rename to .zip (or use 7-Zip) to unpack
 LOG_TAIL_BYTES = 3 << 20         # per log file; whole file when smaller
 LOG_FILES_KEPT = 3               # current + 2 previous runs
 BREADCRUMB_MAX = 500
@@ -102,19 +103,19 @@ CHURN_BUDGET_S = 8.0              # WS fallback is ~2.5 s a pass; direct mem is 
 HOST_GAP_S = 0.4                  # between the two thread-time samples
 HOST_TOP_THREADS = 6              # busiest threads reported
 
-# The player-facing note that ships inside the zip. Deliberately generic: it
+# The player-facing note that ships inside the bundle. Deliberately generic: it
 # must still read correctly for whoever maintains this apworld in future.
 README_TEXT = """\
 FF1 PSP Archipelago -- debug bundle
 ===================================
 
-This zip was made by the /logs command in the FF1 PSP client.
+This file was made by the /logs command in the FF1 PSP client.
 
 WHAT TO DO WITH IT
   Send this single file to the developer who maintains the FF1 PSP apworld
   (post it wherever you report bugs for it -- the Archipelago Discord thread
   or channel for this game is the usual place). Say what you were doing when
-  the problem happened; that plus this zip is normally enough to diagnose it.
+  the problem happened; that plus this file is normally enough to diagnose it.
 
 WHAT IS IN IT
   report.txt        readable summary -- versions, game patch state, setup
@@ -1141,7 +1142,7 @@ def _render_report(m):
               f"floor {r.get('floor')!s:>4}  {r.get('state')}")
     p()
     p("Full detail: manifest.json, ap_state.json, ram_snapshot.json, and the "
-      "client logs in this zip.")
+      "client logs in this bundle.")
     return w.getvalue()
 
 
@@ -1192,7 +1193,7 @@ def _yaml_files():
 
 
 def build_bundle(ctx=None, ram=None, wedge=None, out_dir=None):
-    """Write the zip and return its path. Never raises: a collector that blows
+    """Write the bundle (a zip, named *.logs) and return its path. Never raises: a collector that blows
     up lands in the bundle as an error section instead.
 
     `ram` and `wedge` are collected by the CALLER (they need the asyncio thread
@@ -1224,7 +1225,7 @@ def build_bundle(ctx=None, ram=None, wedge=None, out_dir=None):
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     safe = lambda s: "".join(c if c.isalnum() or c in "-_" else "_" for c in s)
     dest = os.path.join(out_dir or _out_dir(),
-                        f"{BUNDLE_PREFIX}_{safe(slot)}_{safe(seed)}_{stamp}.zip")
+                        f"{BUNDLE_PREFIX}_{safe(slot)}_{safe(seed)}_{stamp}{BUNDLE_EXT}")
 
     def text(zf, name, body):
         zf.writestr(name, _scrub(body, secrets))
@@ -1272,7 +1273,7 @@ def _safe_render(manifest):
 
 
 def reveal(path):
-    """Open the containing folder with the zip selected. Best-effort: returns
+    """Open the containing folder with the bundle selected. Best-effort: returns
     True if a file manager was launched."""
     try:
         if os.name == "nt":

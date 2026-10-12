@@ -37,6 +37,17 @@ Decisions (kind, detail) from step():
 # pass it), and tripping it was fatal AND silent.
 KILLS_MAX = 9999
 
+# Bit 15 of each u16 is NOT part of the count: the game sets it on a bestiary
+# entry while the player browses the Bestiary menu (2026-09-20, Meyrime: id 15
+# read 0x8000|9 with Pirate at 9 kills, id 44 0x8000|16 with Ghoul at 16, id
+# 43 0x8000|49 with Zombie at 49, then id 0 0x8000|153.. with Goblin at 153
+# and rising as she kept killing them). The bit moved entry to entry as she
+# paged and STAYED on the last one she looked at, persisted in the save, so
+# every later frame tripped KILLS_MAX as "not a loaded save frame" and no
+# kill was counted again (her Gargoyle kill sent nothing). "Number beaten"
+# on screen is the low 15 bits; so is everything here.
+COUNT_MASK = 0x7FFF
+
 
 class BestiaryFloor:
     def __init__(self, n, sampled):
@@ -73,10 +84,11 @@ class BestiaryFloor:
 
     # ---------------------------------------------------------------- frames
     def parse(self, raw):
-        """u16[n] little-endian, or None if the read came back short."""
+        """u16[n] little-endian with the bit-15 browse flag stripped
+        (COUNT_MASK), or None if the read came back short."""
         if raw is None or len(raw) != self.n * 2:
             return None
-        return [int.from_bytes(raw[i:i + 2], "little")
+        return [int.from_bytes(raw[i:i + 2], "little") & COUNT_MASK
                 for i in range(0, self.n * 2, 2)]
 
     def step(self, raw, sent_mons=()):

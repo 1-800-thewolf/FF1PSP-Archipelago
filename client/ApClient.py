@@ -185,26 +185,6 @@ CHEST_POLL_S = 0.1
 # (observed home region first, full user RAM as fallback).
 BANK_SCAN_WINDOWS = ((0x09000000, 0x01000000),
                      (USER_RAM_BASE, USER_RAM_SIZE))
-# Overworld map arena (open-progression edits + canal attr) lives in the high heap.
-OW_SCAN_WINDOWS = ((0x09800000, 0x00800000),
-                   (USER_RAM_BASE, USER_RAM_SIZE))
-# Periodic re-anchor cadence while walking the overworld: catches an in-place arena
-# relocation (no town/dungeon excursion) that the canary can't see because the stale
-# freed buffer still holds our edits. One narrow-window scan every this-many seconds.
-OW_REANCHOR_S = 6.0
-# Re-entry grace (v325): for this long after the loop first sees the overworld
-# again (post battle / town / death-reload) a missed rescan neither grows the
-# miss-backoff nor waits out the full-sweep gate. Player report 2026-09-05: saved
-# ON a foot-trail bridge, died, reloaded -- the map id read 9 before the arena
-# was decompressed, the first scans missed, `wait` climbed 3->6->12->24 and the
-# 24 MB fallback was gated 30 s, so the bridge under the party painted 42 s after
-# the load and the party stood frozen on an ocean cell the whole time.
-OW_REENTRY_GRACE_S = 20.0
-# Outside the grace window (arena genuinely absent: game-over screen, title
-# with the map id still 9) the backoff still grows, but caps well under the old
-# 30 s so a reload the edge detector never saw is repainted within ~12 s.
-OW_MISS_WAIT_CAP_S = 12.0
-OW_FULL_SWEEP_GAP_S = 15.0
 # Shop AP-slot purchase watcher: one 2-byte mailbox-head read per tick, and the
 # ring + inventory only when the head has moved (i.e. only on a real purchase).
 SHOP_POLL_S = 0.5
@@ -580,7 +560,7 @@ class FF1PSPCommandProcessor(ClientCommandProcessor):
     def _cmd_logs(self):
         """Save and export debug files: logs, seed's options, the game's patch
         state and a read-only snapshot of the running game. Run this whenever
-        something looks wrong, then send the zip file it makes with whomever
+        something looks wrong, then send the .logs file it makes to whomever
         maintains this apworld."""
         import functools
         from . import debug_bundle as DB
@@ -840,13 +820,14 @@ class FF1PSPContext(CommonContext):
                                           # the White Cleric dia INT accumulator
         self._bdc_mb = None               # cached BDC1 mailbox addr (bonus dyn chests)
         self._buy_mb = None               # cached BUYB mailbox addr (shop purchases)
+        self._wg_mb = None                # cached WGAT mailbox addr (world_gates)
         self._rp_mb = None                # cached RPMK mailbox addr (reduced party
                                           # held-row mask; armed by _member_loop)
         self._steal_icon_mb = None        # cached SPRB mailbox addr (steal-cue icon)
-        self._steal_icon_restore = None   # (entry addr, saved bytes) of borrowed def 19
+        self._steal_icon_restore = None   # (entry addr, original bytes, OUR bytes) of borrowed def 19
         self._steal_icon_task = None      # pending fade-out task for the loot cue
         self._steal_arm_task = None       # pending DELAYED-arm task for the loot cue
-        self._steal_box_restore = None    # (bank, off15_bytes, orig_span_bytes) to undo
+        self._steal_box_restore = None    # (bank, off14, orig off15/span, OUR off15/span) to undo
         self.bonus_dyn_caps = {}          # dungeon idx (int) -> dynamic-chest AP-check cap
         self.bonus_dungeon_crystals = False   # bonus_dungeon_crystals yaml: crystals
                                           # activate by beating a Soul-of-Chaos
@@ -3732,6 +3713,16 @@ class FF1PSPContext(CommonContext):
             feats["_ow_map"] = {"early": _ow_map["early_open_progression"],
                                 "extended": _ow_map["extended_open_progression"],
                                 "docks": _ow_map["northern_docks"]}
+        # world_gates (v331): the engine-native half of the world-changing AP
+        # items. Derived here (not only from on_disc) so a seed rolled before
+        # v331 gets it too; the toggle VALUES ride feats["_world_gates"] for
+        # map_bake (trails base + gate ids) and apply_world_gates (the rows),
+        # and bake_hash32 folds them.
+        _wg = {"trails": bool(_sd.get("northern_foot_trails")),
+               "gulg": bool(_sd.get("mount_gulg_key"))}
+        feats["world_gates"] = any(_wg.values())
+        if feats["world_gates"]:
+            feats["_world_gates"] = _wg
         # DangerousForests picks its normal vs harder tier list at bake time from
         # the harder_encounters flag. Inject it as bake context ONLY when forests are
         # on (it's not a FEATURES entry, so patch_iso never tries to "apply" it; but
@@ -5014,6 +5005,16 @@ class FF1PSPContext(CommonContext):
                 inv[g] = chr(c)
         offs = struct.unpack_from(f"<{cnt}I", bank, 0x10)
         ends = list(offs[1:]) + [total]
+        # Every entry write is a compare-and-swap: the bank header must still
+        # be THIS bank's and the entry must still hold the bytes this pass
+        # decided on. The bank lives in pack memory the engine recycles on
+        # every map load (Eridose 2026-10-05), and this pass awaits between
+        # the read above and each write. A refused write = stale cache.
+        ident = (text_addr, bytes(bank[:0x14]))
+
+        async def put(a, body, data):
+            return await self._write_guarded(
+                text_addr + a, data, (ident, (text_addr + a, bytes(body))))
         # Crown-obtained story flag drives the Citadel gate lines below; if the
         # read fails, treat as owned so vanilla text is never wrongly replaced.
         try:
@@ -5062,7 +5063,8 @@ class FF1PSPContext(CommonContext):
                 # Crown arrived mid-visit: put the vanilla line back.
                 orig = self._citadel_orig.pop(key)
                 if bytes(body) != orig:
-                    await self.psp.write(text_addr + a, orig)
+                    if not await put(a, body, orig):
+                        return False
                     dlog.info("  [citadel] vanilla line restored")
             elif not crown:
                 norm = " ".join(re.sub(r"[^a-z ]+", " ", txt.lower()).split())
@@ -5089,7 +5091,8 @@ class FF1PSPContext(CommonContext):
                     budget = b - a - 1
                     enc = enc[:budget] + pad * (budget - len(enc)) + term
                     if bytes(body[:len(enc)]) != enc:
-                        await self.psp.write(text_addr + a, enc)
+                        if not await put(a, body, enc):
+                            return False
                         dlog.info(f"  [citadel] gated line authored "
                                     f"(entry @{a:#x}, break {brk:#04x}"
                                     f"{' DERIVED' if brk != self._MAPMSG_GATE_BREAK else ''}"
@@ -5103,7 +5106,8 @@ class FF1PSPContext(CommonContext):
                     # (the blocker is gone; this entry is now the real block's).
                     orig = self._lute_slab_orig.pop(key)
                     if bytes(body) != orig:
-                        await self.psp.write(text_addr + a, orig)
+                        if not await put(a, body, orig):
+                            return False
                         dlog.info("  [lute-slab] vanilla inscription restored")
                 elif not lute_owned and self._MAPMSG_LUTE_SLAB in lnorm:
                     self._lute_slab_orig.setdefault(key, bytes(body))
@@ -5117,7 +5121,8 @@ class FF1PSPContext(CommonContext):
                     budget = b - a - 1
                     enc = enc[:budget] + pad * (budget - len(enc)) + term
                     if bytes(body[:len(enc)]) != enc:
-                        await self.psp.write(text_addr + a, enc)
+                        if not await put(a, body, enc):
+                            return False
                         dlog.info("  [lute-slab] gated inscription authored")
                     continue
 
@@ -5130,7 +5135,8 @@ class FF1PSPContext(CommonContext):
             if sage_done and key in self._sage_orig:
                 orig = self._sage_orig.pop(key)
                 if bytes(body) != orig:
-                    await self.psp.write(text_addr + a, orig)
+                    if not await put(a, body, orig):
+                        return False
                     dlog.info("  [sage-box] vanilla lore restored")
             elif not sage_done and sage_name:
                 snorm = " ".join(re.sub(r"[^a-z ]+", " ", txt.lower()).split())
@@ -5160,7 +5166,8 @@ class FF1PSPContext(CommonContext):
                     pad = bytes([sp]) if sp != 0xFFFF else term
                     enc = enc[:budget] + pad * (budget - len(enc)) + term
                     if bytes(body[:len(enc)]) != enc:
-                        await self.psp.write(text_addr + a, enc)
+                        if not await put(a, body, enc):
+                            return False
                         # Address logged since 2026-08-10: without it a bundle
                         # showing "authored but no check" cannot say WHERE the
                         # talk latch should have pointed, which is what made
@@ -5188,7 +5195,8 @@ class FF1PSPContext(CommonContext):
             pad = bytes([sp]) if sp != 0xFFFF else term
             enc = (enc[:budget] + pad * (budget - len(enc)) + term)
             if bytes(body[:len(enc)]) != enc:
-                await self.psp.write(text_addr + a, enc)
+                if not await put(a, body, enc):
+                    return False
                 dlog.info(f"  [keybox] authored obtain box: "
                             f"{mo.group(1)} -> {authored}")
         return True
@@ -5815,17 +5823,19 @@ class FF1PSPContext(CommonContext):
         player has blown the canal normally (Nitro -> Nerrick). Its ART is baked,
         never poked. See [[open-progression-rework]] / [[canal-shallows-plan]].
 
-        The grid/ATT arena is re-decompressed on (some) overworld loads and relocates
-        between boots: cheap canary check at the cached arena addresses; on mismatch
-        rewrite all edits; on anchor loss re-scan RAM. Alignment is verified against
-        the vanilla anchor bytes before ANY write (misaligned bulk writes corrupt
-        the map).
+        The grid/ATT arena is re-decompressed on (some) overworld loads and moves
+        between them. Every tick asks the ENGINE where the live arena is
+        (_ow_live_arena: scene pointer -> field map object -> grid/ATT
+        pointers), repaints when it moved or a canary reads vanilla, and writes
+        ONLY that arena, each cell a guarded write (_write_guarded) re-proving
+        the scene pointer, grid pointer and vanilla anchor. No RAM scans and no
+        writes to freed copies: through v332 this loop anchor-scanned 8-24 MB
+        and painted every copy it found, and one burst straddling a town load
+        put world-item cells into Crescent Lake's compressed pack (Eridose
+        2026-10-05, RA 0x088fba28).
 
-        MAP-GATED: the arena only exists ON THE OVERWORLD (map id 9). Scanning from
-        a town/dungeon can never succeed, and the old always-scan version swept up to
-        24 MB of RAM every 1.5 s the whole time you walked around a town -- that was
-        the in-town stutter. Off the overworld this loop costs two 1-byte reads per
-        tick. Scans are rate-limited (narrow window >=3 s apart, full-RAM >=30 s)."""
+        MAP-GATED: the arena only exists ON THE OVERWORLD. Off it this loop costs
+        two 1-byte reads per tick."""
         from . import openworld_data as OW
         while not self.slot_data and not self.exit_event.is_set():
             await asyncio.sleep(1.0)
@@ -5915,9 +5925,90 @@ class FF1PSPContext(CommonContext):
                          else gulg_sealed)
             return e
 
+        # world_gates (v331): on a bake that carries the feature the ENGINE
+        # resolves these cells -- the base paint and a spare GATE id per gated
+        # cell are on disc, and the map-load remap cave turns each gate id into
+        # the open or closed id from the client-owned save byte save+0x834 --
+        # so the arena paint is EMPTY and this loop's job is that byte (plus a
+        # poke of the live remap buffer for immediacy). The resolved tables
+        # stay the Map tab's picture. Pre-v331 ISOs keep the runtime paint as
+        # their repair path. The race this closes: the scene init re-derives
+        # the vehicle mode from the tile under the party seconds before any
+        # client paint lands (free ship after loading on the pier, 2026-09-14).
+        gates_baked = bool(getattr(self, "bake_ok", False)) and bool(
+            ((getattr(self, "_bake", None) or {}).get("features")
+             or {}).get("world_gates"))
+        if gates_baked and (trails_on or gulg_key_on):
+            dlog.info("  [openworld] world gates are on disc (baked) -- the "
+                      "engine resolves the span/boulders/seal; this loop "
+                      "maintains the save byte only")
+
+        def arena_world_edits(held):
+            return {} if gates_baked else world_edits(held)
+
+        gate_bits = (
+            (ID.WORLD_LUFENIAN_BRIDGE, OW.WORLD_GATE_BIT_LUFENIAN_BRIDGE),
+            (ID.WORLD_LUFENIAN_NITRO, OW.WORLD_GATE_BIT_LUFENIAN_NITRO),
+            (ID.WORLD_GAIAN_NITRO, OW.WORLD_GATE_BIT_GAIAN_NITRO),
+            (ID.WORLD_MOUNT_GULG_KEY, OW.WORLD_GATE_BIT_MOUNT_GULG_KEY))
+        gate_allowed = ((OW.WORLD_GATE_TRAILS_MASK if trails_on else 0)
+                        | (OW.WORLD_GATE_GULG_MASK if gulg_key_on else 0))
+
+        def gate_mask(held):
+            m = 0
+            for ordinal, bit in gate_bits:
+                if ID.world_item_id(ordinal) in held:
+                    m |= bit
+            return m & gate_allowed
+
+        def held_world_items():
+            # Sticky union of the sticky _ever_won and the live items_received
+            # -- items_received is emptied for the duration of a disconnect,
+            # which must never un-win a world item.
+            return {iid for iid in
+                    (set(self._ever_won) | {it.item for it in self.items_received})
+                    if ID.is_world_item(iid)}
+
         # Sticky: an item once seen is never un-seen, so a disconnect (which
         # empties items_received) can never un-paint a bridge the player owns.
-        world_state = {"held": set(), "edits": world_edits(set())}
+        world_state = {"held": set(), "edits": arena_world_edits(set()),
+                       "ui": world_edits(set()), "mask": 0}
+
+        async def poke_gates(bits):
+            """Open the live remap entries of every baked row in `bits` (the
+            cave rebuilds the whole buffer at the next map load anyway)."""
+            mb = await self._wg_mailbox()
+            if mb is None:
+                return
+            buf = mb + IP.WG_MB_BUF_OFF
+            n = 0
+            for gid, o, _c, m, _cells in OW.world_gate_rows(
+                    trails=trails_on, gulg=gulg_key_on):
+                if m & bits:
+                    await self.psp.write(buf + gid * 2, o.to_bytes(2, "little"))
+                    n += 1
+            if n:
+                dlog.info(f"  [openworld] live remap poked: {n} gate row(s) "
+                          f"opened (bits 0x{bits:02x})")
+
+        async def maintain_gates():
+            """save+0x834 bits 4-7 <- the held world items. OR only, never
+            cleared (a won bridge stays won), re-asserted every tick so a
+            save/load rollback of the byte heals itself; the bonus-crystal
+            bits 0-3 in the same byte are left as read."""
+            want = gate_mask(held_world_items())
+            if not want:
+                return
+            addr = self.sa(D.WORLD_GATE_BYTE_ADDR)
+            cur = (await self.psp.read(addr, 1))[0]
+            if (cur & want) != want:
+                await self.psp.write(addr, bytes([cur | want]))
+                dlog.info(f"  [openworld] world-gate bits asserted "
+                          f"0x{cur:02x} -> 0x{cur | want:02x}")
+            new = want & ~world_state["mask"]
+            if new:
+                world_state["mask"] |= new
+                await poke_gates(new)
         # Gulg hint: fires once per APPROACH (re-armed by walking out of the
         # box) and then every 60 s while the player loiters inside it.
         gulg_hint = {"inside": False, "last": 0.0}
@@ -5944,10 +6035,12 @@ class FF1PSPContext(CommonContext):
         dlog.info(f"  [openworld] early={early} extended={extended} docks={docks} "
                     f"({len(grid_edits)} grid edits, {len(class_edits)} river-class "
                     f"cells; canal attr always-on)")
-        grid_base = None
-        grid_bases = None       # all live anchor hits (rescan fills; see below)
-        att_base = None         # primary (canary) ATT copy
-        att_bases = None        # all live ATT_PREFIX hits (same freed-copy hazard)
+        # The arena is located through the ENGINE's own map object on every tick
+        # (_ow_live_arena), never by scanning RAM: a scan also finds FREED copies,
+        # and painting those is what put v330's world-item cells into Crescent
+        # Lake's compressed pack mid-load (Eridose 2026-10-05). `arena_state`
+        # only remembers where we last painted, for the moved-arena edge + log.
+        arena_state = {"base": None}
         # Live edit set = the toggle-selected edits, plus the canal bridge once the
         # canal is open. `cur` is rebound in tick() when the canal bit flips; apply()
         # and the canary check both read it so the bridge is maintained like any
@@ -5971,6 +6064,7 @@ class FF1PSPContext(CommonContext):
                 try:
                     tiles = dict(map_toggle_edits)
                     tiles.update(edits)
+                    tiles.update(world_state["ui"])   # engine-resolved on v331
                     ui.update_map_edits(tiles, dict(class_edits))
                 except Exception as ex:
                     dlog.info(f"  [openworld] map edits push failed: {ex!r}")
@@ -5990,33 +6084,6 @@ class FF1PSPContext(CommonContext):
 
         set_edits(compose())
         att_canary = min(canal_att) if canal_att else None
-        loop = asyncio.get_event_loop()
-        # Miss-backoff: consecutive failed rescans stretch the narrow-window
-        # interval 3s -> 30s cap (any hit resets). The arena being absent for
-        # a while (menu screens, transitions) used to mean a multi-MB sweep
-        # every 3 s for the whole stretch.
-        last_scan = {"window": 0.0, "full": 0.0, "wait": 3.0}
-        # Last address the arena was actually FOUND at. OW_SCAN_WINDOWS[0] is a
-        # static guess (0x09800000 +8MB) and the arena does NOT always live in it
-        # -- 2026-09-01 sessions had it at 0x09775dda and 0x09d75dda, one below the
-        # window and one above. Every narrow re-anchor then missed and recovery had
-        # to wait out the 30s gate on the full sweep: 35 s of the canal rendering
-        # without its bridge, right after the battle that moved the arena. The
-        # narrow window is re-centred on this hit instead.
-        last_hit = {"base": None}
-        # Relocation guard: the overworld arena is re-decompressed to a FRESH
-        # (often different) address every time the player re-enters the overworld
-        # -- from a town, dungeon, or battle. The canary/anchor checks can't see
-        # this: they read the CACHED grid_base, which now points at the freed old
-        # buffer whose bytes still hold our edited canary value (drift=False), so
-        # the loop silently maintains a dead buffer while the live arena stays
-        # vanilla -> the intermittent "river not connected". Force a fresh rescan
-        # on every overworld re-entry so grid_base tracks the live arena.
-        map_state = {"away": True, "verify": 0.0, "reentry": -1e9}
-        # apply() runs on every re-anchor/re-decompress (every few seconds on the
-        # overworld) and the base set is almost always identical -- remember what
-        # we last announced and only log when the arena actually relocates.
-        applied_log = {"bases": None}
 
         # Two DISTINCT address spaces -- never mix their strides. cell_addr:
         # the RELOCATING tile arena, 2 bytes/cell, OW.GRID_STRIDE bytes/row.
@@ -6027,74 +6094,6 @@ class FF1PSPContext(CommonContext):
             x, y = xy
             return base + y * OW.GRID_STRIDE + x * 2
 
-        async def rescan(narrow_only=False):
-            # Arena lives in the high heap: observed window first; full user
-            # RAM only as a rare, heavily rate-limited fallback.
-            # Collect ALL anchor hits, not just the first: a freed old arena
-            # keeps its (vanilla) anchor bytes, so find()-first can lock onto a
-            # dead copy while the live arena sits later in the window. apply()
-            # writes every verified copy -- writing a freed buffer is harmless,
-            # and the live one is guaranteed covered.
-            # narrow_only: skip the 24MB fallback sweep AND leave the full-sweep
-            # timer untouched (the periodic re-anchor uses this so it never starves
-            # the excursion path's genuine 30s fallback).
-            nonlocal grid_base, grid_bases, att_base, att_bases
-            now = loop.time()
-            if now - last_scan["window"] < last_scan["wait"]:
-                return
-            last_scan["window"] = now
-            # Re-entry grace: see OW_REENTRY_GRACE_S. Misses in this window keep
-            # the 3 s cadence and may run the full sweep every time.
-            grace = (now - map_state["reentry"]) < OW_REENTRY_GRACE_S
-            narrow = OW_SCAN_WINDOWS[0]
-            if last_hit["base"] is not None:
-                nsize = OW_SCAN_WINDOWS[0][1]
-                lo = max(USER_RAM_BASE, (last_hit["base"] - nsize // 2) & ~0xFFF)
-                # Clamp inside user RAM: a read crossing 0x0A000000 silently wedges
-                # the HybridPSP bridge ([[hybridpsp-oob-read-ws-wedge]]).
-                lo = min(lo, USER_RAM_BASE + USER_RAM_SIZE - nsize)
-                narrow = (lo, nsize)
-            windows = [narrow]
-            # The arena has been seen both below and above the static window
-            # (0x9775dda vs 0x9d75dda in ONE session, 2026-09-05: a re-centred
-            # narrow window on the first address cannot see the second). The
-            # static window is one more cheap 8 MB read -- try it before the
-            # 24 MB sweep instead of waiting out the full-sweep gate.
-            if narrow != OW_SCAN_WINDOWS[0]:
-                windows.append(OW_SCAN_WINDOWS[0])
-            if not narrow_only and (grace or
-                                    now - last_scan["full"] >= OW_FULL_SWEEP_GAP_S):
-                last_scan["full"] = now
-                windows = windows + list(OW_SCAN_WINDOWS[1:])
-            for start, size in windows:
-                t0 = loop.time()
-                blob = await (self.psp_scan or self.psp).read_chunked(
-                    start, size, breathe=SCAN_BREATHE_S)
-                dt = loop.time() - t0
-                if dt > 1.0:
-                    dlog.info(f"  [openworld] rescan {size >> 20}MB "
-                                f"@{start:#x} took {dt:.1f}s")
-                grid_bases = []
-                i = blob.find(OW.ANCHOR)
-                while i >= 0:
-                    grid_bases.append(start + i - OW.ANCHOR_OFF)
-                    i = blob.find(OW.ANCHOR, i + 1)
-                grid_base = grid_bases[0] if grid_bases else None
-                att_bases = []
-                j = blob.find(OW.ATT_PREFIX)
-                while j >= 0:
-                    att_bases.append(start + j)
-                    j = blob.find(OW.ATT_PREFIX, j + 1)
-                att_base = att_bases[0] if att_bases else None
-                if grid_base is not None:
-                    last_scan["wait"] = 3.0
-                    last_hit["base"] = grid_base
-                    return
-            if grace:
-                last_scan["wait"] = 3.0
-            else:
-                last_scan["wait"] = min(last_scan["wait"] * 2, OW_MISS_WAIT_CAP_S)
-
         def class_addr(xy):
             x, y = xy
             return tm_addr + tm_off + y * tm_w + x
@@ -6103,8 +6102,8 @@ class FF1PSPContext(CommonContext):
             """River terrain-class cells -> OW.RIVER_CLASS. The class map is at a
             FIXED address (it does not relocate like the tile arena), but the game
             rebuilds it on overworld load, so this runs from apply() like any other
-            edit. Header check first: the u16 W/H must read 255x255 before we poke
-            anything, so a write can never land in a churning/unloaded buffer."""
+            edit. Every cell re-proves the u16 W/H header (255x255) at write time,
+            so a write can never land in a churning/unloaded buffer."""
             if not class_edits:
                 return
             hdr = await self.psp.read(tm_addr, 4)
@@ -6112,62 +6111,87 @@ class FF1PSPContext(CommonContext):
                     int.from_bytes(hdr[2:4], "little") != tm_h:
                 return
             for xy, cls in class_edits.items():
-                await self.psp.write(class_addr(xy), bytes([cls]))
+                if not await self._write_guarded(class_addr(xy), bytes([cls]),
+                                                 ((tm_addr, hdr),)):
+                    return
 
-        async def apply():
-            # Write every anchor-verified arena copy (live + any freed stale
-            # ones -- stale writes are harmless, and we can't tell them apart).
+        async def apply(arena):
+            """Paint the LIVE arena (and its ATT) -- nothing else, ever.
+
+            Each cell is its own guarded write re-proving the scene pointer, the
+            grid pointer and the vanilla anchor (_ow_live_arena's guards). If the
+            engine tears the overworld down mid-burst -- a town or dungeon entry
+            -- the next guard fails and the burst stops, instead of the remaining
+            cells landing in the pack the engine is loading into the freed chunk.
+            Returns False when stopped, so the next tick re-locates and repaints."""
             await apply_classes()
-            wrote = 0
-            repaired = 0
-            for base in (grid_bases or [grid_base]):
-                # verify alignment first — never bulk-write on a stale base
-                chk = await self.psp.read(base + OW.ANCHOR_OFF, len(OW.ANCHOR))
-                if chk != OW.ANCHOR:
-                    continue
-                # PER-BASE state probe. The cached-canary drift check upstream can
-                # only speak for ONE base: a freed copy still holding our edits
-                # reads clean forever while the LIVE arena renders vanilla (the
-                # "restart put the docks back" report, 2026-08-08). Reading the
-                # canary in EVERY anchor hit is the only signal that says which
-                # copies were actually vanilla when we got here -- purely
-                # diagnostic, since we write them all either way.
-                if cur["canary"] is not None:
-                    pv = await self.psp.read(cell_addr(base, cur["canary"]), 2)
-                    if int.from_bytes(pv, "little") != cur["val"]:
-                        repaired += 1
-                for xy, v in cur["edits"].items():
-                    await self.psp.write(cell_addr(base, xy),
-                                         v.to_bytes(2, "little"))
-                wrote += 1
-            if repaired:
+            base = arena["base"]
+            read_vanilla = False
+            if cur["canary"] is not None:
+                pv = await self.psp.read(cell_addr(base, cur["canary"]), 2)
+                read_vanilla = int.from_bytes(pv, "little") != cur["val"]
+            done = 0
+            for xy, v in cur["edits"].items():
+                if not await self._write_guarded(cell_addr(base, xy),
+                                                 v.to_bytes(2, "little"),
+                                                 arena["guards"]):
+                    dlog.info(f"  [openworld] the arena changed under the paint "
+                              f"(scene change / load) -- stopped after {done} of "
+                              f"{len(cur['edits'])} cells, nothing written past it")
+                    return False
+                done += 1
+            if canal_att and arena["att"] is not None:
+                for tid, attr in canal_att.items():
+                    if not await self._write_guarded(arena["att"] + tid * 2,
+                                                     attr.to_bytes(2, "little"),
+                                                     arena["att_guards"]):
+                        break
+            if read_vanilla:
                 # Far visual-only edits (the northern docks) do not repaint until
                 # the chunk scrolls out and back, so a repair here can be silent
                 # in game -- log it or the next report is unfalsifiable again.
-                dlog.info(f"  [openworld] re-applied edits to {repaired} arena "
-                            f"cop{'y' if repaired == 1 else 'ies'} that read vanilla")
-            if not wrote:
-                return False
-            for abase in (att_bases or ([att_base] if att_base is not None else [])):
-                # verify the ATT prefix before poking -- a freed/reused copy is
-                # skipped, exactly like the grid anchor check above.
-                achk = await self.psp.read(abase, len(OW.ATT_PREFIX))
-                if achk != OW.ATT_PREFIX:
-                    continue
-                for tid, attr in canal_att.items():
-                    await self.psp.write(abase + tid * 2,
-                                         attr.to_bytes(2, "little"))
-            bases = tuple(grid_bases or [grid_base])
-            if bases != applied_log["bases"]:
-                applied_log["bases"] = bases
-                dlog.info(f"  [openworld] map edits applied @ "
-                            f"{', '.join(hex(b) for b in bases)}")
+                dlog.info("  [openworld] re-applied edits to the live arena "
+                          "(it read vanilla)")
+            if base != arena_state["base"]:
+                arena_state["base"] = base
+                dlog.info(f"  [openworld] map edits applied @ {base:#x} "
+                          f"(live arena)")
             return True
 
+        async def drifted(arena):
+            """Did a fresh decompress put vanilla back? Checked on the LIVE arena
+            only -- a freed copy keeps our values forever, which is what forced
+            the old periodic re-anchor."""
+            if cur["canary"] is not None:
+                cv = await self.psp.read(cell_addr(arena["base"], cur["canary"]), 2)
+                if int.from_bytes(cv, "little") != cur["val"]:
+                    return True
+            if class_canary is not None:
+                # The class map is rebuilt on overworld load without moving, so the
+                # grid canary can't see it revert -- check a river cell directly.
+                cc = await self.psp.read(class_addr(class_canary), 1)
+                if cc[0] != class_edits[class_canary]:
+                    return True
+            if arena["att"] is not None and att_canary is not None:
+                av = await self.psp.read(arena["att"] + att_canary * 2, 2)
+                if int.from_bytes(av, "little") != canal_att[att_canary]:
+                    return True
+            return False
+
         async def tick():
-            nonlocal grid_base, grid_bases, att_base, att_bases
             if self.save_delta is None:
                 return
+            # world_gates: keep the client-owned save byte in step with the
+            # held world items BEFORE the map gate -- an item received in a
+            # dungeon must be in the byte before the next overworld load, and
+            # the byte rides the save so a reload can at most drop bits that
+            # this re-asserts.
+            if gates_baked and (trails_on or gulg_key_on):
+                try:
+                    await maintain_gates()
+                except Exception as ex:
+                    dlog.info(f"  [openworld] world-gate byte: {ex!r} -- "
+                              f"retrying next tick")
             # NOTE: the canal-open bit is NO LONGER forced -- the player blows the
             # canal normally; we only make it walk+sail (CANAL_ATT) once it opens.
             # Map edits: overworld only (arena not resident elsewhere). Gate on the
@@ -6176,16 +6200,12 @@ class FF1PSPContext(CommonContext):
             # unmaintained across most of the world map.
             mid = (await self.psp.read(self.sa(D.LOADED_MAP_ID_SA), 1))[0]
             if mid != D.OVERWORLD_LOADED_MAP_ID:
-                map_state["away"] = True
                 return
             # In battle the map id still reads 9 (battle entered FROM the overworld)
-            # but the arena is freed/churning -- every canary read missed and
-            # triggered a rescan RIGHT AT battle start, the heaviest lag report. No
-            # walking happens in battle; skip. Gate on the real flag: the
-            # battle_base pointer LATCHES, so a range check here would return early
-            # forever after the first fight and never re-apply map edits again.
+            # and no walking happens; the arena lookup would refuse anyway (the
+            # battle scene owns the scene pointer), this just skips the reads.
+            # Gate on the real flag: the battle_base pointer LATCHES.
             if await self._in_battle():
-                map_state["away"] = True
                 return
             # Mount Gulg hint. The seal is silent by design -- the cave mouth
             # is simply not there -- so a player who has never seen an unsealed
@@ -6208,36 +6228,36 @@ class FF1PSPContext(CommonContext):
                     px = py = None
                 near = (px is not None
                         and abs(px - gx) <= gr and abs(py - gy) <= gr)
-                now_t = loop.time()
+                now_t = asyncio.get_event_loop().time()
                 if near and (not gulg_hint["inside"]
                              or now_t - gulg_hint["last"] >= 60.0):
                     gulg_hint["last"] = now_t
                     logger.info("Mt. Gulg is locked until you find its key "
                                 "in the multiworld")
                 gulg_hint["inside"] = near
+            repaint = False
             # World-changing items: repaint on the rising edge of "we now hold
             # one we did not before". Sticky union of the sticky _ever_won and
             # the live items_received -- the same pair the tracker uses, and for
             # the same reason: items_received is emptied for the duration of a
             # disconnect, which would rip up a bridge the player owns.
             if trails_on or gulg_key_on:
-                held = {iid for iid in
-                        (set(self._ever_won) | {it.item for it in self.items_received})
-                        if ID.is_world_item(iid)}
+                held = held_world_items()
                 if not held <= world_state["held"]:
                     world_state["held"] |= held
-                    world_state["edits"] = world_edits(world_state["held"])
+                    world_state["edits"] = arena_world_edits(world_state["held"])
+                    world_state["ui"] = world_edits(world_state["held"])
                     set_edits(compose(),
                               min(canal_bridge) if canal_state["open"] else None)
                     dlog.info(f"  [openworld] world items now held: "
                                 f"{sorted(world_state['held'])} -> "
-                                f"{len(world_state['edits'])} cells painted")
-                    if grid_base is not None and not map_state["away"]:
-                        await apply()
+                                f"{len(world_state['ui'])} cells "
+                                f"{'engine-resolved' if gates_baked else 'painted'}")
+                    repaint = True
             # Canal-open bit: while it is clear the canal is not dug and the bridge
             # must NOT be drawn (its tiles are walkable = a free crossing). On the
-            # rising edge, fold the bridge cells into the live edit set and force an
-            # immediate apply so the bridge appears the moment the canal opens.
+            # rising edge, fold the bridge cells into the live edit set and repaint
+            # this tick so the bridge appears the moment the canal opens.
             if canal_bridge:
                 # sa() wrap is MANDATORY: the save block shifts per session, so a
                 # raw read of the canonical address returns 0x00 forever.
@@ -6248,107 +6268,19 @@ class FF1PSPContext(CommonContext):
                     set_edits(compose(), min(canal_bridge) if is_open else None)
                     dlog.info(f"  [openworld] canal bridge "
                                 f"{'drawn' if is_open else 'withheld (canal closed)'}")
-                    if grid_base is not None and not map_state["away"]:
-                        await apply()
+                    repaint = True
             # Nothing left that lives in the relocating arena (baked ISO, canal
-            # not yet blown) -> never scan for it. The rescan is unconditional
-            # below, so without this bail a fully-baked seed still paid the
-            # 8 MB sweep every re-entry to write cells that were already right.
-            # The river terrain-CLASS map is at a FIXED address and is NOT
-            # baked, so it still gets maintained here.
+            # not yet blown) -> never touch it. The river terrain-CLASS map is at
+            # a FIXED address and is NOT baked, so it still gets maintained here.
             if not cur["edits"] and not canal_att:
-                grid_base = None
-                att_base = att_bases = None
                 await apply_classes()
                 return
-            # Back on the overworld after an excursion (town/dungeon/battle): the
-            # arena was re-decompressed elsewhere. Drop the stale base so the
-            # located branch below can't validate a dead buffer -- rescan finds
-            # the live arena.
-            if map_state["away"]:
-                map_state["away"] = False
-                grid_base = None
-                att_base = None
-                att_bases = None
-                # Force the re-entry rescan to run NOW: a recent scan from just
-                # before the excursion could otherwise rate-limit it for up to
-                # `wait` seconds, leaving far visual-only edits (e.g. the northern
-                # docks) unwritten while the player sails into view -> the coast
-                # draws vanilla and won't redraw until it scrolls out and back.
-                last_scan["window"] = 0.0
-                # ...and drop the miss-backoff. After a death (or any load), the
-                # map id reads 9 before the arena is decompressed, so the first
-                # rescans legitimately miss and stretch `wait` toward its 30s cap
-                # -- the player then stands on the overworld for up to half a
-                # minute with edits unapplied (foot trails missing) before a tick
-                # finally lands. Re-entry is exactly when we want the fast cadence.
-                last_scan["wait"] = 3.0
-                # ...and let the FULL sweep run on this re-entry if the narrow
-                # window misses. The excursion is what moved the arena, so gating
-                # the fallback for 30 s is exactly backwards -- that gate is what
-                # made the canal bridge lapse for 35 s after a battle. Bounded: one
-                # extra sweep per excursion, and only when the narrow scan misses.
-                last_scan["full"] = 0.0
-                # ...and open the grace window (OW_REENTRY_GRACE_S): the arena
-                # is often NOT decompressed yet on this first tick after a load,
-                # and one miss must not put the fast cadence to sleep.
-                map_state["reentry"] = loop.time()
-            if grid_base is None:
-                await rescan()
-                if grid_base is None:
-                    return                      # arena not decompressed yet
-                await apply()
-                return
-            # arena located: revalidate via canary(s). Check the grid canary (if any
-            # grid edits) and the canal attr canary; any drift -> reapply.
-            drifted = False
-            if cur["canary"] is not None:
-                cv = await self.psp.read(cell_addr(grid_base, cur["canary"]), 2)
-                if int.from_bytes(cv, "little") != cur["val"]:
-                    drifted = True
-            if not drifted and class_canary is not None:
-                # The class map is rebuilt on overworld load without moving, so the
-                # grid canary can't see it revert -- check a river cell directly.
-                cc = await self.psp.read(class_addr(class_canary), 1)
-                if cc[0] != class_edits[class_canary]:
-                    drifted = True
-            if not drifted and att_base is not None and att_canary is not None:
-                av = await self.psp.read(att_base + att_canary * 2, 2)
-                if int.from_bytes(av, "little") != canal_att[att_canary]:
-                    drifted = True
-            if drifted:
-                if not await apply():           # reverted (fresh decompress) or moved
-                    grid_base = None
-                    await rescan()
-                    if grid_base is not None:
-                        await apply()
-                return
-            # Periodic re-anchor: the arena can be re-decompressed to a FRESH
-            # address WITHOUT leaving the overworld (the "away" guard only trips on
-            # a town/dungeon/battle excursion). The cached canary then reads the
-            # FREED old buffer -- which still holds our edited value, so drift=False
-            # forever while the live arena renders VANILLA. Symptom: a foot pass you
-            # just crossed turns back into mountains behind you. So on a slow timer,
-            # force a fresh full rescan and re-apply to EVERY anchor hit (live +
-            # stale); if the live base has moved, adopt it.
-            now = loop.time()
-            if now - map_state["verify"] >= OW_REANCHOR_S:
-                map_state["verify"] = now
-                prev = grid_base
-                grid_base = None
-                last_scan["window"] = 0.0        # bypass the miss-backoff gate
-                await rescan(narrow_only=True)   # cheap: no 24MB sweep, timer intact
-                if grid_base is None:
-                    grid_base = prev             # keep the cached base; try later
-                    return
-                # ALWAYS re-apply, not only when the base set changed. An arena
-                # re-decompressed IN PLACE keeps the same address, so the old
-                # changed-bases condition saw nothing while the live copy had
-                # reverted to vanilla -- the player then had to restart the game
-                # to get the northern docks back (2026-08-08). ~43 cells x N bases
-                # every OW_REANCHOR_S over the direct bridge is negligible, and
-                # apply() re-verifies each base's anchor before writing anything.
-                await apply()
+            arena = await self._ow_live_arena()
+            if arena is None:
+                return      # menu/battle scene, not decompressed yet, mid-load
+            if (repaint or arena["base"] != arena_state["base"]
+                    or await drifted(arena)):
+                await apply(arena)
 
         await self._poll(1.5, "openworld_loop", tick)
 
@@ -7960,7 +7892,12 @@ class FF1PSPContext(CommonContext):
     async def _keyname_slot_addrs(self):
         """Per resident KEY_NAME bank copy (FM_EXTERN12/18 both load, and the
         menu may read either -- the probes had to write BOTH to see a change):
-        (bank_base, entry0_addr, width, rune_addr_or_None, shard_addr_or_None).
+        (bank_base, entry0_addr, width, rune_addr_or_None, shard_addr_or_None,
+        ident). ident = the bank's first 0x14 bytes as located (TEXT header,
+        entry count, total size, first offset): the cache revalidates on it and
+        every write guards on it -- the 8-byte TEXT magic alone is shared by
+        every resident bank, so a recycled address holding a DIFFERENT bank
+        passed the old check (recycled-memory class, Eridose 2026-10-05).
         entry0 = the Lute slot (aliased by spare id 37, the tablet line);
         rune_addr = the entry of RUNE_MENU_SLOT_KEY_ID ("Battery Circuit",
         borrowed for the rune line); shard_addr = the entry of
@@ -7990,10 +7927,9 @@ class FF1PSPContext(CommonContext):
         cached = getattr(self, "_keyname_slots", None)
         if cached:
             ok = True
-            for base, _e0, _w, _rune, _shard in cached:
+            for base, _e0, _w, _rune, _shard, ident in cached:
                 try:
-                    if await self.psp.read(base, len(self._KEYNAME_HDR)) \
-                            != self._KEYNAME_HDR:
+                    if await self.psp.read(base, len(ident)) != ident:
                         ok = False
                         break
                 except Exception:
@@ -8038,7 +7974,8 @@ class FF1PSPContext(CommonContext):
                             shard = (start + j + off(si)
                                      if width(si) == pad_w else None)
                             found.append((start + j, start + j + off(0),
-                                          pad_w, rune, shard))
+                                          pad_w, rune, shard,
+                                          bytes(buf[j:j + 0x14])))
                 except Exception:
                     pass
                 j = buf.find(self._KEYNAME_HDR, j + 1)
@@ -8058,21 +7995,23 @@ class FF1PSPContext(CommonContext):
 
         Width comes from the bank's own offset table, so whatever patch_iso
         baked into this entry sets the ceiling for what we may write here --
-        we only ever overwrite IN PLACE (space-padded), never re-lay."""
+        we only ever overwrite IN PLACE (space-padded), never re-lay.
+
+        Each item also carries (bank_base, ident) -- the write guard, same
+        identity rule as _keyname_slot_addrs."""
         cached = getattr(self, "_keydesc_slots", None)
         if cached:
             ok = True
-            for base, _a, _w in cached:
+            for base, _a, _w, ident in cached:
                 try:
-                    if await self.psp.read(base, len(self._KEYNAME_HDR)) \
-                            != self._KEYNAME_HDR:
+                    if await self.psp.read(base, len(ident)) != ident:
                         ok = False
                         break
                 except Exception:
                     ok = False
                     break
             if ok:
-                return [(a, w) for _b, a, w in cached]
+                return [(a, w, (b, i)) for b, a, w, i in cached]
             self._keydesc_slots = None
         elif cached == []:
             # An EMPTY result must never stick. Unlike the always-resident
@@ -8110,14 +8049,15 @@ class FF1PSPContext(CommonContext):
                             higher = [off(k) for k in range(cnt) if off(k) > o]
                             end = min(higher) if higher else total
                             if end > o:
-                                found.append((start + j, start + j + o, end - o))
+                                found.append((start + j, start + j + o, end - o,
+                                              bytes(buf[j:j + 0x14])))
                 except Exception:
                     pass
                 j = buf.find(self._KEYNAME_HDR, j + 1)
         self._keydesc_slots = found
         if found:
             self._keydesc_miss = 0
-        return [(a, w) for _b, a, w in found]
+        return [(a, w, (b, i)) for b, a, w, i in found]
 
     # Key Items column clips past ~18 glyphs (live 2026-07-24: a 20-glyph label
     # ran off-screen, and the RIGHT column clips even earlier: 18 fell off live
@@ -8180,8 +8120,10 @@ class FF1PSPContext(CommonContext):
                 if addr is None:
                     continue
                 body = NB.key_menu_encode(label, min(tup[2] - 1, cap))
-                if await self.psp.read(addr, len(body)) != body:
-                    await self.psp.write(addr, body)
+                cur = await self.psp.read(addr, len(body))
+                if cur != body and not await self._write_guarded(
+                        addr, body, ((tup[0], tup[5]), (addr, bytes(cur)))):
+                    self._keyname_slots = None      # bank moved -> relocate
 
         async def set_bit(addr_raw, mask, want):
             cur = (await self.psp.read(self.sa(addr_raw), 1))[0]
@@ -8462,14 +8404,16 @@ class FF1PSPContext(CommonContext):
         body = bytes(g for g in (CBK.KEYDESC_ENC.get(c) for c in text)
                      if g is not None)
         body += bytes([0x05])                       # TERM
-        for addr, width in await self._keydesc_slot_addr():
+        for addr, width, ident in await self._keydesc_slot_addr():
             if len(body) > width:
                 continue                            # never overrun the slot
             # Pad with the space glyph: if the renderer is offset-bounded
             # rather than TERM-bounded, stale tail glyphs would show through.
             out = body + bytes([CBK.KEYDESC_ENC.get(" ", 0)]) * (width - len(body))
-            if await self.psp.read(addr, width) != out:
-                await self.psp.write(addr, out)
+            cur = await self.psp.read(addr, width)
+            if cur != out and not await self._write_guarded(
+                    addr, out, (ident, (addr, bytes(cur)))):
+                self._keydesc_slots = None          # bank moved -> relocate
 
     async def _classname_loop(self):
         """Class rename: when a job's scroll is owned, overwrite that job's base +
@@ -8497,10 +8441,17 @@ class FF1PSPContext(CommonContext):
             base = await self._classname_bank_base(CN)
             if base is None:
                 return
+            # The bank is FM_CAMPUS, loaded with the menu into recycled pack
+            # memory: guard every write on the header the locator just proved
+            # plus the exact entry bytes being replaced.
+            ident = (base, bytes(await self.psp.read(base, 0x14)))
             for ei, body in want.items():
                 addr = base + CN.ENTRY0_OFF + ei * CN.SLOT
-                if await self.psp.read(addr, CN.SLOT) != body:
-                    await self.psp.write(addr, body)
+                cur = await self.psp.read(addr, CN.SLOT)
+                if cur != body and not await self._write_guarded(
+                        addr, body, (ident, (addr, bytes(cur)))):
+                    self._classname_base = None     # bank moved -> relocate
+                    return
 
         await self._poll(0.5, "classname", tick)
 
@@ -8542,12 +8493,18 @@ class FF1PSPContext(CommonContext):
         # loaded a vanilla sheet and nothing re-pinned it for 4+ minutes).
         SHEET_SPAN = JS.PIX_OFF + JS.PIX_LEN
 
-        async def apply(addr, pix):
+        async def apply(addr, cls, pix):
             # pixels only -- the palette is already ours, baked into the disc
             # record every resident copy is loaded from. The repaint keys on
             # pixel bytes changing anyway (a palette-only write was proven
-            # invisible 2026-08-12).
-            await self.psp.write(addr + JS.PIX_OFF, pix)
+            # invisible 2026-08-12). Guarded: `seen` addresses outlive the packs
+            # they came from, so the write re-proves, in the same step, that a
+            # job sheet with this class's vanilla pixels is still there.
+            return await self._write_guarded(
+                addr + JS.PIX_OFF, pix,
+                ((addr, JS.GIM_MAGIC),
+                 (addr + JS.SHEET_HDR_OFF, JS.SHEET_HDR),
+                 (addr + JS.PIX_OFF + JS.SIG_OFF, JS.VANILLA_SIG[cls])))
 
         async def sheet_sig(addr):
             """Signature window of the sheet at addr, b"" on any failure.
@@ -8579,8 +8536,11 @@ class FF1PSPContext(CommonContext):
                     continue
                 sig = await sheet_sig(addr)
                 if sig == JS.VANILLA_SIG[cls]:
-                    await apply(addr, targets[cls][1])
-                    known[addr] = cls
+                    if await apply(addr, cls, targets[cls][1]):
+                        known[addr] = cls
+                    elif addr in known:
+                        del known[addr]      # not a sheet any more -> rescan
+                        lost = True
                 elif sig == JS.custom_sig(cls):
                     known[addr] = cls
                 elif addr in known:
@@ -8590,7 +8550,32 @@ class FF1PSPContext(CommonContext):
                 return
             # rescan: find every resident sheet of a target class
             want = {JS.VANILLA_SIG[c]: c for c in targets}
-            done = {JS.custom_sig(c): c for c in targets}
+            # A cloned sheet (one class's art shipped for another, Apprentice
+            # 5 -> Necrocaster 11) draws the same picture from a different
+            # merged palette, and the signature window is transparent padding
+            # in that art -- so two targets share a custom sig. Keying `done`
+            # on it alone re-tagged every pinned JOB05 sheet as class 11 on
+            # each rescan, and the next vanilla reload at that address missed
+            # the fast path (sig != VANILLA_SIG[11]) and fell back to a full
+            # rescan: the "vanilla for the first second of every fight"
+            # regression. Ambiguous sigs are settled by one 64-byte read of
+            # a content window where clones differ (job_sprites.DISAMBIG_OFF).
+            done = {}
+            for c in targets:
+                done.setdefault(JS.custom_sig(c), []).append(c)
+
+            async def custom_class(base, cands):
+                if len(cands) == 1:
+                    return cands[0]
+                try:
+                    probe = await self.psp.read(
+                        base + JS.PIX_OFF + JS.DISAMBIG_OFF, JS.SIG_LEN)
+                except Exception:
+                    probe = b""
+                for c in cands:
+                    if JS.disambig(c) == probe:
+                        return c
+                return cands[0]
             addr = SCAN_LO
             while addr < SCAN_HI:
                 # overlap so a needle straddling a chunk edge still hits,
@@ -8606,15 +8591,93 @@ class FF1PSPContext(CommonContext):
                     sig = await sheet_sig(base)
                     cls = want.get(sig)
                     if cls is not None and base + SHEET_SPAN <= SCAN_HI:
-                        await apply(base, targets[cls][1])
-                        known[base] = seen[base] = cls
+                        if await apply(base, cls, targets[cls][1]):
+                            known[base] = seen[base] = cls
                     elif sig in done:
-                        known[base] = seen[base] = done[sig]
+                        known[base] = seen[base] = await custom_class(base, done[sig])
                     pos = blob.find(JS.GIM_MAGIC, pos + 1)
                 addr += SCAN_CHUNK
                 await asyncio.sleep(0)   # yield between 1MB chunks
 
         await self._poll(0.25, "jobsprite", tick)
+
+    async def _write_guarded(self, address, data, guards=()):
+        """THE write for engine-owned memory: heaps, resource banks, battle
+        blocks -- anything at an address this client FOUND by scanning or
+        CAPTURED earlier. Writes `data` only while every `(addr, expected)`
+        guard still reads exactly `expected`; True = written.
+
+        Why every such write goes through here: the engine recycles freed
+        memory at once and stages the next pack's COMPRESSED stream at the
+        tail of the recycled chunk, so a write aimed at what an address held a
+        moment ago can corrupt a pack mid-load. That one class is behind every
+        Eridose crash -- the steal fade's drop rewrite into a dead battle block
+        (RA 0x08915ce8) and v330's overworld paint landing in Crescent Lake's
+        stream (RA 0x088fba28, 2026-10-05). Guards state the facts the write
+        depends on: an identity (header, anchor, pointer), or for a restore
+        the exact bytes WE wrote -- so a reloaded or recycled region is left
+        alone. On the direct-memory transport the check and the write run in
+        one synchronous step (PPSSPPMem.write_guarded); test doubles and bare
+        transports fall back to read-then-write."""
+        guards = tuple(guards)
+        fn = getattr(self.psp, "write_guarded", None)
+        if fn is not None:
+            return await fn(address, bytes(data), guards)
+        for gaddr, want in guards:
+            if await self.psp.read(gaddr, len(want)) != want:
+                return False
+        await self.psp.write(address, bytes(data))
+        return True
+
+    async def _ow_live_arena(self):
+        """The overworld tile arena the ENGINE is drawing right now, or None.
+
+        Follows the engine's own pointers instead of signature-scanning RAM:
+        [FIELD_STRUCT_PTR] -> field scene (its vtable proves it; a menu or a
+        battle repoints the global) -> embedded map object -> grid / ATT
+        pointers (ff1_data, verified on five overworld savestates). A scan
+        also finds FREED copies, and v330 painted every one of them; the
+        engine hands a freed arena chunk to the next pack and stages that
+        pack's compressed stream at its tail, which is how a paint racing a
+        town load decoded Crescent Lake's second layer as garbage.
+
+        Returns {"base", "guards", "att", "att_guards"}: base = the client's
+        cell origin (OW cell_addr space); guards = the facts every write must
+        re-prove at write time (scene pointer, grid pointer, vanilla anchor).
+        None when this is not the field scene, the map is not the 255x255
+        overworld, or the anchor is absent (not decompressed yet / mid-load)
+        -- callers just retry next tick."""
+        from . import openworld_data as OW
+        lo, hi = USER_RAM_BASE, USER_RAM_BASE + USER_RAM_SIZE
+        try:
+            raw = await self.psp.read(D.FIELD_STRUCT_PTR, 4)
+            scene = struct.unpack("<I", raw)[0]
+            mo = scene + D.OW_MAP_OBJ_OFF
+            if not (lo <= scene and mo + 0x40 <= hi):
+                return None
+            if await self.psp.read_u32(scene + 4) != D.FIELD_SCENE_VTABLE:
+                return None
+            w, h, gptr, aptr = struct.unpack(
+                "<IIII", await self.psp.read(mo + D.OW_MAP_DIMS_OFF, 16))
+            if (w, h) != (OW.GRID_W, OW.GRID_W):
+                return None
+            base = gptr + D.OW_GRID_PTR_SKEW
+            if not (lo <= base and base + OW.GRID_W * OW.GRID_STRIDE <= hi):
+                return None
+            anchor_addr = base + OW.ANCHOR_OFF
+            if await self.psp.read(anchor_addr, len(OW.ANCHOR)) != OW.ANCHOR:
+                return None
+        except Exception:
+            return None
+        guards = ((D.FIELD_STRUCT_PTR, raw),
+                  (mo + D.OW_MAP_GRID_PTR_OFF, struct.pack("<I", gptr)),
+                  (anchor_addr, OW.ANCHOR))
+        att = aptr if lo <= aptr and aptr + 0x400 <= hi else None
+        att_guards = (((D.FIELD_STRUCT_PTR, raw),
+                       (mo + D.OW_MAP_ATT_PTR_OFF, struct.pack("<I", aptr)),
+                       (aptr, OW.ATT_PREFIX)) if att is not None else ())
+        return {"base": base, "guards": guards, "att": att,
+                "att_guards": att_guards}
 
     async def _in_battle(self):
         """True iff the player is NOT in normal field control right now.
@@ -8668,10 +8731,27 @@ class FF1PSPContext(CommonContext):
             base = CN.CLASS_RENAME[1][1 if ninja else 0]
         return f"Your {base} {self._STEAL_BOX_VERB} an extra "
 
+    @staticmethod
+    def _battlemsg_hdr_ok(hdr):
+        """BATTLE_MSG's header shape: TEXT magic, exactly 16 entries, total
+        0x164 -- lookalike TEXT banks fail one of the three."""
+        return (len(hdr) >= 0x10 and hdr[:8] == b"\0\0\0\0TEXT"
+                and struct.unpack_from("<I", hdr, 8)[0] >> 8 == 16
+                and struct.unpack_from("<I", hdr, 0xC)[0] == 0x164)
+
     async def _find_battlemsg_bank(self):
-        """Locate the resident BATTLE_MSG.MSG TEXT bank (16 entries) and cache it."""
+        """Locate the resident BATTLE_MSG.MSG TEXT bank (16 entries) and cache it.
+        The cache is re-proved on every call (TEXT magic, 16 entries, total
+        0x164): the bank rides battle pack memory the engine recycles, so a
+        bare cached address can hold a map pack by the next battle."""
         if self._battlemsg_bank is not None:
-            return self._battlemsg_bank
+            try:
+                if self._battlemsg_hdr_ok(
+                        await self.psp.read(self._battlemsg_bank, 0x14)):
+                    return self._battlemsg_bank
+            except Exception:
+                pass
+            self._battlemsg_bank = None
         # Sweep for _STEAL_BOX_SIG, an 8-byte glyph signature from the bank's
         # text payload. Each hit reads 0x420 bytes from hit-0x400: the TEXT
         # container header precedes the glyph payload by at most 0x400.
@@ -8688,9 +8768,7 @@ class FF1PSPContext(CommonContext):
                 if t >= 4 and cbuf[t - 4:t] == b"\0\0\0\0":
                     base = (h - 0x400) + t - 4
                     hdr = await self.psp.read(base, 0x14)
-                    cnt = struct.unpack_from("<I", hdr, 8)[0] >> 8
-                    tot = struct.unpack_from("<I", hdr, 0xC)[0]
-                    if cnt == 16 and tot == 0x164:
+                    if self._battlemsg_hdr_ok(hdr):
                         self._battlemsg_bank = base
                         return base
                 j = buf.find(self._STEAL_BOX_SIG, j + 1)
@@ -8730,29 +8808,52 @@ class FF1PSPContext(CommonContext):
         span = tot - off14                      # entry14 spans through entry15
         if len(msg) > span:
             return                              # too long even combined; skip
-        orig_off15 = await self.psp.read(base + 0x10 + 15 * 4, 4)
-        orig_span = await self.psp.read(base + off14, span)
-        self._steal_box_restore = (base, orig_off15, orig_span, off14)
+        off15_at = base + 0x10 + 15 * 4
+        orig_off15 = bytes(hdr[0x10 + 15 * 4:0x10 + 15 * 4 + 4])
+        orig_span = bytes(await self.psp.read(base + off14, span))
+        # Both writes are compare-and-swap against what this decision was read
+        # from: the TEXT bank header plus the exact bytes being replaced. The
+        # bank is a loaded bundle that moves within a session (see above), so
+        # anything else at this address must not be written.
+        ident = (base, bytes(hdr[:0x10]))
+        sp = BFONT.BATTLE_ENC[" "]
+        # msg[:-1] strips the encoder's own terminator so space padding +
+        # TERM can be appended at the exact span end.
+        body = (msg[:-1] + bytes([sp]) * (span - len(msg))
+                + bytes([BFONT.TERM]))[:span]
+        new_off15 = struct.pack("<I", tot)
         # bump entry15's offset to end-of-bank so entry14 owns [off14, tot)
         # -- the renderer takes entry 14's span as off15-off14, so it now
         # draws 14's bytes straight through 15's slot (15 is sacrificed while
         # the steal box is shown; _steal_box_restore_now puts both back).
-        await self.psp.write(base + 0x10 + 15 * 4, struct.pack("<I", tot))
-        sp = BFONT.BATTLE_ENC[" "]
-        # msg[:-1] strips the encoder's own terminator so space padding +
-        # TERM can be appended at the exact span end.
-        body = msg[:-1] + bytes([sp]) * (span - len(msg)) + bytes([BFONT.TERM])
-        await self.psp.write(base + off14, body[:span])
+        if not await self._write_guarded(off15_at, new_off15,
+                                         (ident, (off15_at, orig_off15))):
+            return
+        if not await self._write_guarded(base + off14, body,
+                                         (ident, (base + off14, orig_span))):
+            await self._write_guarded(off15_at, orig_off15,
+                                      ((off15_at, new_off15),))
+            return
+        self._steal_box_restore = (base, off14, orig_off15, orig_span,
+                                   new_off15, body)
 
     async def _steal_box_restore_now(self):
-        """Undo _steal_box_author (restore native 'Obtained {NAME}.' entry 14/15)."""
+        """Undo _steal_box_author (restore native 'Obtained {NAME}.' entry 14/15).
+
+        Runs after the battle ends, when the bank may already be reloaded
+        (vanilla is back) or freed and recycled for the next pack -- so each
+        half is put back ONLY over the bytes we wrote (_write_guarded)."""
         if not self._steal_box_restore:
             return
-        base, orig_off15, orig_span, off14 = self._steal_box_restore
+        base, off14, orig_off15, orig_span, new_off15, body = \
+            self._steal_box_restore
         self._steal_box_restore = None
+        off15_at = base + 0x10 + 15 * 4
         try:
-            await self.psp.write(base + 0x10 + 15 * 4, orig_off15)
-            await self.psp.write(base + off14, orig_span)
+            await self._write_guarded(base + off14, orig_span,
+                                      ((base + off14, body),))
+            await self._write_guarded(off15_at, orig_off15,
+                                      ((off15_at, new_off15),))
         except Exception:
             pass
 
@@ -8853,7 +8954,11 @@ class FF1PSPContext(CommonContext):
                 cur = await self.psp.read(base + off8, len(body))
                 if cur == body:
                     continue                        # already ours
-                await self.psp.write(base + off8, body)
+                if not await self._write_guarded(
+                        base + off8, body,
+                        ((base, bytes(hdr[:0x14])), (base + off8, bytes(cur)))):
+                    self._battlemsg_bank = None     # bank moved -> rescan
+                    continue
                 dlog.info("  [slotbox] level-up line -> "
                             f"'{self._SLOTBOX_TEXT}' @{base + off8:#x}")
             except Exception:
@@ -9197,9 +9302,11 @@ class FF1PSPContext(CommonContext):
                         break                  # battle ended -> abandon this steal
                     lst = await self.psp.read(dbase, 27)
                     free = await self._steal_drop_slot(bb, lst)
-                    if free is not None:
+                    # compare-and-swap on the whole list this decision read
+                    if free is not None and await self._write_guarded(
+                            dbase + free * 3, self._steal_drop,
+                            ((dbase, bytes(lst)),)):
                         wrote = free
-                        await self.psp.write(dbase + free * 3, self._steal_drop)
                         break
                     await asyncio.sleep(0.25)
                 if wrote is not None:
@@ -9722,6 +9829,15 @@ class FF1PSPContext(CommonContext):
         nothing to arm."""
         return await self._find_mailbox(b"RPMK", "_rp_mb", "party")
 
+    async def _wg_mailbox(self):
+        """On-disc WGAT mailbox (world_gates, v331): magic, u16 row count, the
+        baked gate rows, and the LIVE 512-entry u16 remap buffer at
+        IP.WG_MB_BUF_OFF that the map-load cave rebuilds from save+0x834. The
+        client pokes an opened row's entry there so a bridge appears the tick
+        its item arrives instead of at the next map load. None on a bake
+        without the feature."""
+        return await self._find_mailbox(b"WGAT", "_wg_mb", "world_gates")
+
     async def _write_magic_power_tables(self, soft_ids):
         """Publish the three per-monster-id u16[256] tables the magic_power
         caves read. Called from _write_monster_rewards so it rides the SAME
@@ -9888,13 +10004,25 @@ class FF1PSPContext(CommonContext):
             if t is not None and not t.done():
                 t.cancel()
             setattr(self, attr, None)
+        await self._steal_icon_give_back()
+
+    async def _steal_icon_give_back(self):
+        """Put def 19's original OTI entry back -- ONLY if the entry still
+        holds the bytes WE wrote. This runs ~1 s after the battle ends (the
+        battle-end backstop), by which time BATTLEICON.PCK may be freed and its
+        bank memory recycled for the next pack, possibly a map pack still
+        decompressing; and if the pack was simply reloaded, vanilla is already
+        back. Either way the entry no longer reads our body and nothing is
+        written (_write_guarded)."""
         ent = self._steal_icon_restore
         self._steal_icon_restore = None
-        if ent is not None:
-            try:
-                await self.psp.write(ent[0], ent[1])
-            except Exception:
-                pass
+        if ent is None:
+            return
+        addr, orig, ours = ent
+        try:
+            await self._write_guarded(addr, orig, ((addr, ours),))
+        except Exception:
+            pass
 
     async def _steal_block_live(self, bb, map0):
         """True iff it is still safe to WRITE into the battle block at `bb`.
@@ -10026,9 +10154,11 @@ class FF1PSPContext(CommonContext):
                 rec = i * self._SLOT_STRIDE
                 # only clear slots holding OUR icon (kind == borrowed def), never
                 # a native popup that reused this transient slot
-                if blk[rec + self._STEAL_SLOT_KIND_OFF] == PB.STEAL_BORROW_DEF:
-                    await self.psp.write(
-                        base + rec + self._STEAL_SLOT_ACTIVE_OFF, b"\x00")
+                kind_at = base + rec + self._STEAL_SLOT_KIND_OFF
+                if blk[rec + self._STEAL_SLOT_KIND_OFF] == PB.STEAL_BORROW_DEF \
+                        and await self._write_guarded(
+                            base + rec + self._STEAL_SLOT_ACTIVE_OFF, b"\x00",
+                            ((kind_at, bytes([PB.STEAL_BORROW_DEF])),)):
                     cleared_n += 1
                     dlog.info(f"  [steal-icon] fade: cleared slot "
                                 f"0x{lo + i:02x} (bb=0x{bb:08x})")
@@ -10085,8 +10215,10 @@ class FF1PSPContext(CommonContext):
                     present = any(lst[i*3] == drop[0] and lst[i*3+1] == drop[1]
                                   for i in range(9))
                     free = await self._steal_drop_slot(bb, lst)
-                    if not present and free is not None:
-                        await self.psp.write(dbase + free * 3, drop)
+                    # compare-and-swap on the whole list this decision read
+                    if (not present and free is not None
+                            and await self._write_guarded(
+                                dbase + free * 3, drop, ((dbase, bytes(lst)),))):
                         dlog.info(f"  [steal-icon] fade: steal entry was wiped "
                                     f"by battle-start init -- rewrote to slot"
                                     f"{free} ({drop[0]:02x} {drop[1]:02x} "
@@ -10100,13 +10232,7 @@ class FF1PSPContext(CommonContext):
             # "MISS!!" text (live 2026-07-23) -- far worse than leaving the cue
             # up; the battle-end restore is the backstop either way.
             if cleared_n:
-                ent = self._steal_icon_restore
-                self._steal_icon_restore = None
-                if ent is not None:
-                    try:
-                        await self.psp.write(ent[0], ent[1])
-                    except Exception:
-                        pass
+                await self._steal_icon_give_back()
 
     # Both the icon AND its SFX are held back this long after the steal fires,
     # so the cue lands just past the battle-start jingle instead of colliding
@@ -10159,9 +10285,16 @@ class FF1PSPContext(CommonContext):
                 return
             off = await self.psp.read_u32(oti + 4 + 4 * PB.STEAL_BORROW_DEF)
             ent = oti + off
-            cur = await self.psp.read(ent, 28)             # 2 entries x 14 bytes
-            if self._steal_icon_restore is None:
-                self._steal_icon_restore = (ent, bytes(cur))
+            cur = bytes(await self.psp.read(ent, 28))      # 2 entries x 14 bytes
+            prev = self._steal_icon_restore
+            if prev is not None and prev[0] != ent:
+                # a borrow from an EARLIER battle's OTI was never handed back:
+                # give it back first (guarded -- it is probably recycled)
+                await self._steal_icon_give_back()
+                prev = None
+            # the original is what the entry held before ANY borrow this battle
+            # (a re-borrow reads our own previous body)
+            orig = prev[1] if prev is not None else cur
             # 14-byte OTI sprite-def record: s16 dx, s16 dy, u16 atlas u,
             # u16 atlas v, u16 w, u16 h, u16 id -- two records per def entry.
             # The repack below keeps both ids and swaps the borrowed def's
@@ -10172,7 +10305,11 @@ class FF1PSPContext(CommonContext):
                                cell_x, PB.STEAL_ICON_Y, 16, 16, e0_id)
             body += struct.pack("<hhHHHHH", 0, 0, cell_x, PB.STEAL_ICON_Y,
                                 0, 0, e1_id)               # 2nd piece: zero size
-            await self.psp.write(ent, body)
+            # compare-and-swap on the bytes we just decided from: no write if
+            # the OTI moved or reloaded since the read
+            if not await self._write_guarded(ent, body, ((ent, cur),)):
+                return
+            self._steal_icon_restore = (ent, orig, body)
             # kind (+5) + unit (+6) + SE id (+8) BEFORE count (+4): the cave
             # reads count first, so arming it last means it never fires on a
             # stale kind/unit/sound. Sound tracks rarity (user's mapping
@@ -13007,7 +13144,7 @@ class FF1PSPContext(CommonContext):
             f"!!!  FIX: close EVERY PPSSPP window ({stray_process_hint()}),",
             "!!!  do NOT load a savestate made on another seed (use an",
             "!!!  in-game save), then reconnect.",
-            "!!!  STILL BROKEN? Type  /logs  -- it saves one zip with",
+            "!!!  STILL BROKEN? Type  /logs  -- it saves one file with",
             "!!!  everything needed to diagnose this; send it to whoever",
             "!!!  maintains this apworld.",
             bar, ""):

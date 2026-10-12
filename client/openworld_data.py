@@ -251,11 +251,10 @@ CANAL_OPEN_BIT = 0x08
 
 # ---- world-changing AP items (2026-09-03) -----------------------------------
 # Authored in re_only/ap_world_item_edits.py; see that module's docstring for the
-# design and the measured connectivity of every state. RUNTIME-ONLY: the paint
-# depends on which AP items the player holds, so none of this can be baked.
+# design and the measured connectivity of every state.
 #
-# unlockable_northern_foot_trails, painted with the option on and NO item held:
-#     TRAILS_BASE_GRID_EDITS  (bridge stub + corridor + both boulders, 113 cells)
+# unlockable_northern_foot_trails, with the option on and NO item held:
+#     TRAILS_BASE_GRID_EDITS  (both bridge stubs + corridor + both boulders)
 # ...then one overlay per AP item actually held:
 #     LUFENIAN_BRIDGE_BUILT_GRID_EDITS   "Lufenian Bridge"
 #     LUFENIAN_BOULDER_OPEN_GRID_EDITS   "Lufenian Nitro Powder"
@@ -264,6 +263,14 @@ CANAL_OPEN_BIT = 0x08
 # mount_gulg_key: GULG_SEAL_GRID_EDITS walls the overworld entrance while the key
 # is NOT held (inverted gate); GULG_SEAL_CLEARED_GRID_EDITS puts those cells back
 # to vanilla once it is.
+#
+# Since v331 (world_gates) these resolved tables are the MAP TAB's picture and
+# the tests' oracle; on a v331 bake the ENGINE resolves them: the base paint is
+# on disc, every cell whose open and closed ids differ holds a spare GATE id on
+# disc (WORLD_GATE_ROWS), and the map-load remap cave turns it into the open or
+# closed id from the client-owned save byte save+WORLD_GATE_BYTE_OFF. The
+# client only maintains that byte (and pokes the live remap for immediacy);
+# the runtime grid paint below is the repair path for pre-v331 ISOs.
 LUFENIAN_BRIDGE_BASE_GRID_EDITS = {
     (222, 117): 388,
     (221, 118): 387,
@@ -283,6 +290,20 @@ LUFENIAN_BRIDGE_BUILT_GRID_EDITS = {
     (222, 115): 369,
     (222, 116): 369,
     (222, 117): 369,
+}
+# The BUILT cells that are walkable in both states (north landing) -- part of
+# the base paint, never gated.
+LUFENIAN_BRIDGE_LANDING_GRID_EDITS = {
+    (222, 112): 79,
+    (221, 113): 62,
+    (222, 113): 353,
+}
+# The span's CLOSED look (vanilla coast/water + the base pier's stub end).
+LUFENIAN_BRIDGE_SPAN_CLOSED_GRID_EDITS = {
+    (222, 114): 19,
+    (222, 115): 0,
+    (222, 116): 0,
+    (222, 117): 388,
 }
 NORTHERN_TRAIL_GRID_EDITS = {
     (204, 27): 145,
@@ -425,6 +446,68 @@ GULG_SEAL_CLEARED_GRID_EDITS = {
 
 # Everything the trails option paints before any of its items are found.
 TRAILS_BASE_GRID_EDITS = {**LUFENIAN_BRIDGE_BASE_GRID_EDITS,
+                          **LUFENIAN_BRIDGE_LANDING_GRID_EDITS,
                           **NORTHERN_TRAIL_GRID_EDITS,
                           **LUFENIAN_BOULDER_CLOSED_GRID_EDITS,
                           **GAIAN_BOULDER_CLOSED_GRID_EDITS}
+
+# ---- engine-native gates (world_gates, v331) --------------------------------
+# One row per distinct (open, closed) pair: the GRID on disc holds gate_id at
+# every listed cell; the world_gates cave (iso_patcher.apply_world_gates) sets
+# remap[gate_id] = open_id while `mask` is set in the save byte, closed_id
+# otherwise. Gate ids are spare MAP_00 tile ids (absent from the vanilla grid,
+# from every table here, and from the vanilla remap targets); the order is
+# frozen because it IS the id assignment (re_only/ap_world_item_edits.py).
+WORLD_GATE_BYTE_OFF = 0x834          # save+0x834: bits 4-7 (0-3 = bonus crystals)
+WORLD_GATE_BIT_LUFENIAN_BRIDGE = 0x10
+WORLD_GATE_BIT_LUFENIAN_NITRO = 0x20
+WORLD_GATE_BIT_GAIAN_NITRO = 0x40
+WORLD_GATE_BIT_MOUNT_GULG_KEY = 0x80
+WORLD_GATE_TRAILS_MASK = (WORLD_GATE_BIT_LUFENIAN_BRIDGE
+                          | WORLD_GATE_BIT_LUFENIAN_NITRO
+                          | WORLD_GATE_BIT_GAIAN_NITRO)
+WORLD_GATE_GULG_MASK = WORLD_GATE_BIT_MOUNT_GULG_KEY
+# (gate_id, open_id, closed_id, mask, ((x, y), ...))
+WORLD_GATE_ROWS = (
+    (0x002, 0x171, 0x013, 0x10, ((222, 114),)),
+    (0x003, 0x171, 0x000, 0x10, ((222, 115), (222, 116),)),
+    (0x005, 0x171, 0x184, 0x10, ((222, 117),)),
+    (0x006, 0x067, 0x0c0, 0x20, ((205, 42),)),
+    (0x007, 0x0e1, 0x0c1, 0x20, ((206, 42),)),
+    (0x008, 0x0d8, 0x0c0, 0x40, ((201, 39),)),
+    (0x00c, 0x08d, 0x0c1, 0x40, ((202, 39),)),
+    (0x00d, 0x0f0, 0x088, 0x80, ((178, 197),)),
+    (0x00e, 0x093, 0x087, 0x80, ((179, 197),)),
+    (0x00f, 0x13b, 0x063, 0x80, ((180, 197),)),
+    (0x021, 0x13c, 0x064, 0x80, ((181, 197),)),
+    (0x039, 0x13d, 0x065, 0x80, ((182, 197),)),
+    (0x04a, 0x087, 0x08b, 0x80, ((183, 197),)),
+    (0x123, 0x086, 0x078, 0x80, ((180, 198),)),
+    (0x188, 0x095, 0x079, 0x80, ((182, 198),)),
+)
+
+
+def world_gate_rows(trails=True, gulg=True):
+    """The WORLD_GATE_ROWS a seed with these options bakes (a row rides the
+    option that owns its mask)."""
+    out = []
+    for row in WORLD_GATE_ROWS:
+        mask = row[3]
+        if ((mask & WORLD_GATE_TRAILS_MASK and trails)
+                or (mask & WORLD_GATE_GULG_MASK and gulg)):
+            out.append(row)
+    return out
+
+
+def world_gate_cells(trails=True, gulg=True):
+    """{(x, y): gate_id} -- what map_bake writes into the disc grid."""
+    return {xy: gid for gid, _o, _c, _m, cells in world_gate_rows(trails, gulg)
+            for xy in cells}
+
+
+def world_gate_resolved(held_mask, trails=True, gulg=True):
+    """{(x, y): tile_id} -- what the engine shows at every gated cell for a
+    save byte holding `held_mask` (the cave's rule, in Python)."""
+    return {xy: (o if held_mask & m else c)
+            for _gid, o, c, m, cells in world_gate_rows(trails, gulg)
+            for xy in cells}

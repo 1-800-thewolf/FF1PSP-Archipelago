@@ -1341,7 +1341,17 @@ ON_DISC_ALWAYS = ("shop_spell_level", "bikke_ship_split",
                   # jobs for one toggle, and an auto_dash-off player could never
                   # opt in from the Config menu. AutoDash keeps its real job
                   # (seeding the new-game Config defaults, ApClient._config_loop).
-                  "super_dash")
+                  "super_dash",
+                  # foot_stays_foot (v331, reworked v332): the overworld scene
+                  # init (fn 0x0883d864) re-derives the vehicle from the ATT low
+                  # byte of the tile under the party (0x0f -> ship). Our canal
+                  # crossing is walk+sail (0x000F), a class vanilla lacks, so a
+                  # party saved on foot there woke up in a ship. The cave keeps
+                  # mode 0 on a foot-legal 0x0f tile and nowhere else -- the
+                  # re-derive itself must survive: Exit/Emergency Exit out of a
+                  # ship- or canoe-entered dungeon boards through it (v331
+                  # skipped it for every on-foot load and stranded the party).
+                  "foot_stays_foot")
 ON_DISC_SLOT_KEY = "on_disc"
 
 # Web-template buckets, modeled on the FF1 NES randomizer's tab layout (Goal /

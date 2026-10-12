@@ -31,10 +31,13 @@ memories, all live-proven 2026-07-14/15):
     layout travels in the plan (roll_plan) because it depends on intensity.
   * Every NORMAL add monster (id < 0x80 or 0x91+) needs its sprite pair
     (MS_<gim>.GIM/_S) inside MS2_<fid>.PCK (gid-sorted).
-  * BOSS-id monsters (0x80-0x90) load per-MONSTER from their dedicated
-    BOSS_<mon-0x80>.PCK packs, pack-free, in ANY slot -- live-proven
-    (Echidna + Two-Headed Dragon as add, no MS2 support, rendered clean).
-    So DLC bosses can be adds with zero sprite work.
+  * BOSS-id monsters (0x80-0x90) look up boss_<mon-0x80>.gim, normally in
+    their dedicated BOSS_<mon-0x80>.PCK. NOT safe to mix with another pack in
+    one formation: the battle loader reloads ONE pack handle per kind at the
+    same base, so the boss read the add's pixels (Atomos drawn as Hundlegs,
+    2026-10-11). Every DLC fid with adds therefore gets ONE MS2 pack carrying
+    the boss pairs too (ms2_bake ONE PACK PER FORMATION, v333), and boss-id
+    adds may only appear in DLC pools.
   * DLC bosses (fids 0x100-0x110) ARE formation-based but ship with NO MS2
     pack -- ms2_bake creates one when normal adds need it (donor dpk record
     steal).

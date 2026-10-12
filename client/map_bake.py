@@ -189,9 +189,15 @@ _AMD00 = b"MAP_00_AMD.BIN"
 _AMD00_HDR = 10               # verified against openworld_data.ANCHOR, see above
 
 
-def _ow_edits(early, extended, docks):
-    """The {(x, y): tile_id} union the three open-progression toggles select --
-    the same union, in the same precedence order, as ApClient._openworld_loop."""
+def _ow_edits(early, extended, docks, trails=False, gulg=False):
+    """The {(x, y): tile_id} union the open-progression toggles select -- the
+    same union, in the same precedence order, as ApClient._openworld_loop --
+    plus, for the world_gates feature (2026-09-14), the trails BASE paint and
+    the GATE ids of every gated cell: the span, the two boulders and the Gulg
+    seal hold a spare tile id on disc that the world_gates cave remaps to the
+    cell's open or closed id at every overworld load (see openworld_data
+    WORLD_GATE_ROWS). Gate cells win over the base paint (the base pier's
+    stub end at (222,117) is one of them)."""
     from . import openworld_data as OW
     edits = {}
     if early:
@@ -200,6 +206,10 @@ def _ow_edits(early, extended, docks):
         edits.update(OW.EXTENDED_GRID_EDITS)
     if docks:
         edits.update(OW.NORTHERN_DOCKS_GRID_EDITS)
+    if trails:
+        edits.update(OW.TRAILS_BASE_GRID_EDITS)
+    if trails or gulg:
+        edits.update(OW.world_gate_cells(trails=bool(trails), gulg=bool(gulg)))
     return edits
 
 
@@ -224,10 +234,12 @@ def build_openworld_grid(blob, edits):
     return bytes(blob)
 
 
-def bake_openworld_grid(iso_path, early, extended, docks, log=print):
+def bake_openworld_grid(iso_path, early, extended, docks, log=print,
+                        trails=False, gulg=False):
     """Bake the open-progression grid edits (foot trails, canoe rivers, northern
-    docks) into MAP_00_AMD.BIN on disc -- see build_openworld_grid."""
-    edits = _ow_edits(early, extended, docks)
+    docks) and the world_gates cells (trails base + gate ids) into
+    MAP_00_AMD.BIN on disc -- see build_openworld_grid / _ow_edits."""
+    edits = _ow_edits(early, extended, docks, trails=trails, gulg=gulg)
     if not edits:
         return
     with open(iso_path, "r+b") as f:
@@ -251,7 +263,8 @@ def bake_openworld_grid(iso_path, early, extended, docks, log=print):
         f.seek(dpk_off)
         f.write(dpk)
     log(f"[map_bake] overworld grid: {len(edits)} cells baked (early={early} "
-        f"extended={extended} docks={docks}; compressed {len(comp)}/{data_size})")
+        f"extended={extended} docks={docks} trails={trails} gulg={gulg}; "
+        f"compressed {len(comp)}/{data_size})")
 
 
 def bake_canal_crossing(iso_path, log=print):

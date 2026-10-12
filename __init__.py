@@ -1403,6 +1403,14 @@ class FF1PSPWorld(World):
         # paging skips) + the held-mask mailbox. MUST ride on_disc -- the
         # bake reads slot_data["on_disc"] only (live lesson 2026-08-04).
         on_disc["reduced_party"] = bool(self._missing_members())
+        # world_gates (v331): the engine-native half of the world-changing AP
+        # items -- the trails base paint, the span / boulder / Gulg-seal cells
+        # baked on disc as spare tile ids, and the map-load remap cave that
+        # resolves them from the client-owned save byte. Rides EITHER option;
+        # the client derives it too (like _ow_map) so pre-v331 seeds get it.
+        on_disc["world_gates"] = bool(
+            self.options.unlockable_northern_foot_trails.value
+            or self.options.mount_gulg_key.value)
         # Shop AP stock for the client, in two shapes.
         #
         # shop_ap_rows (authoritative): [shop, category, base_width,

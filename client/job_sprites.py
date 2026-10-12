@@ -38,6 +38,23 @@ GIM_MAGIC = b"MIG.00.1PSP"
 PAL_OFF, PIX_OFF = 0x80, 0x4d0          # offsets inside a resident JOBxx.GIM
 PAL_LEN, PIX_LEN = 0x400, 0x7000
 SIG_OFF, SIG_LEN = 0x80, 0x40           # signature window inside the pixels
+# The image-block header every job sheet carries at +0x490 (hdr 0x30, IDX8,
+# 256x112): identical across JOB_NORMAL / JOB_ALL / JOB_CHANGE / M_JOB_NORMAL,
+# all 12 classes (retail dpk, 2026-10-06; test_job_sprites re-checks). The pin
+# re-proves it at write time: the Thief's VANILLA_SIG is 64 zero bytes, so a
+# recycled buffer holding any GIM with transparent pixels at that offset (a
+# map layer, say) would otherwise take 28 KB of sheet pixels.
+SHEET_HDR_OFF = 0x490
+SHEET_HDR = bytes.fromhex("30000000050001000001700008001000")
+# Second window that tells CLONED custom sheets apart. One class's art shipped
+# for another (Apprentice 5 -> Necrocaster 11, 2026-09-27) renders the same
+# picture, but its index bytes differ everywhere there is content because each
+# blob is merged against its own class's vanilla palette. The signature window
+# is transparent padding in that art, so custom_sig() collides; this window is
+# swizzled atlas cell (1,0), a torso cell every vanilla sheet fills, so any two
+# clones differ here. Read by the pin loop only when a sig is ambiguous;
+# test_job_sprites proves every shipped (sig, disambig) pair is unique.
+DISAMBIG_OFF = 0x1040
 CLASS_COUNT = 12                        # 0..5 base, 6..11 promoted
 
 # pixels[0x80:0xC0] of each vanilla sheet -- unique across all 12 (verified
@@ -116,6 +133,12 @@ def custom_sig(cls):
     """Signature window of the custom art (the 'already applied' marker)."""
     got = sheet(cls)
     return got[1][SIG_OFF:SIG_OFF + SIG_LEN] if got else None
+
+
+def disambig(cls):
+    """Content window that separates clones sharing a custom_sig(), or None."""
+    got = sheet(cls)
+    return got[1][DISAMBIG_OFF:DISAMBIG_OFF + SIG_LEN] if got else None
 
 
 def targets_for(owned_jobs):

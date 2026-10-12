@@ -932,6 +932,12 @@ RUNE_KEY_FLAG_MASK = 0x40              # bit 62 & 7 = b6
 BONUS_CRYSTAL_SHADOW_ADDR = 0x08D11934   # save+0x834 (dead slot-magic reserve)
 def bonus_crystal_shadow_mask(dg):       # dg 0..3 -> bit 0..3 of that byte
     return 0x01 << dg
+# world_gates (v331): bits 4-7 of the SAME client-owned byte = the four
+# world-changing AP items (openworld_data.WORLD_GATE_BIT_*); the on-disc
+# map-load remap cave reads them via the save-struct ptr (+0x834). Both
+# writers only ever OR bits in and re-assert from sticky state each tick,
+# so an interleaved read-modify-write self-heals on the next tick.
+WORLD_GATE_BYTE_ADDR = BONUS_CRYSTAL_SHADOW_ADDR   # save+0x834
 # The four Fiend-defeated story flags (17 Lich / 19 Marilith / 29 Kraken /
 # 34 Tiamat), as (addr, mask) into the 0x1151C flag bitfield (flag N -> byte
 # 0x1151C + N//8, bit N%8). Same bits the on-disc crystals_needed wrapper
@@ -2083,6 +2089,25 @@ FIELD_ONFIELD_OFF = 0x68B4         # u8: 1 = on field, 0 = in battle
 # attribute 0x0006 (iso_patcher._DF_FOREST_ATTR, live-verified) -- trust that.
 # (An older histogram pass, re_only/owclass.py, read 0x0003 as forest; the two
 # were never reconciled and nothing consumes the 0x0003 value.)
+# --- The LIVE overworld arena, from the engine's own map object ---------------
+# [FIELD_STRUCT_PTR] is the CURRENT scene (a menu or battle repoints it), so the
+# vtable at +4 proves it is the field scene before anything else is read. The
+# field scene EMBEDS its map object at +0xBE8 (the tile getter 0x08895428 is
+# called with `addiu a0, field, 0xbe8`): +0x20/+0x24 = W/H (255/255 on the
+# overworld), +0x28 = u16* tile grid, +0x2C = u16* ATT table. The grid pointer
+# is the engine's cell (0,0); the client's cell (x,y) -- the AMD-file x, which
+# is field x - 1 -- sits one u16 later, hence the skew. Verified 2026-10-06 on
+# five overworld savestates: grid ptr + 2 == the anchor-scan hit and the ATT
+# ptr == the ATT_PREFIX hit in every one; the Gulg state (97x64 grid, no
+# anchor) and a battle state (vtable 0x089C7B64) both refuse. Writing only
+# what this chain names is what keeps the client out of FREED arena copies --
+# see ApClient._ow_live_arena.
+FIELD_SCENE_VTABLE = 0x089C7A70    # field scene (ctor 0x08834554)
+OW_MAP_OBJ_OFF = 0xBE8
+OW_MAP_DIMS_OFF = 0x20             # u32 W, u32 H, u16* grid, u16* ATT (16 bytes)
+OW_MAP_GRID_PTR_OFF = 0x28
+OW_MAP_ATT_PTR_OFF = 0x2C
+OW_GRID_PTR_SKEW = 2
 # Overworld encounter-zone table (rando_data 'zones_overworld', ISO 0x2b218e4):
 # 64 zones x 8 formation-id slots = 512 bytes, fixed RAM home (boot_patch.
 # table_ram_addr). The game re-reads it at each encounter roll, so a live write

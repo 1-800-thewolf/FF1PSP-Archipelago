@@ -272,6 +272,18 @@ class PPSSPP:
         b64 = base64.b64encode(data).decode()
         await self.rpc("memory.write", address=address, base64=b64)
 
+    async def write_guarded(self, address, data: bytes, guards=()):
+        """Same contract as PPSSPPMem.write_guarded -- write only while every
+        (addr, expected) guard still reads `expected` -- for the debugger
+        socket. Each read is a round trip here, so the check-to-write window
+        is milliseconds rather than microseconds; still far better than the
+        unguarded write it replaces."""
+        for gaddr, want in guards:
+            if await self.read(gaddr, len(want)) != want:
+                return False
+        await self.write(address, data)
+        return True
+
     async def read_u32(self, address):
         return (await self.rpc("memory.read_u32", address=address))["value"]
 
