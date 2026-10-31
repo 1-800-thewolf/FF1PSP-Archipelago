@@ -30,19 +30,47 @@ You might find an early Canoe and have to sneak into the Ice Cavern early to fin
 ## Features
 Play the game how you want and turn on or off any of these game-changing features.
 
-### Open Progression — Ship, Canoe, or Foot?
-- Open world options let you venture out on foot immediately, allow more options for travel with Canoe, or open up most of the southern continent by foot.
-<img width="701" height="390" alt="extended open world" src="https://github.com/user-attachments/assets/9449d0a6-b9cc-40ce-8f1d-3d304830e1b5" />
+## 🗺️ Random Map
 
-- Option to put Northern Docks in the world, providing the option to access more of the game before the Airship.
-- The Levistone can be broken into shards, so the airship becomes a collection goal instead of one chest.
+<img width="400" height="400" alt="random map" src="https://github.com/user-attachments/assets/3544a0ca-c821-434d-aa4c-acabbba5f4a1" />
 
-### Bonus Dungeons
-- Earthgift Shrine, Hellfire Chasm, Lifespring Grotto, and Whisperwind Cove each carry a configurable number of AP locations
-- You decide how much of the Soul of Chaos you're signing up for.
-- Turn them off entirely with one option if you'd rather not.
+- Randomly generated map complete with logic and even world-changing items like bridges and nitro.
+- Optional fog of war to slowly reveal the map as you explore
+- <img width="400" height="200" alt="fog of war" src="https://github.com/user-attachments/assets/f0acc31b-84a5-4d43-b483-ef9ec7d9ea5e" />
+- Works with Bestiarysanity
 
-### Job Scrolls
+
+### Choose the number of continents and world size
+
+<img width="245" height="180" alt="continents" src="https://github.com/user-attachments/assets/d6fa4afd-27cb-4421-9f4d-c7b7846e28bf" />
+
+<img width="250" height="250" alt="world size" src="https://github.com/user-attachments/assets/c2bada65-08a9-48a8-a12a-0582711d3bc4" />
+
+## 📖 Bestiarysanity — monsters hold checks
+Turn a percentage of the seed's huntable monsters into AP locations. Kill one, get a check.
+
+- Logic handles which monsters are reachable with your items and yaml settings.
+
+### Bestiary tab shows
+
+- Monsters grouped by where you can hunt them.
+- A section lights up when reachable right now, and grays out when you have cleared it.
+- Clear over half of a section to reveal the quality of items hidden behind the other monsters there.
+
+<img width="593" height="418" alt="Bestiary tab" src="https://github.com/user-attachments/assets/b0377dc8-6902-42d2-8029-0601053c6c5d" />
+
+### Interactive Bestiary Map
+
+> Where can I fight Air Elementals?
+
+Click a monster on the Bestiary tab in the Archipelago Client to pull up a map, showing all the places to hunt that monster. You can also click an overworld hunting grounds section to show where exactly that is.
+
+<img width="743" height="328" alt="bestiary-map-demo" src="https://github.com/user-attachments/assets/8cf20a32-d3e0-4ee4-9ae5-dbfd7b678c4c" />
+
+- Fully compatible with harder monsters and dangerous forests according to your yaml settings.
+
+
+## 📜 Job Scrolls
 Specialty items that pump up party members. So far, one scroll per job:
 - Blood Knight — lifesteal and armor penetration on physical attacks
 - Stealth Ninja — much better steals; damaging floors hurt less or heal you
@@ -57,17 +85,76 @@ Specialty items that pump up party members. So far, one scroll per job:
 
 <img width="692" height="398" alt="cleric and necro example focused" src="https://github.com/user-attachments/assets/93a019cf-e1c1-487a-a15b-26d8c5e58454" />
 
-### More Bonus Abilities
+### Custom Job Sprites
+Special thanks to @✨-Prime-✨ for commissioning the fully custom Stealth Thief, Stealth Ninja, and Apprentice Sprites. Get the scroll and your sprite upgrades in game!
+
+<img width="557" height="308" alt="custom sprites" src="https://github.com/user-attachments/assets/84cab890-79d9-4752-a4e7-6821e4f8b30c" />
+
+## 🌉 World-Changing Items
+- Lufenia Bridge — links Northern Provoka to Lufenia
+- Lufenia Nitro Powder — creates a path from Lufenia to Gaia
+- Gaia Nitro Powder — connects Gaia to Mirage Tower
+- Mount Gulg Entrance Key — option to lock Mount Gulg until you find it
+
+<img width="600" height="340" alt="Foot Trail Demo" src="https://github.com/user-attachments/assets/ab5db50d-ea86-4773-ad54-c78be9a67269" />
+
+> With all three, you can walk from Provoka all the way to Gaia or Mirage Tower
+
+## 💣 Traps
+Replace some of your filler items with traps.
+
+Traps spring at the start of your next battle as a **real monster ability**, animated and announced the way the game does it normally. Because they are real abilities, they can be dodged and resisted like anything else a monster throws at you.
+
+<img width="600" height="340" alt="Hold Trap" src="https://github.com/user-attachments/assets/57aafd62-c513-4554-b2b0-7465ad1bf271" />
+
+<img width="600" height="309" alt="Temper Trap" src="https://github.com/user-attachments/assets/a6a39874-c376-41d4-ba03-f873d4278f19" />
+
+Now 27 available traps! Traps are shuffled like a deck of cards, so after you face the Death Trap, there won't be any more of them, unless there's over 27 traps in your world.
+
+| | | |
+|---|---|---|
+| Blink | Blizzard | Break |
+| Death | Dispel | Excalipur |
+| Fire | Flash | Gaze |
+| Haste | Hold | Ink |
+| Invisira | NulAll | NulBlaze |
+| Poison Darts | Protect | Protera |
+| Saber | Scorch | Silence |
+| Sleep | Slow | Slowra |
+| Snort | Temper | Thunder |
+
+## 👥 Missing Party Members
+**Choose Starting Party Size**
+
+- The rest go **MISSING**: fully removed from the party, and enter the multiworld item pool as items named for their job.
+- Logic knows your party is short, so a 1-member start does not get asked to do 4-member things.
+- Catchup Exp: if a missing party member joins at a far lower level than the average of the rest of your party, they gain exp faster to catch up.
+
+<img width="626" height="362" alt="missing party members" src="https://github.com/user-attachments/assets/3ba4bef5-1c84-450a-9dad-6a4dd002b0a1" />
+
+## Open Progression — Ship, Canoe, or Foot?
+- Open world options let you venture out on foot immediately, allow more options for travel with Canoe, or open up most of the southern continent by foot.
+<img width="701" height="390" alt="extended open world" src="https://github.com/user-attachments/assets/9449d0a6-b9cc-40ce-8f1d-3d304830e1b5" />
+
+- Option to put Northern Docks in the world, providing the option to access more of the game before the Airship.
+- The Levistone can be broken into shards, so the airship becomes a collection goal instead of one chest.
+
+## Bonus Dungeons
+- Earthgift Shrine, Hellfire Chasm, Lifespring Grotto, and Whisperwind Cove each carry a configurable number of AP locations
+- You decide how much of the Soul of Chaos you're signing up for.
+- Turn them off entirely with one option if you'd rather not.
+
+## More Bonus Abilities
 - Option to let Monk and Thief dabble in magic. This small boost gives these classes only 1 spell per spell level, but raises their options from 0 (only attack).
 - Option to let Thief gain bonus crit chance based on Agility.
 - Option to let Thief attempt to steal extra items after combat.
 <img width="425" height="120" alt="Thief stealing an extra item after combat" src="https://github.com/user-attachments/assets/f1da6e20-e467-49e0-94c2-793ab7d04226" />
 
-### Optional Slot Magic
+## Optional Slot Magic
 Play with the classic NES/Pixel Remaster Vancian system with charges per spell level.
 <img width="427" height="101" alt="spell charges per level in the magic menu" src="https://github.com/user-attachments/assets/8dde0e2b-cb06-48d5-a064-8751ac7261d1" />
 
-### Take on the Challenge You've Always Wanted
+## Take on the Challenge You've Always Wanted
 - Change Monster Power and Boss Difficulty down to only 10% or turn up the heat, all the way to 500% of the base game's difficulty.
 - Harder Overworld Encounters and Harder Dungeon Encounters pull tougher hand-authored pools per zone and per dungeon.
 - Dangerous Forests places scary, hand-picked encounters for those unfortunate enough to find them.
@@ -83,13 +170,17 @@ Play with the classic NES/Pixel Remaster Vancian system with charges per spell l
 
 <img width="598" height="416" alt="Boost tab for on-the-fly settings in the client" src="https://github.com/user-attachments/assets/d6e82787-97c5-4634-8987-6555dd50de7a" />
 
-### Shops Built for a Randomizer
+## Shops Built for a Randomizer
 Randomization doesn't stop at shuffled stock and randomized prices. Purchase AP items from shops, buy yourself hints, and take full control of the quality of the goods for sale, ranging from mundane to exotic to priceless.
 
-### Configurable Goal
+## Configurable Goal
 Choose how many Fiends need to be defeated to break the Black Orb. An option to break the Lute into Lute Tablets. Then Chaos.
 
-### Quality of Life
+### Skips
+- **Shortened Temple of Fiends** — Option in the yaml to skip most of the Temple of Fiends. You still go through the room that requires the lute, but after that, straight to Chaos.
+- **Skip the Garland cutscene** — After beating Garland, just exit Chaos shrine rather than teleporting back to Cornelia.
+
+## Quality of Life
 - Super Dash
 - Spells that miss get colored "MISS!!" text showing how close you were to hitting
 
@@ -99,7 +190,9 @@ Choose how many Fiends need to be defeated to break the Black Orb. An option to 
 
 <img width="600" height="302" alt="built-in tracker in the AP client" src="https://github.com/user-attachments/assets/f70a5061-66ab-4a62-8a27-a2ceb8273257" />
 
-### DeathLink
+- **Item and location name groups.** `!hint`, `exclude_locations`, `priority_locations`, and plando take group names (Party Members, Key Items, Job Scrolls, Spell Tomes, Bonus Dungeons, one per dungeon or town, and more) instead of typing names out one at a time.
+
+## DeathLink
 Severity setting lets you decide how much a death costs you.
 
 <img width="650" height="370" alt="DeathLink severity option" src="https://github.com/user-attachments/assets/a1725854-0b8f-493d-b321-c0b6e648a267" />
