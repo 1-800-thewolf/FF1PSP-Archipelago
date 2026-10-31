@@ -28,6 +28,9 @@ from . import ids as ID
 from . import logic as LOGIC
 from . import rando as RANDO
 from . import rando_data as RD
+from . import randworld_territories as RWT
+from .randworld import sizing as RWS
+from .version import WORLD_VERSION
 from ._locinfo import LOC_INFO
 from .client import class_names as CN      # pure data (no client deps at gen time)
 from .client import ff1_data as FF1DATA     # pure data: WEAPONS/ARMOR gid->name maps
@@ -179,6 +182,13 @@ assert set(WORLD_ITEM_NAMES) == set(WORLD_ITEM_ORDINAL),     "logic.WORLD_ITEMS 
 for _wname, _wi in WORLD_ITEM_ORDINAL.items():
     ITEM_NAME_TO_ID[_wname] = ID.world_item_id(_wi)
     ITEM_NAME_TO_CLASS[_wname] = ItemClassification.progression
+# Random map (random_map + unlockable_northern_foot_trails, user 2026-10-16/23):
+# a bridge or Nitro door is named after the site it walls in. Every such name is
+# pre-declared (randworld/names.py, frozen order), appended after the four.
+from .randworld.names import GATE_ITEM_VARIANTS                 # noqa: E402
+for _k, _vname in enumerate(GATE_ITEM_VARIANTS):
+    ITEM_NAME_TO_ID[_vname] = ID.world_item_id(ID.WORLD_NITRO_VARIANT_BASE + _k)
+    ITEM_NAME_TO_CLASS[_vname] = ItemClassification.progression
 
 # Event (gate) items are not real game items: synthetic ids (precollected ones
 # DO reach the client as starting inventory, which treats them counter-only via
@@ -712,7 +722,9 @@ class FF1PSPWorld(World):
         count just means more runs -- never a stranded/uncompletable check."""
         if self.options.exclude_bonus_dungeons.value:
             return {dg: 0 for dg, *_ in LOGIC.BONUS_DUNGEONS}
-        return {dg: getattr(self.options, attr).value
+        # map_size: a bonus dungeon left off a tiny / small world holds none
+        gone = RWS.skipped_bonus(self._skip_units())
+        return {dg: 0 if dg in gone else getattr(self.options, attr).value
                 for dg, _name, _floors, _def, _tok, attr in LOGIC.BONUS_DUNGEONS}
 
     def _removed_chest_idx(self):
@@ -735,7 +747,53 @@ class FF1PSPWorld(World):
         # drop the locations rather than strand ten checks the player cannot make.
         removed |= LOGIC.removed_normally_empty_idx(
             self.options.loot_in_normally_empty_chests.value)
+        # shortened_temple_of_fiends: the orb and the Lute stairs skip the
+        # floors that hold the five Basement chests
+        removed |= LOGIC.short_tof_removed_idx(
+            self.options.shortened_temple_of_fiends.value)
+        # map_size: the chests of every dungeon a tiny / small world leaves
+        # out (the client scout drops them through its known-id filter)
+        removed |= self._skip_chest_idx()
         return removed
+
+    # ---- Map Size (randworld/sizing.py, user 2026-10-27) ----------------
+    def _map_size(self):
+        """sizing.TINY..HUGE for this seed; NORMAL on the vanilla map."""
+        rm = getattr(self.options, "random_map", None)
+        opt = getattr(self.options, "map_size", None)
+        if rm is None or opt is None or int(rm.value) not in self.RANDOM_OVERWORLD_SHAPES:
+            return RWS.NORMAL
+        return int(opt.value)
+
+    def _skip_units(self):
+        """The sizing units (dungeons) this world leaves out; set by
+        _generate_random_overworld, empty otherwise."""
+        return getattr(self, "_rw_skip", frozenset())
+
+    def _skip_regions(self):
+        return RWS.skipped_regions(self._skip_units())
+
+    def _skip_chest_idx(self):
+        regions = self._skip_regions()
+        if not regions:
+            return frozenset()
+        return frozenset(idx for _lid, _nm, idx in DATA.LOCATIONS
+                         if (LOC_INFO.get(idx) or (None, None))[0] in regions)
+
+    def _crystals_needed(self):
+        """crystals_needed, lowered to the crystals a tiny / small world can
+        still earn (a skipped Fiend's crystal does not exist)."""
+        n = int(self.options.crystals_needed.value)
+        if self._skip_units():
+            n = min(n, len(RWS.crystals(self._skip_units(),
+                                        bool(self.options.bonus_dungeon_crystals.value))))
+        return n
+
+    def _shop_option(self, name):
+        """A per-shop yaml count (AP offers / extra stock / hints), scaled to
+        a tiny (1/3) or small (2/3) world; never below 1 when the yaml asks
+        for any."""
+        return RWS.shop_count(int(getattr(self.options, name).value), self._map_size())
 
     def _next_trap(self):
         """The next trap kind, dealt from a shuffled DECK OF CARDS.
@@ -1099,10 +1157,11 @@ class FF1PSPWorld(World):
                 # the tables set_rules already gated the bestiary on
                 ow_tables=self._overworld_zone_tables(),
                 cv_table=self._cave_zone_table(),
+                randworld=self._randworld() is not None,
                 shop_tier=int(self.options.shop_item_pool.value),
                 # Extra NORMAL stock rows per store (yaml shop_max_extra_items).
                 # A per-store roll of 0..this, on top of the AP/hint reserve.
-                shop_extra_slots=int(self.options.shop_max_extra_items.value),
+                shop_extra_slots=self._shop_option("shop_max_extra_items"),
                 # starting_party_members == 1: a solo character has nobody to
                 # cure their Poison, so Antidote is forced onto the Cornelia
                 # item shop's shelf whatever the shop shuffle rolled.
@@ -1110,6 +1169,10 @@ class FF1PSPWorld(World):
                     (RANDO.ANTIDOTE_ID,)
                     if int(self.options.starting_party_members.value) == 1
                     else ()),
+                # random map: the Gold Needle guarantee covers Cornelia plus
+                # every town the start reaches with no items (vanilla map:
+                # Cornelia / Pravoka as before)
+                needle_towns=self._sphere0_shop_cities(),
                 magic_shops=bool(self.options.shuffle_magic_shops.value),
                 item_prices=bool(self.options.randomize_prices.value),
                 # slot_magic replaces the MP pool with per-level spell slots --
@@ -1201,7 +1264,7 @@ class FF1PSPWorld(World):
                 self._shop_counts_cache = {}
             else:
                 self._shop_counts_cache = RANDO.shop_offer_counts(
-                    self.options.shop_ap_offers.value,
+                    self._shop_option("shop_ap_offers"),
                     int(self.options.shop_item_pool.value),
                     block_mana_items=bool(self.options.slot_magic.value),
                     # getattr: the parity harnesses drive create_regions with a
@@ -1234,7 +1297,7 @@ class FF1PSPWorld(World):
         _shop_offer_counts)."""
         if getattr(self, "_hint_caps_cache", None) is None:
             self._hint_caps_cache = RANDO.hint_shop_caps(
-                int(self.options.shop_max_hints.value),
+                self._shop_option("shop_max_hints"),
                 int(self.options.shop_item_pool.value),
                 ap_counts=self._shop_offer_counts())
         return self._hint_caps_cache
@@ -1273,7 +1336,7 @@ class FF1PSPWorld(World):
                         f"-{self.player}-hintshops")
                     products = HINTS.plan_hint_products(
                         rng, lids, RANDO.hint_target_rows(
-                            self.options.shop_max_hints.value))
+                            self._shop_option("shop_max_hints")))
                     # Randomize Prices covers hint rows too: each price is
                     # scaled through the SAME log-uniform item price range as
                     # every other shelf price, so a seed that asks for cheap (or
@@ -1346,6 +1409,8 @@ class FF1PSPWorld(World):
         return [JOB_SCROLL_ITEM_NAMES[j] for j in sorted(set(base_jobs))]
 
     def fill_slot_data(self) -> dict:
+        # random map: the backward shortcuts go in now that the items are placed
+        self._apply_randworld_shortcuts()
         # Baked multipliers the runtime client applies (enc/xp/gil_mult in
         # ff1psp/client/ApClient.py -> boot_patch data tables, re-applied live by
         # set_encounter_rate / set_monster_scaling).
@@ -1382,6 +1447,23 @@ class FF1PSPWorld(World):
         # terrain reads zones_overworld, so the harder bands never touched them;
         # both are authored cave rows keyed off the same flag. No yaml toggle.
         on_disc["terrain_pools"] = bool(self.options.harder_overworld_encounters.value)
+        # Random overworld: the per-tile territory map replaces the 32x32 zone
+        # for every land roll (iso_patcher.apply_randworld_regions; the map
+        # rides slot_data["randworld"]["regions"]). A generated world has no
+        # vanilla desert / grass rows to fall back on, so the tier pools are
+        # always on there -- the same pools logic.randworld_land_sources reads.
+        on_disc["randworld_regions"] = self._randworld() is not None
+        # map_size tiny + regional oceans: every outer quadrant rolls one pool
+        # (iso_patcher.apply_regional_ocean_encounters; bake context)
+        _rw_export = self._randworld_export()
+        if _rw_export is not None and _rw_export.get("ocean_outer_pool"):
+            on_disc["ocean_outer_pool"] = int(_rw_export["ocean_outer_pool"])
+        # skip_lute_cutscene: ALWAYS on, vanilla and random map (user call
+        # 2026-10-25; no yaml option). Garland's script ends at his kill, the
+        # Princess check fires there. A FEATURES key, so it rides on_disc.
+        on_disc["skip_lute_cutscene"] = True
+        if self._randworld() is not None:
+            on_disc["terrain_pools"] = True
         # Chaos Shrine basement: per-floor u16 pools + boss cameos. No yaml toggle
         # of its own -- it is the code half of harder DUNGEON encounters, which
         # cannot otherwise touch the terminal dungeon (its _CAVE_HARDER_DUNGEON
@@ -1526,10 +1608,22 @@ class FF1PSPWorld(World):
                     "cave_exact": True,
                     "chaos_floor": bool(
                         self.options.chaos_floor_encounters.value),
+                    # the revisited shrine is the Lute room + Chaos' floor only
+                    "short_tof": bool(
+                        self.options.shortened_temple_of_fiends.value),
                 },
             }
         return {
+            # The generator's world_version. The client compares it with its own
+            # on Connected and warns when it is too old to read this seed (a
+            # 0.1.0 client on a 0.2.x seed parked the grant counter on the first
+            # trap, 2026-10-12). See ff1psp/version.py.
+            "world_version": WORLD_VERSION,
             "bestiary": bestiary_slot,
+            # random overworld only (None otherwise): the territories' land /
+            # water / site access, for the client's Bestiary + Map tabs, and
+            # the flag rando.patches_from_slot_data strips hub rows by
+            "randworld": self._randworld_export(),
             "boss_minions_plan": minion_plan,
             "encounter_rate": self.options.encounter_rate.value / 100.0,
             "xp_boost": self.options.xp_boost_percentage.value / 100.0,
@@ -1596,7 +1690,15 @@ class FF1PSPWorld(World):
             # option off it writes none of those tables at all.
             "northern_foot_trails": bool(
                 self.options.unlockable_northern_foot_trails.value),
-            "mount_gulg_key": bool(self.options.mount_gulg_key.value),
+            # (a tiny / small world without Mount Gulg has no seal either)
+            "mount_gulg_key": bool(self.options.mount_gulg_key.value)
+            and "gulg" not in RWS.skipped_sites(self._skip_units()),
+            # map_size: the size and the dungeons this world left out
+            "map_size": RWS.NAMES[self._map_size()],
+            "skipped_dungeons": sorted(self._skip_units()),
+            # key items a tiny / small world has no use for (not in the pool;
+            # the Tracker's key strip leaves their chips out)
+            "dead_items": sorted(RWS.dead_items(self._skip_units())),
             # Per-dungeon dynamic-chest caps (dungeon index -> count of the FIRST opens
             # that become AP checks). The client arms its map-gated chest bp and, for the
             # first `cap` opens in each bonus dungeon, strips the native loot + delivers
@@ -1621,7 +1723,7 @@ class FF1PSPWorld(World):
             "levistone_shards_required": self._levistone_shards()[1],
             # crystals_needed: 4 = vanilla; <4 rides into the on-disc bake as
             # wrapper-cave context (client _build_bake) + the tracker's N-of-4.
-            "crystals_needed": int(self.options.crystals_needed.value),
+            "crystals_needed": self._crystals_needed(),
             # bonus_dungeon_crystals: crystals activate by beating a Soul-of-Chaos
             # superboss instead of the Fiend. Bake context (client _build_bake ->
             # wrapper counts shadow bits) + tracker/logic decouple. Off = vanilla.
@@ -1672,6 +1774,173 @@ class FF1PSPWorld(World):
                     "found, so generation must know their job -- but their "
                     "'starting_job' is 'choose_at_game_start'. Give those slots "
                     "a fixed job or 'random_job'.")
+        self._generate_random_overworld()
+
+    RANDOM_OVERWORLD_SHAPES = {1: "vanilla", 2: "archipelago", 3: "pangaea"}
+    SPHERE0_DUNGEON_TRIES = 12
+    SPHERE0_DUNGEON_BESTIARY_EXEMPT = 35     # bestiarysanity_percent at/above: rule off
+
+    def _generate_random_overworld(self) -> None:
+        """random_overworld: generate this slot's map (ff1psp/randworld, pure
+        Python, ~5 s) and hand it to every logic consumer through the
+        self.random_overworld contract (see _randworld). Seeded from the
+        multiworld seed + slot, never from self.random, so vanilla-map seeds
+        keep their RNG stream byte for byte."""
+        opt = getattr(self.options, "random_map", None)   # (option stubs in old tests)
+        shape = self.RANDOM_OVERWORLD_SHAPES.get(int(opt.value)) if opt is not None else None
+        if shape is None:
+            return
+        import random as _random
+        from .randworld import build as RWB, export as RWE, targets as RWTG
+        op = int(self.options.open_progression.value)
+        docks = bool(self.options.northern_docks.value)
+        # the world-changing items become gates the generator places
+        # (randworld/gates.py, user 2026-10-14/16/23)
+        trails = bool(self.options.unlockable_northern_foot_trails.value)
+        gulg = bool(self.options.mount_gulg_key.value)
+        caps = {0: 0, 1: 0, 2: 0, 3: 0}
+        if not self.options.exclude_bonus_dungeons.value:
+            caps = {0: int(self.options.earthgift_ap_locations.value),
+                    1: int(self.options.hellfire_ap_locations.value),
+                    2: int(self.options.lifespring_ap_locations.value),
+                    3: int(self.options.whisperwind_ap_locations.value)}
+        # map_size: a tiny / small world leaves dungeons out (sizing.pick:
+        # a check budget, rolled per seed off its own stream)
+        size = self._map_size()
+        checks, total = RWS.unit_checks(caps, self._removed_chest_idx())
+        self._rw_skip = RWS.pick(_random.Random(f"{self.multiworld.seed}:{self.player}:map_size"),
+                                 size, checks, total)
+        gone = RWS.skipped_sites(self._rw_skip)
+        caps = {dg: 0 if dg in RWS.skipped_bonus(self._rw_skip) else n for dg, n in caps.items()}
+        weights = {s: n for s, n in RWTG.site_weights(
+            caps, skip_regions=RWS.skipped_regions(self._rw_skip)).items() if s not in gone}
+        gulg = gulg and "gulg" not in gone
+        base = RWTG.vanilla_shares(weights, op >= 1, op >= 2, docks)
+        # A dungeon in sphere 0 (user 2026-10-18): unless bestiarysanity is
+        # rich enough to carry the opening (>= 35%), a world whose start offers
+        # no dungeon with a free check is rolled again. Attempt 0 keeps the
+        # plain seed string, so worlds that already pass are unchanged.
+        need_dungeon = int(getattr(getattr(self.options, "bestiarysanity_percent", None),
+                                   "value", 0) or 0) < self.SPHERE0_DUNGEON_BESTIARY_EXEMPT
+        base_seed = f"{self.multiworld.seed}:{self.player}"
+        problems = None
+        for attempt in range(self.SPHERE0_DUNGEON_TRIES):
+            seed = base_seed if attempt == 0 else f"{base_seed}:d{attempt}"
+            wm, grid = RWB.generate_tiles(seed, dict(shape=shape, open_progression=op,
+                                                     northern_docks=docks, trails=trails,
+                                                     gulg=gulg, size=size), weights, base)
+            if wm is None or wm.report["problems"]:
+                # roll the world again rather than fail the seed (a tiny world
+                # once kept 8 foot sites in all six tries, 2026-10-28); a world
+                # that builds on the plain seed string is unchanged
+                problems = (wm and wm.report["problems"]) or ["no world"]
+                continue
+            problems = None
+            self.random_overworld = RWE.random_overworld(wm, grid)
+            self.random_overworld_plan = RWE.plan_json(wm, seed, shape)
+            # kept for the backward shortcuts, added after fill (_apply_randworld_shortcuts)
+            self._rw_build = (wm, grid, seed, weights)
+            for cache in ("_randworld_cache", "_randworld_export_cache", "_site_rules_cache"):
+                self.__dict__.pop(cache, None)
+            if not need_dungeon or LOGIC.sphere0_dungeons(self._site_rules()):
+                self._plan_hub_merge(size)
+                return
+        if problems:
+            raise OptionError(
+                "Final Fantasy 1 PSP: the random overworld for this slot could not be built "
+                f"cleanly in {self.SPHERE0_DUNGEON_TRIES} tries ({problems}). Please report this seed.")
+        raise OptionError(
+            "Final Fantasy 1 PSP: no random overworld with a dungeon reachable from the start "
+            f"was found in {self.SPHERE0_DUNGEON_TRIES} tries. Please report this seed.")
+
+    def _plan_hub_merge(self, size) -> None:
+        """map_size: a tiny / small world folds hunting-ground hubs together
+        (sizing.plan_hub_merge, off its own stream). The plan rides
+        random_overworld["hub_merge"], so every Territories built from it --
+        logic, the bestiary, the shortcut check, the bake's region map --
+        sees the same grounds."""
+        import random as _random
+        plan = RWS.plan_hub_merge(_random.Random(f"{self.multiworld.seed}:{self.player}:hub_merge"),
+                                  size, RWS.hub_doors(self._randworld()))
+        if not plan:
+            return
+        self.random_overworld["hub_merge"] = plan
+        self._rw_build[0].hub_merge = plan          # the shortcut pass's logic view
+        for cache in ("_randworld_cache", "_randworld_export_cache", "_site_rules_cache"):
+            self.__dict__.pop(cache, None)
+
+    def _vehicle_aims(self) -> dict:
+        """{"Canoe" / "Ship": {"site": the overworld site its location sits
+        at (None: another slot's world, or no site), "before": the item names
+        this slot held in the spheres before it}} -- where the backward
+        shortcuts aim (user 2026-10-24: "at the actual item spots")."""
+        sites = LOGIC.location_sites()
+        held = sorted(it.name for it in self.multiworld.precollected_items[self.player])
+        aims = {}
+        for sphere in self.multiworld.get_spheres():
+            got = []
+            for loc in sorted(sphere, key=lambda l: (l.player, l.name)):
+                it = loc.item
+                if it is None or it.player != self.player:
+                    continue
+                got.append(it.name)
+                if it.name in (LOGIC.CANOE, LOGIC.SHIP) and it.name not in aims:
+                    aims[it.name] = {"site": sites.get(loc.name) if loc.player == self.player else None,
+                                     "before": sorted(set(held))}
+            held += got
+            if len(aims) == 2:
+                break
+        return aims
+
+    def _apply_randworld_shortcuts(self) -> None:
+        """Backward shortcuts on a random map (randworld/shortcuts.py, user
+        2026-10-24), aimed at where this slot's Canoe and Ship really landed,
+        so they run once, after fill and progression balancing, right before
+        the world ships in slot_data. They never change logic: the new
+        world's logic view (site and land rules, and the water rules this
+        seed's Bestiary reads) must equal the one every rule was built from,
+        else the world stays as it was."""
+        if getattr(self, "_rw_shortcuts_done", False) or self._randworld() is None:
+            return
+        self._rw_shortcuts_done = True
+        from .randworld import shortcuts as RWSC
+        built = getattr(self, "_rw_build", None)
+        if built is None or not RWSC.ENABLED:
+            return
+        from .randworld import build as RWB, export as RWE
+        wm, grid, seed, weights = built
+        self._rw_build = None                          # the pass spends wm
+        # only the Bestiary's ocean / river hunts read the water rules: hold
+        # still just the ones this seed's options read, none without
+        # bestiarysanity (user 2026-10-26)
+        water = frozenset()
+        if self.options.bestiarysanity_percent.value:
+            water = LOGIC.randworld_water_read({
+                "ocean": bool(self.options.regional_ocean_encounters.value),
+                "river": bool(self.options.northern_river_encounters.value)})
+        try:
+            new = RWB.add_shortcuts(wm, weights, seed, grid, self._vehicle_aims(), water)
+        except Exception:                              # QoL: never lose the seed over it
+            import logging
+            logging.exception("Final Fantasy 1 PSP: random-map shortcuts failed for player %d; "
+                              "the world ships without them", self.player)
+            return
+        if new is None:
+            return
+        ro = RWE.random_overworld(wm, new)
+        if self.random_overworld.get("hub_merge"):
+            ro["hub_merge"] = self.random_overworld["hub_merge"]
+        terr = RWT.Territories(ro["grid"], ro["att"], RWT.sites_from_plan(ro["placed"]),
+                               stamps=RWT.stamp_shifts(ro["placed"]),
+                               gates=ro.get("gates"), start=ro.get("start"),
+                               merge=ro.get("hub_merge"))
+        forests = bool(self.options.dangerous_forests.value)
+        if RWSC.logic_view(terr.export(forests_on=forests), water) != RWSC.logic_view(self._randworld_export(), water):
+            return
+        self.random_overworld = ro
+        self.random_overworld_plan = RWE.plan_json(wm, seed, self.random_overworld_plan.get("shape"))
+        self._randworld_cache = terr
+        self.__dict__.pop("_randworld_export_cache", None)
 
     def create_regions(self) -> None:
         menu = Region("Menu", self.player, self.multiworld)
@@ -1704,7 +1973,13 @@ class FF1PSPWorld(World):
 
         # event locations: each holds a locked GATE token (not in the pool, no id)
         self._event_locs = []
+        # map_size: nothing of a dungeon a tiny / small world leaves out
+        skip_regions = self._skip_regions()
+        skip_bonus = RWS.skipped_bonus(self._skip_units())
+        dead = RWS.dead_items(self._skip_units())     # (Dr Unne without the Rosetta)
         for ev_name, region, token, extra in LOGIC.EVENTS:
+            if region in skip_regions or dead & set(extra):
+                continue
             if bonus_cry and token in LOGIC.CRYSTALS:
                 token = LOGIC.FIEND_TOKEN[token]   # Fiend grants "defeated", not crystal
             loc = FF1PSPLocation(self.player, ev_name, None, menu)
@@ -1729,6 +2004,8 @@ class FF1PSPWorld(World):
         self._clear_locs = []          # (loc, dg, crystal)
         if bonus_cry:
             for dg, dname, floors, defcap, crystal, attr in LOGIC.BONUS_DUNGEONS:
+                if dg in skip_bonus:
+                    continue
                 loc = FF1PSPLocation(self.player, f"{dname} - Cleared", None, menu)
                 loc.place_locked_item(self.create_item(crystal))
                 menu.locations.append(loc)
@@ -1739,6 +2016,10 @@ class FF1PSPWorld(World):
         self._npc_locs = []
         self._npc_ord = {}      # loc -> NPC ordinal (for LOGIC.npc_rule_alts)
         for nm, ordn, region, extra in LOGIC.NPC_LOCATIONS:
+            # (random maps only, where skip_lute_cutscene is always on)
+            if (LOGIC.npc_region(ordn, region, skip_lute=True) in skip_regions
+                    or dead & set(extra)):
+                continue
             loc = FF1PSPLocation(self.player, nm, ID.npc_loc_id(ordn), menu)
             menu.locations.append(loc)
             self._npc_locs.append((loc, region, extra))
@@ -1829,10 +2110,100 @@ class FF1PSPWorld(World):
         build_shuffle_tables later, so what logic gated on is byte-for-byte what
         the player's game runs."""
         if getattr(self, "_ow_tables_cache", None) is None:
-            self._ow_tables_cache = RANDO.overworld_zone_tables(
+            # a random overworld rolls ONE row per hub (territory), not per
+            # vanilla 32x32 zone -- see rando.randworld_zone_tables
+            roll = (RANDO.randworld_zone_tables if self._randworld() is not None
+                    else RANDO.overworld_zone_tables)
+            self._ow_tables_cache = roll(
                 self.multiworld.seed, self.player,
                 harder=bool(self.options.harder_overworld_encounters.value))
         return self._ow_tables_cache
+
+    def _randworld(self):
+        """This seed's generated overworld as randworld_territories.Territories,
+        or None on the vanilla map.
+
+        CONTRACT for the random-overworld integration (re_only/ow_rando, not
+        wired into the apworld yet): set self.random_overworld = {"grid": N*N
+        tile ids, "att": the 512 tile attributes, "placed": the plan's placed
+        list, "gates": the plan JSON's gates (optional), "start": the party's
+        new-game overworld cell (optional; Cornelia's door otherwise)} in
+        generate_early. Every location rule and bestiary hook keys off this
+        accessor (logic.randworld_site_rules)."""
+        if not hasattr(self, "_randworld_cache"):
+            rw = getattr(self, "random_overworld", None)
+            self._randworld_cache = None if rw is None else RWT.Territories(
+                rw["grid"], rw["att"], RWT.sites_from_plan(rw["placed"]),
+                stamps=RWT.stamp_shifts(rw["placed"]),
+                gates=rw.get("gates"), start=rw.get("start"), merge=rw.get("hub_merge"))
+        return self._randworld_cache
+
+    def _site_rules(self):
+        """{site: OR-of-AND rule} every location rule of this seed is built
+        from (logic REGION_SITE): the generated world's graph on a random
+        overworld -- no yaml option adds anything there (user 2026-10-16) --
+        else the vanilla hand rules under the open-world toggles."""
+        if getattr(self, "_site_rules_cache", None) is None:
+            export = self._randworld_export()
+            if export is not None:
+                self._site_rules_cache = LOGIC.randworld_site_rules(
+                    export, strict=True)
+            else:
+                op = self.options.open_progression.value
+                self._site_rules_cache = LOGIC.vanilla_site_rules(
+                    op >= OpenProgression.option_early,
+                    op >= OpenProgression.option_extended,
+                    bool(self.options.northern_docks.value),
+                    bool(self.options.unlockable_northern_foot_trails.value),
+                    bool(self.options.mount_gulg_key.value))
+        return self._site_rules_cache
+
+    def _sphere0_shop_cities(self):
+        """Shop city indices (RANDO.SHOP_CITY_SITE) whose town a random map
+        reaches with NO items, Cornelia always included; None on the vanilla
+        map (the shop shuffle keeps its Cornelia / Pravoka pair)."""
+        if self._randworld() is None:
+            return None
+        rules = self._site_rules()
+        return sorted({0} | {c for c, site in RANDO.SHOP_CITY_SITE.items()
+                             if any(len(a) == 0 for a in (rules.get(site) or ()))})
+
+    def _randworld_export(self):
+        """Territories.export() under this seed's dangerous_forests (forest
+        tiles roll the land table without it), or None on the vanilla map.
+        Ships as slot_data["randworld"] -- which is also the client's flag."""
+        if not hasattr(self, "_randworld_export_cache"):
+            T = self._randworld()
+            self._randworld_export_cache = None if T is None else T.export(
+                forests_on=bool(self.options.dangerous_forests.value))
+            plan = getattr(self, "random_overworld_plan", None)
+            if self._randworld_export_cache is not None and plan is not None:
+                # the client bakes the generated world into the player's ISO
+                from .randworld import export as RWE
+                self._randworld_export_cache["world"] = RWE.slot_world(
+                    self.random_overworld, plan)
+                # world-changing gates: the client keeps each one's save-byte
+                # bit (mask) in step with its AP item, found by id
+                for g in self._randworld_export_cache["world"].get("gates") or ():
+                    if g.get("name") != "canal" and g.get("item") in ITEM_NAME_TO_ID:
+                        g["item_id"] = ITEM_NAME_TO_ID[g["item"]]
+                # fog_of_war: the bake installs the menu-map fog hooks and the
+                # client's Map tab hides unexplored chunks (random maps only)
+                fog = getattr(self.options, "fog_of_war", None)
+                self._randworld_export_cache["world"]["fog"] = bool(
+                    fog.value) if fog is not None else False
+            if (self._randworld_export_cache is not None and self._map_size() == RWS.TINY
+                    and self.options.regional_ocean_encounters.value):
+                # tiny + regional oceans: the central sea keeps its rolls,
+                # every outer quadrant rolls the SE pool (user 2026-10-27)
+                self._randworld_export_cache["ocean_outer_pool"] = RWS.TINY_OCEAN_POOL
+            if self._randworld_export_cache is not None and self._skip_units():
+                # map_size: the sites left off the map (strict site rules
+                # skip them) and the dungeons whose monsters no longer spawn
+                self._randworld_export_cache["skipped"] = {
+                    "sites": sorted(RWS.skipped_sites(self._skip_units())),
+                    "dungeons": sorted(RWS.skipped_dungeons(self._skip_units()))}
+        return self._randworld_export_cache
 
     def _bestiary_odds(self):
         """{(mon, source): best slot %} for this seed's ROLLED places, filled
@@ -1843,8 +2214,15 @@ class FF1PSPWorld(World):
         return self._bestiary_odds_cache
 
     def _bestiary_ow_sources(self):
-        """mon -> {('ow', (tier, class))} for THIS seed's rolled overworld."""
+        """mon -> {('ow', (tier, class))} for THIS seed's rolled overworld
+        (on a random overworld: {(kind, hub)} for every territory heading)."""
         ow, ow_hi = self._overworld_zone_tables()
+        harder = bool(self.options.harder_overworld_encounters.value)
+        export = self._randworld_export()
+        if export is not None:
+            return LOGIC.randworld_land_sources(
+                LOGIC.randworld_index(export), ow, ow_hi if harder else None,
+                {"harder_ow": harder}, odds=self._bestiary_odds())
         return LOGIC.overworld_sources(
             ow, ow_hi if self.options.harder_overworld_encounters.value else None,
             odds=self._bestiary_odds())
@@ -1913,7 +2291,13 @@ class FF1PSPWorld(World):
             "cave_exact": True,
             # Chaos' floor only has random battles when this is on.
             "chaos_floor": bool(self.options.chaos_floor_encounters.value),
+            # The orb and the Lute stairs skip every revisited-shrine floor but
+            # the Lute room and Chaos' floor (bestiary_data key gates).
+            "short_tof": bool(self.options.shortened_temple_of_fiends.value),
         }
+        if self._randworld_export() is not None:
+            # every place's access now comes from the generated world
+            opts["randworld"] = LOGIC.randworld_index(self._randworld_export())
         minion_rules = {}
         if self.options.boss_minions.value:
             import random as _random
@@ -1923,7 +2307,7 @@ class FF1PSPWorld(World):
                 f"{self.multiworld.seed}-{self.player}-bossminions")
             plan = BM.roll_plan(self.options.boss_minions.value, _rng)
             minion_rules = LOGIC.bestiary_minion_monsters(
-                plan, opts["bonus_excluded"])
+                plan, opts["bonus_excluded"], opts)
         ow_sources = self._bestiary_ow_sources()
         cave_sources = self._bestiary_cave_sources()
         odds = self._bestiary_odds()
@@ -1955,6 +2339,11 @@ class FF1PSPWorld(World):
         party items' hard assert instead of being allowed to overflow.
         """
         names = []
+        rw = getattr(self, "random_overworld", None)
+        if rw is not None:
+            # a random map: the gates its generator placed, with the names it
+            # gave them (a Nitro door is named after the site it walls in)
+            return [g["item"] for g in rw.get("gates") or () if g["name"] != "canal"]
         if self.options.unlockable_northern_foot_trails.value:
             names += list(LOGIC.TRAIL_ITEMS)
         if self.options.mount_gulg_key.value:
@@ -1968,10 +2357,25 @@ class FF1PSPWorld(World):
         # Levistone (idx 198), whose pool token stays and is rebalanced by the "Ice
         # Cave - Levistone" NPC location below. exclude_bonus_dungeons drops the 16
         # static DLC chests here too, keeping len(pool) == chest-location count.
+        pool_start = len(self.multiworld.itempool)
         pool_drop = self._removed_chest_idx() - set(LOGIC.PHANTOM_TREASURE_INDICES)
         kept = [(name, cls) for (_lid, _nm, idx), (_iid, name, cls)
                 in zip(DATA.LOCATIONS, DATA.ITEM_POOL) if idx not in pool_drop]
         pool = [name for (name, _cls) in kept]
+        # map_size: the key items and good gear a left-out dungeon's chests
+        # held move into filler seats of the chests that remain (the Crown in
+        # Marsh Cave, the Rat's Tail in the Citadel); items whose every use
+        # left with the dungeons (sizing.DEAD_ITEMS) go with them
+        skip_idx = self._skip_chest_idx() & pool_drop
+        if skip_idx:
+            dead = RWS.dead_items(self._skip_units())
+            lost = [name for (_lid, _nm, idx), (_iid, name, cls)
+                    in zip(DATA.LOCATIONS, DATA.ITEM_POOL)
+                    if idx in skip_idx and cls != 'filler' and name not in dead]
+            seats = [i for i, (_n, cls) in enumerate(kept) if cls == 'filler'][::-1]
+            for name, i in zip(lost, seats):
+                kept[i] = (name, 'moved')
+                pool[i] = name
 
         # Job-advancement items: swap one filler out for each job item so the pool
         # length (== chest count) stays balanced. Option A = one scroll upgrades the
@@ -2184,6 +2588,32 @@ class FF1PSPWorld(World):
         # Cave, the Pravoka shops and the Bikke check are simply free. The canal is
         # NOT pre-opened; it is blown normally (Nitro -> Nerrick).
 
+        if self._skip_units():
+            self._balance_sized_pool(pool_start)
+
+    def _balance_sized_pool(self, start):
+        """map_size: the balancing items above assume every NPC location
+        exists. Drop the key items a tiny / small world has no use for
+        (sizing.dead_items), then plain fillers from the end (traps last),
+        or add fillers, until this world's pool matches its locations."""
+        dead = RWS.dead_items(self._skip_units())
+        n_locs = sum(1 for loc in self.multiworld.get_locations(self.player)
+                     if loc.address is not None)
+        mine = [it for it in self.multiworld.itempool[start:] if it.name not in dead]
+        traps = set(TRAP_ITEM_NAMES)
+        while len(mine) > n_locs:
+            plain = [k for k, it in enumerate(mine)
+                     if it.classification == ItemClassification.filler]
+            k = next((k for k in reversed(plain) if mine[k].name not in traps),
+                     plain[-1] if plain else None)
+            if k is None:
+                raise OptionError("Final Fantasy 1 PSP: a tiny / small world has more "
+                                  "key items than locations. Please report this seed.")
+            mine.pop(k)
+        while len(mine) < n_locs:
+            mine.append(self.create_item(self.get_filler_item_name()))
+        self.multiworld.itempool[start:] = mine
+
     def set_rules(self) -> None:
         from worlds.generic.Rules import set_rule
         player = self.player
@@ -2210,18 +2640,23 @@ class FF1PSPWorld(World):
                 return any(state.has_all(a, player) for a in alts)
             return rule
 
-        # effective region + shop rules for the open-world toggles. One yaml
-        # gradient (open_progression): extended is a strict superset of early.
-        op = self.options.open_progression.value
-        early = op >= OpenProgression.option_early
-        extended = op >= OpenProgression.option_extended
-        docks = bool(self.options.northern_docks.value)
-        trails = bool(self.options.unlockable_northern_foot_trails.value)
-        gulg_key = bool(self.options.mount_gulg_key.value)
-        region_rules = LOGIC.region_rules_for(early, extended, docks,
-                                              trails, gulg_key)
-        shop_overrides = LOGIC.shop_rules_for(early, extended, docks,
-                                              trails, gulg_key)
+        # ONE site provider feeds every location rule below (logic REGION_SITE):
+        # the vanilla hand rules under the open-world toggles, or the random
+        # overworld's own access graph (where no yaml option adds anything).
+        sites = self._site_rules()
+        randworld = self._randworld_export() is not None
+        # NPC checks that fire somewhere else (skip_lute_cutscene, always on:
+        # the Princess at the Garland kill, Chaos Shrine) -- resolved once
+        # here, so every loop below reads the same region.
+        self._npc_locs = [(loc, LOGIC.npc_region(self._npc_ord[loc], region,
+                                                 skip_lute=True), extra)
+                          for loc, region, extra in self._npc_locs]
+        region_rules = LOGIC.region_rules_from_sites(sites)
+        shop_overrides = LOGIC.shop_rules_from_sites(sites)
+
+        def bonus_alts(dg):
+            """A bonus dungeon's entrance rule (its site's), without the seal."""
+            return LOGIC.bonus_entrance_rule(sites, dg)
 
         # bonus_dungeon_crystals: a bonus dungeon's chests must gate on FIEND access
         # (not the crystal), because the crystal now comes from clearing that dungeon
@@ -2268,13 +2703,8 @@ class FF1PSPWorld(World):
             # unmapped fallback (which under-gates -- broken-seed risk).
             sdg = LOGIC.DLC_STATIC_IDX_DUNGEON.get(idx)
             if sdg is not None:
-                extra = ([dungeon_gate(dlc_gate[sdg])]
-                         + LOGIC.DLC_DUNGEON_EXTRA_TOKENS.get(sdg, []))
-                if sdg == 3:
-                    alts = [[]] if early else [LOGIC.WHISPERWIND_SHIP_CANAL_ALT]
-                else:
-                    alts = []
-                set_rule(loc, make_rule(alts, extra))
+                set_rule(loc, make_rule(bonus_alts(sdg),
+                                        [dungeon_gate(dlc_gate[sdg])]))
                 gate_party(loc, LOGIC.PARTY_GATE_STATIC_DG[sdg])
                 continue
             region, chest_token = LOC_INFO.get(idx, (None, None))
@@ -2301,7 +2731,7 @@ class FF1PSPWorld(World):
         # crystals_needed < 4: the Black Orb event drops the crystal tokens from
         # its AND-extra and instead needs any N of the four (the on-disc wrapper
         # cave makes the game agree). Tracker mirrors in resolve_tokens.
-        crystals_needed = int(self.options.crystals_needed.value)
+        crystals_needed = self._crystals_needed()
         count_locs = (getattr(self, "_black_orb_loc", None),
                       getattr(self, "_crystals_placed_loc", None))
         for loc, region, extra in self._event_locs:
@@ -2321,10 +2751,12 @@ class FF1PSPWorld(World):
                 gate_party(loc, LOGIC.PARTY_GATE_EVENT[loc.name])
         # NPCs: region rule AND the NPC's own tokens, OR any NPC_ALT_RULES bypass
         # (Sarda is also reachable by a plain airship landing) -- npc_rule_alts folds
-        # both into one OR-of-ANDs so extra is already baked in.
+        # both into one OR-of-ANDs so extra is already baked in. A random world's
+        # site rule already holds every route, so its bypasses drop out.
         for loc, region, extra in self._npc_locs:
             alts = LOGIC.npc_rule_alts(self._npc_ord[loc],
-                                       region_rules.get(region, []), extra)
+                                       region_rules.get(region, []), extra,
+                                       randworld=randworld)
             set_rule(loc, make_rule(alts))
             if loc.name in LOGIC.PARTY_GATE_NPC:
                 gate_party(loc, LOGIC.PARTY_GATE_NPC[loc.name])
@@ -2335,30 +2767,19 @@ class FF1PSPWorld(World):
             set_rule(loc, make_rule(shop_overrides.get(shop_name, reqs)))
 
         # dynamic bonus-dungeon chests: gated on the dungeon's element CRYSTAL (its
-        # Fiend seal) plus that dungeon's vehicle/key-item entrance requirement (see
-        # logic.DLC_DUNGEON_EXTRA_TOKENS). Whisperwind Cove additionally needs Ice
-        # Cave access: early_open_progression (foot/canoe river) OR Ship+Nitro Powder.
+        # Fiend seal) plus the dungeon's entrance: its site's rule (vanilla:
+        # logic.DLC_DUNGEON_EXTRA_TOKENS, and Whisperwind Cove's Ice Cave access --
+        # the early canoe river OR Ship + Canal; random worlds: the graph).
         for loc, dg, gate_tok in self._dyn_locs:
-            extra = [dungeon_gate(gate_tok)] + LOGIC.DLC_DUNGEON_EXTRA_TOKENS.get(dg, [])
-            if dg == 3:
-                ice_cave_alts = [[]] if early else [LOGIC.WHISPERWIND_SHIP_CANAL_ALT]
-                set_rule(loc, make_rule(ice_cave_alts, extra))
-            else:
-                set_rule(loc, make_rule([], extra))
+            set_rule(loc, make_rule(bonus_alts(dg), [dungeon_gate(gate_tok)]))
 
         # bonus_dungeon_crystals: each "<Dungeon> - Cleared" event grants that
         # dungeon's crystal, gated on the SAME rule as the dungeon's own chests
-        # (fiend-defeated token + entrance tokens + Whisperwind ice-cave alt) -- with
-        # the crystal NOT in the rule, so reaching+clearing the dungeon derives the
-        # crystal and there is no circular gate. Empty (identity-inert) when off.
+        # (fiend-defeated token + the dungeon's entrance) -- with the crystal NOT in
+        # the rule, so reaching+clearing the dungeon derives the crystal and there
+        # is no circular gate. Empty (identity-inert) when off.
         for loc, dg, crystal in self._clear_locs:
-            extra = ([LOGIC.FIEND_TOKEN[crystal]]
-                     + LOGIC.DLC_DUNGEON_EXTRA_TOKENS.get(dg, []))
-            if dg == 3:
-                alts = [[]] if early else [LOGIC.WHISPERWIND_SHIP_CANAL_ALT]
-            else:
-                alts = []
-            set_rule(loc, make_rule(alts, extra))
+            set_rule(loc, make_rule(bonus_alts(dg), [LOGIC.FIEND_TOKEN[crystal]]))
             if dg in LOGIC.PARTY_GATE_CLEAR_DG:
                 gate_party(loc, LOGIC.PARTY_GATE_CLEAR_DG[dg])
 
@@ -2562,11 +2983,8 @@ class FF1PSPWorld(World):
             # (token remaps mirror create_regions / the set_rule blocks above)
             _clear_specs = []
             for _loc, dg, crystal in self._clear_locs:
-                c_extra = ([LOGIC.FIEND_TOKEN[crystal]]
-                           + LOGIC.DLC_DUNGEON_EXTRA_TOKENS.get(dg, []))
-                c_alts = (([[]] if early else [LOGIC.WHISPERWIND_SHIP_CANAL_ALT])
-                          if dg == 3 else [])
-                _clear_specs.append((crystal, c_alts, c_extra))
+                _clear_specs.append((crystal, bonus_alts(dg),
+                                     [LOGIC.FIEND_TOKEN[crystal]]))
             changed = True
             while changed:
                 changed = False
@@ -2592,12 +3010,9 @@ class FF1PSPWorld(World):
                 sdg = LOGIC.DLC_STATIC_IDX_DUNGEON.get(idx)
                 if sdg is not None:
                     # static bonus chest: mirror its real rule (crystal/fiend gate
-                    # + entrance tokens), not the [AIRSHIP] unmapped fallback
-                    extra = ([dungeon_gate(dlc_gate[sdg])]
-                             + LOGIC.DLC_DUNGEON_EXTRA_TOKENS.get(sdg, []))
-                    alts = (([[]] if early else [LOGIC.WHISPERWIND_SHIP_CANAL_ALT])
-                            if sdg == 3 else [])
-                    if _rule_needs_levi(alts, extra):
+                    # + the dungeon's entrance), not the [AIRSHIP] unmapped fallback
+                    if _rule_needs_levi(bonus_alts(sdg),
+                                        [dungeon_gate(dlc_gate[sdg])]):
                         levi_locs.append(loc)
                     continue
                 region, chest_token = LOC_INFO.get(idx, (None, None))
@@ -2617,11 +3032,7 @@ class FF1PSPWorld(World):
                 if _rule_needs_levi(shop_overrides.get(shop_name, reqs)):
                     levi_locs.append(loc)
             for loc, dg, gate_tok in self._dyn_locs:
-                extra = ([dungeon_gate(gate_tok)]
-                         + LOGIC.DLC_DUNGEON_EXTRA_TOKENS.get(dg, []))
-                alts = (([[]] if early else [LOGIC.WHISPERWIND_SHIP_CANAL_ALT])
-                        if dg == 3 else [])
-                if _rule_needs_levi(alts, extra):
+                if _rule_needs_levi(bonus_alts(dg), [dungeon_gate(gate_tok)]):
                     levi_locs.append(loc)
             for loc in levi_locs:
                 add_item_rule(loc, _forbid_shard)

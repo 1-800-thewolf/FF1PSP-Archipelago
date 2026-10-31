@@ -13,7 +13,11 @@ it had to be extracted by hand over several rounds of back-and-forth:
   * savestate listing     -- a savestate restores a PREVIOUS seed's ELF, so the
                              right ISO on the command line still runs old code
   * stale processes       -- duplicate PPSSPP / client instances
-  * ppsspp.ini values     -- FastMemoryAccess / debugger port, per candidate ini
+  * ppsspp.ini values     -- FastMemoryAccess / debugger port / CPU core /
+                             graphics backend, per candidate ini, plus what
+                             the client overwrote (the player's own settings)
+  * PPSSPP exe bitness    -- 32-bit vs 64-bit build, from the PE header
+  * window picture        -- what the player actually sees, and whether it moves
   * ISO verdict           -- the /checkiso answer, without asking them to run it
   * slot_data             -- the options AS GENERATED (a yaml can be edited after)
   * AP state              -- checks sent, items received, goal
@@ -127,6 +131,7 @@ WHAT IS IN IT
   slot_data.json    the options your seed was generated with
   ram_snapshot.json a read-only peek at story flags / key items / inventory
   ppsspp_log.txt    PPSSPP's own log, if it was writing one
+  ppsspp_window.bmp a picture of the PPSSPP window when /logs ran
   launcher.json     your saved PPSSPP + ISO paths
   manifest.json     the same facts as report.txt, machine-readable
 
@@ -286,6 +291,7 @@ def _env_section(ctx):
         "state_dir": state_dir(),
         "ppsspp_exe": exe or "(not found)",
         "ppsspp_exe_stat": _stat(exe) if exe else None,
+        "ppsspp_exe_arch": _pe_arch(exe) if exe else None,
         "remote_psp": (f"{remote[0]}:{remote[1]}" if remote and remote[1]
                        else remote[0] if remote else "off (launching locally)"),
         "env_overrides": {k: os.environ[k] for k in
@@ -313,6 +319,10 @@ def _iso_section(ctx):
         return out
     boots = []
     with open(iso, "rb") as f:
+        if E.iso_already_baked(f):
+            out["verdict"] = ("UNUSABLE -- already-baked ISO (EBOOT.BIN is a "
+                              "plaintext ELF); pick the original disc image")
+            return out
         for p, off, size in E._iso_find_boot_bins(f) or []:
             f.seek(off)
             head = f.read(size)
@@ -375,13 +385,43 @@ def _cache_listing(d):
     return {"patched_isos": rows, "orphan_markers": orphans}
 
 
+_PE_MACHINES = {0x014C: "32-bit x86", 0x8664: "64-bit x64",
+                0xAA64: "64-bit ARM64"}
+
+
+def _pe_arch(path):
+    """'32-bit x86' / '64-bit x64' / ... from a Windows exe's PE header, or
+    None for anything that is not one (Linux binaries, a wrapper script)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(0x400)
+        if head[:2] != b"MZ":
+            return None
+        pe = struct.unpack_from("<I", head, 0x3C)[0]
+        if head[pe:pe + 4] != b"PE\0\0":
+            return None
+        machine = struct.unpack_from("<H", head, pe + 4)[0]
+        return _PE_MACHINES.get(machine, f"machine {machine:#06x}")
+    except Exception:
+        return None
+
+
+# The settings that break the bridge when stale (memory: ini-patch-all-
+# candidates) plus the CPU/graphics ones a black screen comes down to.
+INI_KEYS = ("FastMemoryAccess", "EnableRemoteDebugger", "RemoteISOPort",
+            "RemoteDebuggerOnStartup", "CPUCore", "GraphicsBackend",
+            "SoftwareRendering", "InternalResolution", "FrameSkip",
+            "TextureBackoffCache", "ReplaceTextures", "IOTimingMethod",
+            "CacheFullIsoInRam", "SeparateSASThread")
+
+
 def _ini_section(ctx):
-    """Every ppsspp.ini candidate and the three settings that break the bridge
-    when stale (memory: ini-patch-all-candidates)."""
-    from .launcher import find_inis, load_cfg, find_ppsspp
+    """Every ppsspp.ini candidate, its INI_KEYS values, and what the client
+    overwrote in it (launcher.load_ini_before: the player's own settings)."""
+    from .launcher import find_inis, load_cfg, find_ppsspp, load_ini_before
     exe = find_ppsspp(load_cfg().get("ppsspp", ""))
-    want = ("FastMemoryAccess", "EnableRemoteDebugger", "RemoteISOPort",
-            "RemoteDebuggerOnStartup")
+    want = INI_KEYS
+    before = load_ini_before()
     rows = []
     for ini in find_inis(exe) if exe else []:
         row = {"path": ini, "exists": os.path.isfile(ini)}
@@ -397,6 +437,8 @@ def _ini_section(ctx):
                 vals = {"error": repr(e)}
             row["settings"] = vals
             row["mtime"] = _stat(ini).get("mtime")
+        if before.get(ini):
+            row["before_client"] = before[ini]
         rows.append(row)
     return rows
 
@@ -414,13 +456,10 @@ def _process_section(ctx):
                 if any(n in (name + " " + cmd).lower() for n in
                        ("ppsspp", "archipelago", "ff1psp", "python"))]
         return {"matching": hits, "ppsspp_instances": len(ppsspp_pids())}
-    try:
-        out = subprocess.run(
-            ["tasklist", "/fo", "csv", "/nh"], capture_output=True, text=True,
-            timeout=15, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        ).stdout
-    except Exception as e:
-        return {"error": repr(e)}
+    from .hostproc import run_text     # OEM-codepage safe (non-English Windows)
+    out = run_text(["tasklist", "/fo", "csv", "/nh"], 15)
+    if not out:
+        return {"error": "tasklist returned nothing"}
     hits = [line.strip() for line in out.splitlines()
             if any(n in line.lower() for n in
                    ("ppsspp", "archipelago", "ff1psp", "python"))]
@@ -953,6 +992,194 @@ def _host_section(ctx=None):
     return out
 
 
+# ------------------------------------------------------------ window picture ---
+# What the player is LOOKING at. "PPSSPP hangs on a black screen" was the whole
+# 2026-10-31 report and nothing in the bundle could confirm or deny it. Two
+# PrintWindow grabs WINDOW_GAP_S apart: one ships as ppsspp_window.bmp, the
+# pair says whether the picture moves. Read-only; Windows only.
+# PW_RENDERFULLCONTENT renders GPU swapchains through DWM (Windows 8.1+).
+WINDOW_GAP_S = 1.0
+WINDOW_MAX_PIXELS = 1_500_000     # bigger windows ship at half size
+DARK_LEVEL = 24                   # max(r, g, b) below this counts as black
+DARK_SAMPLES = 20000
+PICTURE_BLACK_PCT = 97.0
+
+
+def _main_hwnd(pid):
+    """The largest visible top-level window of `pid` (the game window), or None."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.WinDLL("user32")
+    best = [None, 0]
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def cb(hwnd, _l):
+        wpid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+        if wpid.value == pid and user32.IsWindowVisible(hwnd):
+            r = wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(r))
+            area = (r.right - r.left) * (r.bottom - r.top)
+            if area > best[1]:
+                best[:] = [hwnd, area]
+        return True
+
+    user32.EnumWindows(cb, 0)
+    return best[0]
+
+
+def _grab_window(hwnd):
+    """(w, h, BGRA top-down bytes, client crop (x, y, w, h)) of the whole window."""
+    import ctypes
+    from ctypes import wintypes
+    user32, gdi32 = ctypes.WinDLL("user32"), ctypes.WinDLL("gdi32")
+    for fn in (user32.GetDC, gdi32.CreateCompatibleDC,
+               gdi32.CreateCompatibleBitmap, gdi32.SelectObject):
+        fn.restype = ctypes.c_void_p
+    for fn, args in ((user32.ReleaseDC, (wintypes.HWND, ctypes.c_void_p)),
+                     (gdi32.CreateCompatibleDC, (ctypes.c_void_p,)),
+                     (gdi32.CreateCompatibleBitmap,
+                      (ctypes.c_void_p, ctypes.c_int, ctypes.c_int)),
+                     (gdi32.SelectObject, (ctypes.c_void_p, ctypes.c_void_p)),
+                     (gdi32.DeleteObject, (ctypes.c_void_p,)),
+                     (gdi32.DeleteDC, (ctypes.c_void_p,)),
+                     (user32.PrintWindow,
+                      (wintypes.HWND, ctypes.c_void_p, wintypes.UINT))):
+        fn.argtypes = args
+
+    class BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
+                    ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
+                    ("biBitCount", wintypes.WORD),
+                    ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD),
+                    ("biXPelsPerMeter", wintypes.LONG),
+                    ("biYPelsPerMeter", wintypes.LONG),
+                    ("biClrUsed", wintypes.DWORD),
+                    ("biClrImportant", wintypes.DWORD)]
+
+    wr, cr = wintypes.RECT(), wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(wr))
+    user32.GetClientRect(hwnd, ctypes.byref(cr))
+    origin = wintypes.POINT(0, 0)
+    user32.ClientToScreen(hwnd, ctypes.byref(origin))
+    w, h = wr.right - wr.left, wr.bottom - wr.top
+    if w <= 0 or h <= 0:
+        raise RuntimeError(f"window has no area ({w}x{h})")
+    crop = (max(0, origin.x - wr.left), max(0, origin.y - wr.top),
+            cr.right, cr.bottom)
+    screen = user32.GetDC(None)
+    mem = gdi32.CreateCompatibleDC(screen)
+    bmp = gdi32.CreateCompatibleBitmap(screen, w, h)
+    try:
+        old = gdi32.SelectObject(mem, bmp)
+        user32.PrintWindow(hwnd, mem, 2)              # PW_RENDERFULLCONTENT
+        gdi32.SelectObject(mem, old)                  # GetDIBits wants it free
+        bi = BITMAPINFOHEADER(ctypes.sizeof(BITMAPINFOHEADER), w, -h, 1, 32,
+                              0, 0, 0, 0, 0, 0)
+        buf = ctypes.create_string_buffer(w * h * 4)
+        if not gdi32.GetDIBits(ctypes.c_void_p(mem), ctypes.c_void_p(bmp), 0,
+                               h, buf, ctypes.byref(bi), 0):
+            raise RuntimeError("GetDIBits failed")
+        return w, h, buf.raw, crop
+    finally:
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(mem)
+        user32.ReleaseDC(None, screen)
+
+
+def _picture_sample(raw, w, crop):
+    """(percent of sampled client-area pixels that are black, the sampled
+    pixels as bytes -- two grabs with equal bytes are the same picture).
+    Samples the middle 80% only: on a scaled display the reported client
+    origin can still include part of the menu bar, whose grey would keep a
+    black game screen under PICTURE_BLACK_PCT (live 2026-10-31)."""
+    cx, cy, cw, ch = crop
+    cx, cy = cx + cw // 10, cy + ch // 10
+    cw, ch = cw - 2 * (cw // 10), ch - 2 * (ch // 10)
+    step = max(1, int((cw * ch / DARK_SAMPLES) ** 0.5))
+    dark = total = 0
+    sig = bytearray()
+    for y in range(cy, cy + ch, step):
+        row = y * w * 4
+        for x in range(cx, cx + cw, step):
+            o = row + x * 4
+            px = raw[o:o + 3]
+            if len(px) < 3:
+                continue
+            sig += px
+            total += 1
+            if max(px) < DARK_LEVEL:
+                dark += 1
+    return (100.0 * dark / total if total else None), bytes(sig)
+
+
+def _downscale(raw, w, h, f):
+    """Keep every f-th pixel of every f-th row of a BGRA image."""
+    px = memoryview(raw).cast("I")
+    rows = [px[y * w:(y + 1) * w:f].tobytes() for y in range(0, h, f)]
+    return len(range(0, w, f)), len(rows), b"".join(rows)
+
+
+def _bmp_bytes(w, h, raw):
+    """A top-down 32-bit BMP file around BGRA pixel bytes."""
+    info = struct.pack("<IiiHHIIiiII", 40, w, -h, 1, 32, 0, len(raw), 0, 0,
+                       0, 0)
+    head = struct.pack("<2sIHHI", b"BM", 14 + len(info) + len(raw), 0, 0,
+                       14 + len(info))
+    return head + info + raw
+
+
+def _picture_verdict(dark_pct, changed, gap_s):
+    if dark_pct is None:
+        return "no picture (window has no client area)"
+    if dark_pct >= PICTURE_BLACK_PCT:
+        return (f"BLACK ({dark_pct:.0f}% dark) and "
+                + (f"NOT changing over {gap_s:.1f}s: the player is looking at "
+                   f"a frozen black screen" if not changed
+                   else "changing: a fade or a dark scene"))
+    if not changed:
+        return (f"a still picture over {gap_s:.1f}s ({dark_pct:.0f}% dark): "
+                f"paused, a menu, or a frozen frame")
+    return f"moving picture ({dark_pct:.0f}% dark): the game is drawing"
+
+
+def _window_section(ctx=None):
+    """What the PPSSPP window shows. The image itself rides under "_bmp" and is
+    popped into its own zip member by build_bundle. The sleep is fine: build_
+    bundle runs collectors in an executor, not the asyncio loop."""
+    from .ppsspp_mem import _ppsspp_pids
+    from . import hostproc
+    if not hostproc.IS_WINDOWS:
+        return {"note": "window capture is Windows-only"}
+    pids = _ppsspp_pids()
+    if not pids:
+        return {"note": "no PPSSPP process running"}
+    import ctypes
+    import time
+    hwnd = _main_hwnd(pids[0])
+    if not hwnd:
+        return {"note": "PPSSPP has no visible window"}
+    if ctypes.WinDLL("user32").IsIconic(hwnd):
+        return {"note": "PPSSPP window is minimized -- nothing to capture"}
+    w, h, raw, crop = _grab_window(hwnd)
+    dark, sig = _picture_sample(raw, w, crop)
+    time.sleep(WINDOW_GAP_S)
+    w2, h2, raw2, crop2 = _grab_window(hwnd)
+    dark2, sig2 = _picture_sample(raw2, w2, crop2)
+    out = {"size": [w, h], "client": list(crop),
+           "dark_pct": None if dark is None else round(dark, 1),
+           "changed": sig != sig2,
+           "verdict": _picture_verdict(dark, sig != sig2, WINDOW_GAP_S),
+           "how": "PrintWindow(PW_RENDERFULLCONTENT) x2; a GPU backend that "
+                  "does not support it can read as black, so check the image"}
+    if w * h > WINDOW_MAX_PIXELS:
+        w, h, raw = _downscale(raw, w, h, 2)
+        out["image_scale"] = 0.5
+    out["_bmp"] = _bmp_bytes(w, h, raw)
+    return out
+
+
 def _ppsspp_log(ctx=None):
     """PPSSPP's OWN log file (not the client's). Absent unless the player has
     'Log to file' switched on in Developer Tools -- when a bundle comes back
@@ -1060,6 +1287,12 @@ def _render_report(m):
             p(f"  {row}")
     elif isinstance(host, dict) and (host.get("note") or host.get("error")):
         p(f"host process     : {host.get('note') or host.get('error')}")
+    win = m.get("window")
+    if isinstance(win, dict):
+        p(f"window picture   : "
+          f"{win.get('verdict') or win.get('note') or win.get('error')}")
+        if win.get("verdict"):
+            p("  (the picture itself is ppsspp_window.bmp)")
     plog = m.get("ppsspp_log")
     if isinstance(plog, dict):
         p(f"PPSSPP log       : "
@@ -1084,7 +1317,8 @@ def _render_report(m):
         p(f"  orphan markers : {orph}")
     p()
     p("-- setup " + "-" * 51)
-    p(f"PPSSPP exe       : {env.get('ppsspp_exe')}")
+    p(f"PPSSPP exe       : {env.get('ppsspp_exe')}"
+      + (f"  ({env['ppsspp_exe_arch']})" if env.get("ppsspp_exe_arch") else ""))
     p(f"remote PPSSPP    : {env.get('remote_psp')}")
     if env.get("env_overrides"):
         p(f"env overrides    : {env['env_overrides']}")
@@ -1095,6 +1329,8 @@ def _render_report(m):
     for row in m["ppsspp_ini"] if isinstance(m["ppsspp_ini"], list) else []:
         p(f"  ini            : {row.get('path')} "
           f"{row.get('settings') if row.get('exists') else '(absent)'}")
+        if row.get("before_client"):
+            p(f"    before client: {row['before_client']}")
     st = m["savestates"]
     if isinstance(st, dict) and st.get("states"):
         p("savestates       : PRESENT -- a savestate from an earlier seed runs "
@@ -1213,12 +1449,15 @@ def build_bundle(ctx=None, ram=None, wedge=None, out_dir=None):
         "ram": ram if ram is not None else {"note": "not collected"},
         "cpu": wedge if wedge is not None else {"note": "not collected"},
         "host": _safe(_host_section, ctx),
+        "window": _safe(_window_section, ctx),
         "ppsspp_log": _safe(_ppsspp_log, ctx),
     }
-    # The log body ships as its own member; the manifest keeps only the metadata
-    # (path/size/mtime) so manifest.json does not carry a second copy.
+    # The log body and the window image ship as their own members; the
+    # manifest keeps only their metadata so manifest.json carries no copy.
     _plog = manifest["ppsspp_log"]
     ppsspp_log_tail = _plog.pop("tail", None) if isinstance(_plog, dict) else None
+    _win = manifest["window"]
+    window_bmp = _win.pop("_bmp", None) if isinstance(_win, dict) else None
     ap = manifest["archipelago"]
     slot = str(ap.get("slot") or "noslot")
     seed = str(ap.get("seed_name") or "noseed")[:20]
@@ -1241,6 +1480,8 @@ def build_bundle(ctx=None, ram=None, wedge=None, out_dir=None):
                                                  default=str))
         if ppsspp_log_tail:
             text(zf, "ppsspp_log.txt", ppsspp_log_tail)
+        if window_bmp:
+            zf.writestr("ppsspp_window.bmp", window_bmp)
         if _RING is not None:
             text(zf, "breadcrumbs.log", "\n".join(_RING.buf))
         try:

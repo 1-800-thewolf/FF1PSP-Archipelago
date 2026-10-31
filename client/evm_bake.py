@@ -305,12 +305,24 @@ def _tokenize(bank, cnt, total, gcount, inv):
     return out, orphans
 
 
-def bake_obtain_boxes(iso_path, key_names, log=print):
+# skip_lute_cutscene (iso_patcher.apply_skip_lute_cutscene): Garland's event
+# ends right after message 0x132 -- USEVM05's entry [0x0d], the Princess's
+# "You've come to rescue me" speech in the post-battle scene, its only use.
+# Authored as the Lute's obtain box, so it names the Princess location's AP
+# item; with no AP name it keeps the speech.
+SKIP_LUTE_EXTRA = {"USEVM05.PCK": {0x0D: "lute"}}
+
+
+def bake_obtain_boxes(iso_path, key_names, log=print, extra=None):
     """Author every USEVM bundle's obtain sentence whose key is in `key_names`
-    ({key id: AP item name}). Edits `iso_path` in place; cosmetic -- skips any
-    bundle it cannot process."""
+    ({key id: AP item name}). `extra` = {bundle: {entry idx: key name}} adds
+    entries that are not vanilla obtain sentences. Edits `iso_path` in place;
+    cosmetic -- skips any bundle it cannot process."""
     if not key_names:
         return
+    extra = {name: {k: (kn, key_names.get(FD.key_item_id(kn)))
+                    for k, kn in ents.items()}
+             for name, ents in (extra or {}).items()}
     with open(iso_path, "r+b") as f:
         dpk_off, dpk_size = _find_dpk(f)
         f.seek(dpk_off)
@@ -327,6 +339,9 @@ def bake_obtain_boxes(iso_path, key_names, log=print):
         authored_maps = set()
         for name, (_ro, off, size) in recs.items():
             if not _USEVM.match(name):
+                continue
+            if any(ap for _kn, ap in extra.get(name, {}).values()):
+                authored_maps.add(name)
                 continue
             try:
                 blob = wp16.decompress(bytes(dpk[off:off + size]))
@@ -394,6 +409,9 @@ def bake_obtain_boxes(iso_path, key_names, log=print):
                     if not ap:
                         continue
                     authored[k] = (mo.group(1), _fit_sentence(ap))
+                for k, (kn, ap) in extra.get(name, {}).items():
+                    if ap and k < cnt and 0x14 <= offs[k] < ends[k] <= total:
+                        authored[k] = (f"[{k:#04x}] as {kn}", _fit_sentence(ap))
                 if not authored:
                     continue
                 # Preferred path: swap in the donor font and re-encode every

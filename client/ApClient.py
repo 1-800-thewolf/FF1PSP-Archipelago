@@ -58,6 +58,7 @@ from .. import ids as ID
 from .. import logic as LOGIC
 from .. import rando as RANDO
 from .. import tracker as TRACKER
+from .. import version as VER
 
 # Diagnostic tier. kvui binds the client WINDOW to the "Client" logger only
 # (logging_pairs), so records sent here never reach the player's screen -- but
@@ -712,6 +713,9 @@ class FF1PSPContext(CommonContext):
         # NPC_MAP_RESET rows whose "won key held out of the menu" hint has been
         # printed this session (see D.PREARM_HOLD_HINT).
         self._prearm_hinted = set()
+        # Site keys whose doorstep this seed's random overworld does not carry
+        # (logged once each, see _doorstep).
+        self._doorstep_missing = set()
         self._grant_lock = asyncio.Lock()   # serialize grant<->counter writes
         self._warned_bad_counter = False    # one-shot guard-trip warning
         # Counter-hardening state (see _grant_pending). The save-resident counter
@@ -890,6 +894,8 @@ class FF1PSPContext(CommonContext):
         # baked into bestiary_data already describe them exactly.
         self._ow_sources_cache = None
         self._ow_zone_cache = None
+        self._rw_index_cache = None       # logic.randworld_index (random map)
+        self._rw_rows_cache = None        # logic.randworld_source_rows
         self._cave_sources_built = False
         self._cave_sources_cache = None
         self._bestiary_odds = {}         # {(mon, source): best slot %} for
@@ -900,6 +906,13 @@ class FF1PSPContext(CommonContext):
         self._bestiary_floor = None       # bestiary_floor.BestiaryFloor: the kill-
                                           # count floor (server DataStorage, follows
                                           # a drop), last frame, decision state
+        self._fog_mb = None               # map fog mailbox RAM address (None = not seen)
+        self._fog_server = None           # explored-chunk mask (int, bit c = chunk c)
+                                          # from DataStorage; None = not fetched yet
+        self._fog_fetch_sent = False
+        self._fog_scan_at = 0.0           # next mailbox scan (monotonic s) while absent
+        self._fog_tab = False             # fog_of_war applies to the Map tab
+        self._fog_tab_last = None         # last mask pushed to the Map tab
         self.death_link_on = False        # yaml death_link: DeathLink tag + wipe loop
         self.death_link_severity = 3      # yaml: living members killed per received death
         self._trap_queue = []             # received trap items awaiting their battle:
@@ -1034,6 +1047,12 @@ class FF1PSPContext(CommonContext):
         # being eaten as carried-in state (the Caravan tuple-vs-scalar bug, live
         # 2026-08-08). Reset on leaving the map; see _npc_reset_entry_clear.
         self._npc_reset_entryclears = {}
+        # Radius-doorstep restore latch (D.PREARM_RESTORE_TICKS): key id ->
+        # consecutive out-of-window field ticks since that row last held its
+        # gate (doorstep prearm or in-map). Present = the won-key restore is
+        # deferred; popped when the restore finally runs or the location is
+        # checked.
+        self._prearm_latch = {}
 
     # ---------------- save-block base resolution ----------------
     def dlog_edge(self, key, value, msg):
@@ -1518,7 +1537,10 @@ class FF1PSPContext(CommonContext):
                      if known_jobs or future_jobs else b"")
 
         towns = []
+        gone = TRACKER.skipped_sites(self.slot_data)     # map_size: no Lufenia
         for city, name, shop_idxs in TRACKER.SHOP_TOWNS:
+            if TRACKER.SHOP_TOWN_SITE.get(city) in gone:
+                continue
             stock = self._city_stock(shops_tbl, city, price_tbls, ap_ordinals,
                                      jobs, future_jobs)
             shops = []
@@ -1716,6 +1738,51 @@ class FF1PSPContext(CommonContext):
                                  "use": use})
         return out
 
+    def _ow_tables(self):
+        """(zones_overworld, its high-byte companion or None) from slot_data,
+        or (None, None) when the seed ships no overworld table."""
+        enc = (self.slot_data or {}).get("shuffle_tables") or {}
+        try:
+            ow = base64.b64decode(enc["zones_overworld"])
+        except Exception:
+            return None, None
+        hi = None
+        if enc.get("zones_overworld_hi"):
+            try:
+                hi = base64.b64decode(enc["zones_overworld_hi"])
+            except Exception:
+                hi = None
+        return ow, hi
+
+    def _bestiary_randworld(self):
+        """logic.randworld_index of a RANDOM overworld's territories, or None
+        on the vanilla map. A generated world keys every land heading by hub
+        ((kind, "wkeep")), and its table rows are one per HUB, not per 32x32
+        zone -- reading them as zones named places the monster never rolls
+        in (live 2026-10-25: Ghast promised on Western Keep grass)."""
+        if self._rw_index_cache is None:
+            rw = (self.slot_data or {}).get("randworld")
+            if not rw or not rw.get("land"):
+                return None
+            self._rw_index_cache = TRACKER.LOGIC.randworld_index(rw)
+        return self._rw_index_cache
+
+    def _bestiary_rw_hi(self, hi):
+        """The high-byte table only counts with harder_overworld on: the
+        generator's _bestiary_ow_sources reads it under the same switch."""
+        opts = (self.bestiary or {}).get("opts") or {}
+        return hi if opts.get("harder_ow") else None
+
+    def _bestiary_opts(self):
+        """The seed's bestiary opts, plus the territory index on a random
+        map -- what logic's rule functions read to answer per hub (the
+        generator injects the same key in __init__._bestiary_setup)."""
+        opts = dict((self.bestiary or {}).get("opts") or {})
+        rwi = self._bestiary_randworld()
+        if rwi is not None:
+            opts["randworld"] = rwi
+        return opts
+
     def _bestiary_ow_sources(self):
         """mon -> overworld places, from THIS seed's rolled zones_overworld.
 
@@ -1726,19 +1793,17 @@ class FF1PSPContext(CommonContext):
         zones were tier 5-8, live 2026-08-31). Cached: the table cannot change
         within a session."""
         if getattr(self, "_ow_sources_cache", None) is None:
-            enc = (self.slot_data or {}).get("shuffle_tables") or {}
-            try:
-                ow = base64.b64decode(enc["zones_overworld"])
-            except Exception:
+            ow, hi = self._ow_tables()
+            if ow is None:
                 return {}
-            hi = None
-            if enc.get("zones_overworld_hi"):
-                try:
-                    hi = base64.b64decode(enc["zones_overworld_hi"])
-                except Exception:
-                    hi = None
-            self._ow_sources_cache = TRACKER.LOGIC.overworld_sources(
-                ow, hi, odds=self._bestiary_odds)
+            rwi = self._bestiary_randworld()
+            if rwi is not None:
+                self._ow_sources_cache = TRACKER.LOGIC.randworld_land_sources(
+                    rwi, ow, self._bestiary_rw_hi(hi), self._bestiary_opts(),
+                    odds=self._bestiary_odds)
+            else:
+                self._ow_sources_cache = TRACKER.LOGIC.overworld_sources(
+                    ow, hi, odds=self._bestiary_odds)
         return self._ow_sources_cache
 
     def _bestiary_ow_zone_tables(self):
@@ -1751,20 +1816,29 @@ class FF1PSPContext(CommonContext):
         rolls three zones away (live report 2026-09-07). Cached with the same
         reasoning: the table cannot change within a session."""
         if getattr(self, "_ow_zone_cache", None) is None:
-            enc = (self.slot_data or {}).get("shuffle_tables") or {}
-            try:
-                ow = base64.b64decode(enc["zones_overworld"])
-            except Exception:
+            if self._bestiary_randworld() is not None:
+                # a random map's rows are per hub: no zone means anything
+                # there (_bestiary_rw_rows carries the local truth instead)
+                self._ow_zone_cache = ({}, {})
+                return self._ow_zone_cache
+            ow, hi = self._ow_tables()
+            if ow is None:
                 return {}, {}
-            hi = None
-            if enc.get("zones_overworld_hi"):
-                try:
-                    hi = base64.b64decode(enc["zones_overworld_hi"])
-                except Exception:
-                    hi = None
             self._ow_zone_cache = (TRACKER.LOGIC.overworld_zone_sources(ow, hi),
                                    TRACKER.LOGIC.overworld_zone_rows(ow, hi))
         return self._ow_zone_cache
+
+    def _bestiary_rw_rows(self):
+        """{(kind, hub): rows} on a random map (logic.randworld_source_rows),
+        else {}: what the territory under the party rolls, for the Map tab."""
+        if self._rw_rows_cache is None:
+            rwi = self._bestiary_randworld()
+            ow, hi = self._ow_tables()
+            if rwi is None or ow is None:
+                return {}
+            self._rw_rows_cache = TRACKER.LOGIC.randworld_source_rows(
+                rwi, ow, self._bestiary_rw_hi(hi), self._bestiary_opts())
+        return self._rw_rows_cache
 
     def _bestiary_cave_sources(self):
         """mon -> dungeon places, from THIS seed's zones_caves, or None.
@@ -1808,6 +1882,8 @@ class FF1PSPContext(CommonContext):
                     flags[m] = int(getattr(info, "flags", 0) or 0)
         sd = self.slot_data or {}
         ow_zones, zone_rows = self._bestiary_ow_zone_tables()
+        if bst and self._bestiary_randworld() is not None:
+            bst = dict(bst, opts=self._bestiary_opts())
         return TRACKER.bestiary_view(
             bst, sd.get("boss_minions_plan"), killed, checked, flags,
             tokens=self._tracker_tokens,
@@ -1815,7 +1891,8 @@ class FF1PSPContext(CommonContext):
             ow_sources=self._bestiary_ow_sources(),
             cave_sources=self._bestiary_cave_sources(),
             odds=self._bestiary_odds,
-            ow_zones=ow_zones, zone_rows=zone_rows)
+            ow_zones=ow_zones, zone_rows=zone_rows,
+            source_rows=self._bestiary_rw_rows())
 
     def refresh_bestiary(self):
         """Rebuild + repaint the Bestiary tab. Cheap and idempotent."""
@@ -2090,12 +2167,44 @@ class FF1PSPContext(CommonContext):
         super().on_package(cmd, args)
         if cmd == "Connected":
             sd = args.get("slot_data") or {}
+            # map fog: a (re)connect may be a different slot -> refetch its mask
+            self._fog_server = None
+            self._fog_fetch_sent = False
+            self._fog_tab_last = None
             self.enc_mult = float(sd.get("encounter_rate", 1.0))
             self.xp_mult = float(sd.get("xp_boost", 1.0))
             self.gil_mult = float(sd.get("gil_boost", 1.0))
             self.boss_mult = float(sd.get("boss_difficulty", 1.0))
             self.monster_mult = float(sd.get("monster_power", 1.0))
             self.slot_data = sd   # carries Tier-A shuffle tables (rando.SLOT_KEY)
+            # Map tab: a random map shows the generated world (and its fog)
+            _world = (sd.get("randworld") or {}).get("world") or None
+            self._fog_tab = bool(_world and _world.get("fog"))
+            ui = getattr(self, "ui", None)
+            if ui is not None and hasattr(ui, "update_map_world"):
+                _regions = None
+                if _world and (sd.get("randworld") or {}).get("regions"):
+                    try:
+                        from .. import randworld_territories as _RWT
+                        _regions = _RWT.decode_regions(sd["randworld"]["regions"])
+                    except Exception as ex:
+                        logger.warning(f"Map tab: bad territory map ({ex})")
+                ui.update_map_world(_world, self._fog_tab, _regions)
+            if self._fog_tab:
+                # fetch the explored mask now, so the tab is fogged correctly
+                # before the game (and its FFOG mailbox) is even running
+                self._fog_fetch_sent = True
+                asyncio.create_task(self.send_msgs(self._fog_fetch_msgs()))
+            # Client older than the generator = items this client cannot read,
+            # and one unreadable item blocks every item behind it. Say so up
+            # front; _note_grant_stall repeats it, since the connect line can
+            # scroll away under a log flood. Seeds from before the stamp: silent.
+            self._version_mismatch = VER.seed_mismatch(
+                VER.WORLD_VERSION, sd.get("world_version"))
+            if self._version_mismatch:
+                level, msg = self._version_mismatch
+                (logger.error if level == "error" else logger.warning)(
+                    f"  [FF1 PSP] {msg}")
             # Random starting party: 4 entries (job id 0..5, or None = vanilla).
             self.party_jobs = list(sd.get("party_jobs") or [None, None, None, None])
             self.thief_steal = bool(sd.get("thief_steal", False))
@@ -2279,6 +2388,15 @@ class FF1PSPContext(CommonContext):
                     (args.get("keys") or {})[self._bestiary_key()])
             elif cmd == "SetReply" and args.get("key") == self._bestiary_key():
                 self._bestiary_floor.apply_server(args.get("value"))
+        # map fog: the explored mask (Retrieved answers our Get; SetReply echoes
+        # our own "or" and any other client's on the same slot via SetNotify)
+        if self.slot is not None:
+            if cmd == "Retrieved" and self._mapfog_word_key(0) in (args.get("keys") or {}):
+                self._fog_server = self._fog_from_keys(args["keys"])
+            elif cmd == "SetReply":
+                self._fog_word_reply(args.get("key"), args.get("value"))
+            if cmd in ("Retrieved", "SetReply"):
+                self._push_tab_fog(0)
         # A check anywhere can empty a hinted tile, which retires its row.
         if cmd in ("Connected", "RoomUpdate") and self.hint_rows:
             self._hint_dirty = True
@@ -3368,6 +3486,10 @@ class FF1PSPContext(CommonContext):
         skip |= LOGIC.removed_normally_empty_idx(
             _on_disc.get("loot_in_normally_empty_chests"),
             _on_disc.get("loot_in_gulg_b5_chests"))
+        # ...PLUS the Basement chests a shortened Temple of Fiends skips
+        # (absent = a seed from before the option = off).
+        skip |= LOGIC.short_tof_removed_idx(
+            _on_disc.get("shortened_temple_of_fiends"))
         loc_ids = [ID.loc_id(idx) for (_lid, _name, idx) in DATA.LOCATIONS
                    if idx not in skip]
         shop_lids = [ID.shop_loc_id(s, k)
@@ -3700,6 +3822,18 @@ class FF1PSPContext(CommonContext):
         _hi = RANDO.ow_hi_from_slot_data(_sd)
         if _hi:
             feats["_ow_hi"] = _hi
+        # Random overworld: the territory map the generator's logic counted
+        # (randworld_territories.export "regions") is the randworld_regions
+        # cave's data -- bake context, folded into bake_hash32 like _ow_hi.
+        _rw = _sd.get("randworld") or {}
+        if feats.get("randworld_regions") and _rw.get("regions"):
+            from .. import randworld_territories as _RWT
+            feats["_rw_regions"] = _RWT.decode_regions(_rw["regions"])
+        # ...and the generated world itself (grid + stamps + gates): the bake
+        # writes it into the ISO (randworld_bake). Bake context, folded into
+        # bake_hash32 by digest.
+        if _rw.get("world"):
+            feats["_rw_world"] = _rw["world"]
         # Open-progression map edits as BAKE CONTEXT (not a FEATURES entry, like
         # _ow_hi above): map_bake writes the selected foot trails / canoe rivers /
         # northern docks into MAP_00_AMD.BIN so they exist before the overworld
@@ -3709,7 +3843,7 @@ class FF1PSPContext(CommonContext):
         _ow_map = {k: bool(_sd.get(k)) for k in
                    ("early_open_progression", "extended_open_progression",
                     "northern_docks")}
-        if any(_ow_map.values()):
+        if any(_ow_map.values()) and not _rw.get("world"):   # vanilla coordinates only
             feats["_ow_map"] = {"early": _ow_map["early_open_progression"],
                                 "extended": _ow_map["extended_open_progression"],
                                 "docks": _ow_map["northern_docks"]}
@@ -5842,12 +5976,31 @@ class FF1PSPContext(CommonContext):
         early = bool(self.slot_data.get("early_open_progression"))
         extended = bool(self.slot_data.get("extended_open_progression"))
         docks = bool(self.slot_data.get("northern_docks"))
+        # RANDOM OVERWORLD (slot_data["randworld"], 2026-10-16): every table
+        # this loop paints is keyed by VANILLA cells -- the open-progression
+        # trails/rivers/docks, their river terrain-class cells, the canal attr,
+        # the Lufenian span + boulders and the Gulg seal. A generated world
+        # moved those places, so each paint would write vanilla art into
+        # whatever the generator put there. The bake owns that map: its gates
+        # are the same world_gates rows with MOVED cells
+        # (re_only/ow_rando/bake.install_gates), and the save-byte upkeep
+        # below still drives them -- maintain_gates / poke_gates are keyed by
+        # gate tile id, never by cell. The Gulg hint follows the moved cave
+        # (D.site_door). The ONE paint that survives is the canal bridge: the
+        # user's hand-picked vanilla tiles, moved with the canal window's
+        # stamp (see canal_bridge below).
+        randworld = self.slot_data.get("randworld")
+        vanilla_cells = not randworld
+        if not vanilla_cells:
+            dlog.info("  [openworld] random overworld -- no vanilla-cell "
+                      "paints (the bake owns the map); world-gate save byte "
+                      "upkeep + the moved canal bridge only")
         grid_edits = {}
-        if early:
+        if early and vanilla_cells:
             grid_edits.update(getattr(OW, "EARLY_GRID_EDITS", {}))
-        if extended:
+        if extended and vanilla_cells:
             grid_edits.update(getattr(OW, "EXTENDED_GRID_EDITS", {}))
-        if docks:
+        if docks and vanilla_cells:
             grid_edits.update(getattr(OW, "NORTHERN_DOCKS_GRID_EDITS", {}))
         # v242 bakes exactly these grid cells into MAP_00_AMD.BIN. On a verified
         # bake the loop would rewrite values that are already correct -- and pay
@@ -5875,9 +6028,9 @@ class FF1PSPContext(CommonContext):
         # the Melmond run had no encounters. Writing OW.RIVER_CLASS on the canoe
         # cells puts them on the zoned LAND table like every vanilla river.
         class_edits = {}
-        if early:
+        if early and vanilla_cells:
             class_edits.update(getattr(OW, "EARLY_RIVER_CLASS_EDITS", {}))
-        if extended:
+        if extended and vanilla_cells:
             class_edits.update(getattr(OW, "EXTENDED_RIVER_CLASS_EDITS", {}))
         tm_addr = getattr(OW, "TERRAINMAP_ADDR", None)
         tm_off = getattr(OW, "TERRAINMAP_DATA_OFF", 4)
@@ -5886,7 +6039,7 @@ class FF1PSPContext(CommonContext):
         if tm_addr is None:
             class_edits = {}
         class_canary = next(iter(sorted(class_edits))) if class_edits else None
-        canal_att = getattr(OW, "CANAL_ATT", {})
+        canal_att = getattr(OW, "CANAL_ATT", {}) if vanilla_cells else {}
         # Canal BRIDGE art (3 cells on column x=94): the ONLY thing that draws a
         # bridge at the canal. Baking it was tried and measured INERT (v308): the
         # canal ids take their art from the ANM animation system, not from ASC, so
@@ -5903,7 +6056,8 @@ class FF1PSPContext(CommonContext):
         # while the key is missing, reverted to vanilla once it arrives.
         trails_on = bool(self.slot_data.get("northern_foot_trails"))
         gulg_key_on = bool(self.slot_data.get("mount_gulg_key"))
-        _ow = lambda nm: dict(getattr(OW, nm, {}) or {})
+        _ow = lambda nm: (dict(getattr(OW, nm, {}) or {}) if vanilla_cells
+                          else {})
         trails_base = _ow("TRAILS_BASE_GRID_EDITS") if trails_on else {}
         world_overlay = {
             ID.WORLD_LUFENIAN_BRIDGE: _ow("LUFENIAN_BRIDGE_BUILT_GRID_EDITS"),
@@ -5912,9 +6066,23 @@ class FF1PSPContext(CommonContext):
         } if trails_on else {}
         gulg_sealed = _ow("GULG_SEAL_GRID_EDITS") if gulg_key_on else {}
         gulg_cleared = _ow("GULG_SEAL_CLEARED_GRID_EDITS") if gulg_key_on else {}
+        # A random map's gates sit wherever its generator put them and carry
+        # their own item (a Nitro door is named after the site it walls in):
+        # slot_data["randworld"]["world"]["gates"] = [{item_id, mask, cells:
+        # [[x, y, open, closed], ...]}] (randworld/gates.py, 2026-10-23)
+        rw_gates = [g for g in ((randworld or {}).get("world") or {}).get("gates") or ()
+                    if g.get("name") != "canal" and g.get("cells")
+                    and g.get("item_id") is not None]
 
         def world_edits(held):
             """Cells the world-changing items paint for the CURRENT held set."""
+            if rw_gates:
+                e = {}
+                for g in rw_gates:
+                    opened = g["item_id"] in held
+                    for x, y, o, c in g["cells"]:
+                        e[(x, y)] = o if opened else c
+                return e
             e = dict(trails_base)
             for ordinal, cells in world_overlay.items():
                 if ID.world_item_id(ordinal) in held:
@@ -5956,6 +6124,11 @@ class FF1PSPContext(CommonContext):
 
         def gate_mask(held):
             m = 0
+            if rw_gates:
+                for g in rw_gates:
+                    if g["item_id"] in held:
+                        m |= int(g.get("mask") or 0)
+                return m & gate_allowed
             for ordinal, bit in gate_bits:
                 if ID.world_item_id(ordinal) in held:
                     m |= bit
@@ -6014,6 +6187,41 @@ class FF1PSPContext(CommonContext):
         gulg_hint = {"inside": False, "last": 0.0}
 
         canal_bridge = getattr(OW, "CANAL_BRIDGE_GRID_EDITS", {})
+        # _ow_live_arena's proof that the grid pointer holds the overworld:
+        # None = the vanilla ANCHOR row. On a random world that row is not
+        # there, so the paint proves the arena by the moved canal window's own
+        # tiles (OW.CANAL_WINDOW_ANCHOR_RUNS) -- and a world without a canal
+        # (or a pre-stamps export) paints no bridge at all.
+        arena_anchors = None
+        if not vanilla_cells:
+            cshift = D.stamp_shift(randworld, "canal")
+            if cshift is None:
+                canal_bridge = {}
+            else:
+                canal_bridge = OW.shift_cells(canal_bridge, cshift)
+                arena_anchors = OW.anchor_checks(OW.CANAL_WINDOW_ANCHOR_RUNS,
+                                                 cshift)
+                dlog.info(f"  [openworld] canal bridge follows the moved canal "
+                          f"(shift {cshift}) -> cells {sorted(canal_bridge)}")
+        # Map tab only: the canal's own cells as {cell: (open id, closed id)}.
+        # The vanilla grid holds the OPEN ids (the engine's map-load remap
+        # shows them shut until story flag 11); a random grid holds the CLOSED
+        # ids (its world_gates row swaps them). Either way the tab's base
+        # picture is right in only one state, so it is told the tile for the
+        # state the canal is in now -- never painted into the arena.
+        canal_map = {}
+        if vanilla_cells:
+            from ..randworld import tables as _RWT
+            cx0, cy0 = _RWT.CANAL["src"][:2]
+            for j, row in enumerate(_RWT.CANAL["tiles"]):
+                for i, t in enumerate(row):
+                    if t in _RWT.CANAL["closed"]:
+                        canal_map[(cx0 + i, cy0 + j)] = (t, _RWT.CANAL["closed"][t])
+        else:
+            for g in ((randworld or {}).get("world") or {}).get("gates") or ():
+                if g.get("name") == "canal":
+                    for x, y, o, c in g.get("cells") or ():
+                        canal_map[(x, y)] = (o, c)
         canal_open_addr_sa = getattr(OW, "CANAL_OPEN_ADDR_SA", D.CANAL_OPEN_ADDR_SA)
         canal_open_bit = getattr(OW, "CANAL_OPEN_BIT", 0x08)
         # map_bake.bake_canal_crossing writes the canal cell's walk+sail attr on
@@ -6026,7 +6234,8 @@ class FF1PSPContext(CommonContext):
         # The canal attr is always-on; the loop still runs with all toggles off to
         # maintain it. Bail only if there is genuinely nothing to write.
         if (not grid_edits and not canal_att and not canal_bridge
-                and not class_edits and not trails_on and not gulg_key_on):
+                and not canal_map and not class_edits and not trails_on
+                and not gulg_key_on):
             return
         if trails_on or gulg_key_on:
             dlog.info(f"  [openworld] world items: trails={trails_on} "
@@ -6057,12 +6266,14 @@ class FF1PSPContext(CommonContext):
             cur["canary"] = canary
             cur["val"] = edits[canary] if canary is not None else None
             # Map tab: the picture follows the world -- toggle edits (baked or
-            # not), the canal bridge once open, held world items, the Gulg
-            # seal -- plus the carved canoe rivers' class cells.
+            # not), the canal (dug or not) and its bridge once open, held world
+            # items, the Gulg seal -- plus the carved canoe rivers' class cells.
             ui = getattr(self, "ui", None)
             if ui is not None and hasattr(ui, "update_map_edits"):
                 try:
                     tiles = dict(map_toggle_edits)
+                    for xy, (o, c) in canal_map.items():   # under the bridge
+                        tiles[xy] = o if canal_state["open"] else c
                     tiles.update(edits)
                     tiles.update(world_state["ui"])   # engine-resolved on v331
                     ui.update_map_edits(tiles, dict(class_edits))
@@ -6070,6 +6281,10 @@ class FF1PSPContext(CommonContext):
                     dlog.info(f"  [openworld] map edits push failed: {ex!r}")
 
         canal_state = {"open": False}
+        # A world change seen off the overworld (an item received in a dungeon,
+        # the canal blown inside Mt. Duergar) updates the Map tab at once; the
+        # arena repaint it also needs waits here for the next overworld tick.
+        pending = {"repaint": False}
 
         def compose():
             """The full live edit set: toggle edits + the canal bridge once the
@@ -6192,6 +6407,43 @@ class FF1PSPContext(CommonContext):
                 except Exception as ex:
                     dlog.info(f"  [openworld] world-gate byte: {ex!r} -- "
                               f"retrying next tick")
+            # World-changing items: repaint on the rising edge of "we now hold
+            # one we did not before". Sticky union of the sticky _ever_won and
+            # the live items_received -- the same pair the tracker uses, and for
+            # the same reason: items_received is emptied for the duration of a
+            # disconnect, which would rip up a bridge the player owns. Checked
+            # on ANY map: the Map tab follows at once, the arena on the
+            # overworld (pending).
+            if trails_on or gulg_key_on:
+                held = held_world_items()
+                if not held <= world_state["held"]:
+                    world_state["held"] |= held
+                    world_state["edits"] = arena_world_edits(world_state["held"])
+                    world_state["ui"] = world_edits(world_state["held"])
+                    set_edits(compose(), min(canal_bridge)
+                              if canal_state["open"] and canal_bridge else None)
+                    dlog.info(f"  [openworld] world items now held: "
+                                f"{sorted(world_state['held'])} -> "
+                                f"{len(world_state['ui'])} cells "
+                                f"{'engine-resolved' if gates_baked else 'painted'}")
+                    pending["repaint"] = True
+            # Canal-open bit: while it is clear the canal is not dug and the bridge
+            # must NOT be drawn (its tiles are walkable = a free crossing). On the
+            # rising edge, fold the bridge cells into the live edit set and repaint
+            # so the bridge appears the moment the canal opens. A save byte, so
+            # read on any map: Nerrick blows the canal inside Mt. Duergar.
+            if canal_bridge or canal_map:
+                # sa() wrap is MANDATORY: the save block shifts per session, so a
+                # raw read of the canonical address returns 0x00 forever.
+                is_open = bool((await self.psp.read(self.sa(canal_open_addr_sa), 1))[0]
+                               & canal_open_bit)
+                if is_open != canal_state["open"]:
+                    canal_state["open"] = is_open
+                    set_edits(compose(), min(canal_bridge)
+                              if is_open and canal_bridge else None)
+                    dlog.info(f"  [openworld] canal "
+                                f"{'open: bridge drawn' if is_open else 'closed: bridge withheld'}")
+                    pending["repaint"] = True
             # NOTE: the canal-open bit is NO LONGER forced -- the player blows the
             # canal normally; we only make it walk+sail (CANAL_ATT) once it opens.
             # Map edits: overworld only (arena not resident elsewhere). Gate on the
@@ -6211,10 +6463,11 @@ class FF1PSPContext(CommonContext):
             # is simply not there -- so a player who has never seen an unsealed
             # Gulg has no way to know the wall is a gate rather than the map.
             # Log it while they are next to it and still keyless.
-            if (gulg_key_on
+            gulg_win = (self._doorstep(D.GULG_TILE) if gulg_key_on else None)
+            if (gulg_win is not None
                     and ID.world_item_id(ID.WORLD_MOUNT_GULG_KEY)
                     not in world_state["held"]):
-                gx, gy, gr = D.GULG_TILE
+                gx, gy, gr = gulg_win
                 px = py = None
                 try:
                     fbase = struct.unpack("<I", await self.psp.read(
@@ -6226,8 +6479,7 @@ class FF1PSPContext(CommonContext):
                             fbase + D.FIELD_PARTY_Y_OFF, 2))[0]
                 except Exception:
                     px = py = None
-                near = (px is not None
-                        and abs(px - gx) <= gr and abs(py - gy) <= gr)
+                near = px is not None and D.ow_near(px, py, gx, gy, gr)
                 now_t = asyncio.get_event_loop().time()
                 if near and (not gulg_hint["inside"]
                              or now_t - gulg_hint["last"] >= 60.0):
@@ -6235,52 +6487,19 @@ class FF1PSPContext(CommonContext):
                     logger.info("Mt. Gulg is locked until you find its key "
                                 "in the multiworld")
                 gulg_hint["inside"] = near
-            repaint = False
-            # World-changing items: repaint on the rising edge of "we now hold
-            # one we did not before". Sticky union of the sticky _ever_won and
-            # the live items_received -- the same pair the tracker uses, and for
-            # the same reason: items_received is emptied for the duration of a
-            # disconnect, which would rip up a bridge the player owns.
-            if trails_on or gulg_key_on:
-                held = held_world_items()
-                if not held <= world_state["held"]:
-                    world_state["held"] |= held
-                    world_state["edits"] = arena_world_edits(world_state["held"])
-                    world_state["ui"] = world_edits(world_state["held"])
-                    set_edits(compose(),
-                              min(canal_bridge) if canal_state["open"] else None)
-                    dlog.info(f"  [openworld] world items now held: "
-                                f"{sorted(world_state['held'])} -> "
-                                f"{len(world_state['ui'])} cells "
-                                f"{'engine-resolved' if gates_baked else 'painted'}")
-                    repaint = True
-            # Canal-open bit: while it is clear the canal is not dug and the bridge
-            # must NOT be drawn (its tiles are walkable = a free crossing). On the
-            # rising edge, fold the bridge cells into the live edit set and repaint
-            # this tick so the bridge appears the moment the canal opens.
-            if canal_bridge:
-                # sa() wrap is MANDATORY: the save block shifts per session, so a
-                # raw read of the canonical address returns 0x00 forever.
-                is_open = bool((await self.psp.read(self.sa(canal_open_addr_sa), 1))[0]
-                               & canal_open_bit)
-                if is_open != canal_state["open"]:
-                    canal_state["open"] = is_open
-                    set_edits(compose(), min(canal_bridge) if is_open else None)
-                    dlog.info(f"  [openworld] canal bridge "
-                                f"{'drawn' if is_open else 'withheld (canal closed)'}")
-                    repaint = True
             # Nothing left that lives in the relocating arena (baked ISO, canal
             # not yet blown) -> never touch it. The river terrain-CLASS map is at
             # a FIXED address and is NOT baked, so it still gets maintained here.
             if not cur["edits"] and not canal_att:
                 await apply_classes()
                 return
-            arena = await self._ow_live_arena()
+            arena = await self._ow_live_arena(arena_anchors)
             if arena is None:
                 return      # menu/battle scene, not decompressed yet, mid-load
-            if (repaint or arena["base"] != arena_state["base"]
+            if (pending["repaint"] or arena["base"] != arena_state["base"]
                     or await drifted(arena)):
-                await apply(arena)
+                if await apply(arena):
+                    pending["repaint"] = False
 
         await self._poll(1.5, "openworld_loop", tick)
 
@@ -6364,7 +6583,26 @@ class FF1PSPContext(CommonContext):
         except Exception:
             return False
         radius = max(radius, D.PREARM_MIN_RADIUS)
-        return abs(x - ow_x) <= radius and abs(y - ow_y) <= radius
+        return D.ow_near(x, y, ow_x, ow_y, radius)
+
+    def _doorstep(self, doorstep):
+        """D.site_door for THIS seed: the vanilla window on the vanilla map,
+        the moved one on a random overworld (slot_data["randworld"]), None
+        when the generated world has no such site (logged once per site)."""
+        win = D.site_door(doorstep,
+                          (getattr(self, "slot_data", None) or {}).get("randworld"))
+        if win is None and doorstep[3] not in self._doorstep_missing:
+            self._doorstep_missing.add(doorstep[3])
+            dlog.info(f"  [doorstep] random overworld carries no "
+                      f"'{doorstep[3]}' site -- its prearm window is off")
+        return win
+
+    async def _at_doorstep(self, doorstep):
+        """_at_ow_tile on a (vx, vy, radius, site) doorstep (ff1_data
+        NPC_MAP_RESET / MAP_SCOPED_FUNCTION_HOLD prearms), following the site
+        on a random overworld."""
+        win = self._doorstep(doorstep)
+        return win is not None and await self._at_ow_tile(*win)
 
     async def _ow_xy(self):
         """(grid_x, grid_y) of the party ON THE OVERWORLD, else None.
@@ -6415,6 +6653,134 @@ class FF1PSPContext(CommonContext):
                 ui.update_map_pos(pos)
         await self._poll(1.0, "owmap_loop", tick)
 
+    # ---------------- menu world map fog of war (random overworlds) ----------------
+    def _mapfog_key(self):
+        """LEGACY single key (one 1024-bit int). Read-only now: a 0.6.8 server
+        rejects the "or" ("Set operation value too large", player bundle
+        2026-10-24), so nothing persisted there on current servers."""
+        return f"ff1psp_mapfog_{self.team}_{self.slot}"
+
+    MAPFOG_WORDS = 32                       # the mask as 32 keys of 32 bits each
+
+    def _mapfog_word_key(self, w):
+        return f"{self._mapfog_key()}_w{w}"
+
+    def _fog_fetch_msgs(self):
+        words = [self._mapfog_word_key(w) for w in range(self.MAPFOG_WORDS)]
+        return [{"cmd": "Get", "keys": [self._mapfog_key()] + words},
+                {"cmd": "SetNotify", "keys": words}]
+
+    def _fog_from_keys(self, keys):
+        """Retrieved -> the word keys' mask. A legacy-key mask (older servers)
+        is kept apart in _fog_legacy: the loop restores it into the game,
+        whose bits then persist as words like any explored chunk."""
+        self._fog_legacy = self._fog_int(keys.get(self._mapfog_key()))
+        v = 0
+        for w in range(self.MAPFOG_WORDS):
+            v |= (self._fog_int(keys.get(self._mapfog_word_key(w))) & 0xFFFFFFFF) << (32 * w)
+        return v
+
+    def _fog_word_reply(self, key, value):
+        """SetReply on a word key (ours or another client's): OR it in."""
+        if self._fog_server is None or not isinstance(key, str):
+            return
+        pre = self._mapfog_key() + "_w"
+        if not key.startswith(pre) or not key[len(pre):].isdigit():
+            return
+        w = int(key[len(pre):])
+        if w < self.MAPFOG_WORDS:
+            self._fog_server |= (self._fog_int(value) & 0xFFFFFFFF) << (32 * w)
+
+    @staticmethod
+    def _fog_int(v):
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _push_tab_fog(self, game):
+        """Map tab fog: explored = the server mask | what the game has now."""
+        if not getattr(self, "_fog_tab", False) or self._fog_server is None:
+            return
+        mask = self._fog_server | game
+        if mask == getattr(self, "_fog_tab_last", None):
+            return
+        self._fog_tab_last = mask
+        ui = getattr(self, "ui", None)
+        if ui is not None and hasattr(ui, "update_map_fog"):
+            ui.update_map_fog(mask)
+
+    async def _mapfog_loop(self):
+        """Persist the menu map's explored chunks across sessions. The GAME does
+        the revealing (on-disc mapfog hooks: the field update marks the chunks
+        around the party and draws them into the cached map within a frame); its
+        mask lives in a cave mailbox that is NOT saved. So, once a second:
+          * restore -- OR the slot's server mask into the game's (changed bytes
+            only; the game draws any bit it has not applied yet);
+          * persist -- push bits the game has that the server lacks, as
+            atomic DataStorage "or"s on 32 keys of 32 bits (two clients
+            merge; one 1024-bit int is "value too large" on a 0.6.8 server).
+        The game's truth is mask | applied: applied is a subset of mask, so a
+        mask bit lost to a write race heals on the next tick. Seeds without the
+        hooks never find the 'FFOG' mailbox and the loop idles on a rare scan.
+        Since v341 every seed carries the mailbox (the same cave draws the
+        menu map's world changes, mapfx_bake), so the loop runs only for a
+        slot with fog (_fog_tab, from slot_data): without it the game never
+        marks a chunk and there is nothing to persist."""
+        async def tick():
+            if self.slot is None or getattr(self, "psp", None) is None:
+                return
+            if not getattr(self, "_fog_tab", False):
+                return
+            mb = self._fog_mb
+            if mb is not None and await self.psp.read(mb, 4) != D.MAPFOG_MAGIC:
+                mb = self._fog_mb = None            # PPSSPP restarted / another ISO
+            if mb is None:
+                now = time.monotonic()
+                if now < self._fog_scan_at:
+                    return
+                self._fog_scan_at = now + 30.0
+                data = await self.psp.read_chunked(D.MAPFOG_SCAN_LO, D.MAPFOG_SCAN_LEN,
+                                                   breathe=0.05)
+                i = data.find(D.MAPFOG_MAGIC)
+                if i < 0 or i % 4:
+                    return
+                mb = self._fog_mb = D.MAPFOG_SCAN_LO + i
+                dlog.info(f"  [mapfog] mailbox @{mb:#010x}")
+            if self._fog_server is None:
+                if not self._fog_fetch_sent:
+                    self._fog_fetch_sent = True
+                    await self.send_msgs(self._fog_fetch_msgs())
+                return
+            n = D.MAPFOG_MASK_LEN
+            blob = await self.psp.read(mb + D.MAPFOG_MASK_OFF, 2 * n)   # mask + applied
+            mask = int.from_bytes(blob[:n], "little")
+            game = mask | int.from_bytes(blob[n:], "little")
+            self._push_tab_fog(game)
+            want = game | self._fog_server | getattr(self, "_fog_legacy", 0)
+            if want != mask:
+                wb = want.to_bytes(n, "little")
+                i = 0
+                while i < n:                       # write runs of changed bytes only
+                    if wb[i] == blob[i]:
+                        i += 1
+                        continue
+                    j = i
+                    while j < n and wb[j] != blob[j]:
+                        j += 1
+                    await self.psp.write(mb + D.MAPFOG_MASK_OFF + i, wb[i:j])
+                    i = j
+            new = game & ~self._fog_server
+            if new:
+                self._fog_server |= game            # optimistic; SetReply confirms
+                await self.send_msgs([{
+                    "cmd": "Set", "key": self._mapfog_word_key(w), "default": 0,
+                    "want_reply": True,
+                    "operations": [{"operation": "or",
+                                    "value": (game >> (32 * w)) & 0xFFFFFFFF}]}
+                    for w in range(self.MAPFOG_WORDS) if (new >> (32 * w)) & 0xFFFFFFFF])
+        await self._poll(1.0, "mapfog_loop", tick)
+
     # ---------------- NPC story-event location (Princess) ----------------
     async def _npc_loop(self):
         """Send the Princess location check when the player NORMALLY receives the
@@ -6432,10 +6798,25 @@ class FF1PSPContext(CommonContext):
         wipe a found Lute. Runs every tick (not just at detection) so a save/reload
         between the scene and the strip can't leave a free Lute behind."""
         lute_ap_iid = ID.item_id(D.CAT_KEY, D.key_item_id("Lute"))
-        checks = [
-            (D.LUTE_KEYITEM_ADDR, D.LUTE_KEYITEM_MASK,
-             ID.npc_loc_id(D.PRINCESS_NPC_ORDINAL), "Princess"),
-        ]
+        princess_lid = ID.npc_loc_id(D.PRINCESS_NPC_ORDINAL)
+        # (addr, mask, location id or None, name, strip the native bit)
+        _sd = getattr(self, "slot_data", None) or {}
+        if (_sd.get("on_disc") or {}).get("skip_lute_cutscene") or _sd.get("randworld"):
+            # skip_lute_cutscene (always on in new seeds): the Princess check
+            # rides the Garland kill (story flag 1; the bake cuts the throne-room
+            # teleport). The Lute row only strips -- the bake sets her done-flag
+            # so she never hands one out, but a free native Lute must stay
+            # impossible either way.
+            checks = [
+                (D.GARLAND_DEFEATED_FLAG_ADDR, D.GARLAND_DEFEATED_FLAG_MASK,
+                 princess_lid, "Princess (Garland defeated)", False),
+                (D.LUTE_KEYITEM_ADDR, D.LUTE_KEYITEM_MASK, None, "Lute", True),
+            ]
+        else:
+            checks = [
+                (D.LUTE_KEYITEM_ADDR, D.LUTE_KEYITEM_MASK,
+                 princess_lid, "Princess", True),
+            ]
         # Every single-byte address this loop observes, so one span read can
         # serve them all (see _ByteSnapshot). Canonical (pre-sa) addresses:
         # the 12 story/event flag bytes, the whole 5-byte key-item possession
@@ -6449,6 +6830,8 @@ class FF1PSPContext(CommonContext):
             D.BOTTLE_EVENT_ADDR, D.OXYALE_EVENT_ADDR, D.ADAMANTITE_EVENT_ADDR,
             D.SMITH_EVENT_ADDR,
             D.ELF_PRINCE_QUEST_ADDR,     # shadow flag 69 (prince_gate_split)
+            D.ASTOS_QUEST_ADDR,          # shadow flag 67 (same split, v353)
+            D.OXYALE_QUEST_ADDR,         # shadow flag 80 (same split, v363)
         }
         span_addrs |= {fb[0] for fb in D.KEY_ITEM_FUNCTION_BITS.values()}
         # the whole 5-byte key-item possession bitfield (ids 1..36, running
@@ -6493,8 +6876,8 @@ class FF1PSPContext(CommonContext):
                     if not self._key_won(rk):
                         continue
                     faddr_raw, fmask = D.KEY_ITEM_FUNCTION_BITS[rk]
-                    # Per-key narrowing (Oxyale: b1 spawn bit only -- b2/b3 belong
-                    # to its NPC_MAP_RESET row and reasserting them fights the hold).
+                    # Per-key narrowing for bits a NPC_MAP_RESET row owns
+                    # (none since v363 -- see the table).
                     fmask = D.OWNED_FUNCTION_REASSERT_MASK.get(rk, fmask)
                     fsa = self.sa(faddr_raw)
                     fcur = await snap.rd(fsa)
@@ -6558,17 +6941,17 @@ class FF1PSPContext(CommonContext):
                             f"equipment activation unlocked)")
 
             with self._stage("npc-checks"):
-                for addr, mask, lid, name in checks:
+                for addr, mask, lid, name, strip in checks:
                     cur = await snap.rd(self.sa(addr))
                     if (cur & mask) != mask:
                         continue
-                    if lid not in self.sent_locations:
+                    if lid is not None and lid not in self.sent_locations:
                         self.sent_locations.add(lid)
                         await self.check_locations([lid])
                         logger.info(f"NPC ({name}) flag set -> check")
                     # Strip the free native Lute unless it was won as an AP item
                     # (or assembled from tablets -- lute_won covers both).
-                    if not lute_won:
+                    if strip and not lute_won:
                         await snap.wr(self.sa(addr), cur & ~mask)
                         dlog.info("  [princess] stripped native Lute "
                                     "(Lute is a randomized AP item)")
@@ -6630,7 +7013,8 @@ class FF1PSPContext(CommonContext):
                         hsa = self.sa(haddr_raw)
                         hcur = await snap.rd(hsa)
                         in_scope = mid in hmaps or (
-                            hprearm is not None and await self._at_ow_tile(*hprearm))
+                            hprearm is not None
+                            and await self._at_doorstep(hprearm))
                         # Spent = the bit has no consumer left, so the hold goes
                         # GLOBAL and permanent -- which also self-heals a save
                         # that is already carrying the bit set from an earlier
@@ -6742,16 +7126,22 @@ class FF1PSPContext(CommonContext):
                                        and prearm[0] == D.PREARM_GLOBAL)
                             _ow = (isinstance(prearm, tuple)
                                    and prearm[0] == D.PREARM_OVERWORLD)
+                            _radius = (isinstance(prearm, tuple)
+                                       and not _global and not _ow)
+                            if lid in self.sent_locations:
+                                self._prearm_latch.pop(rkid, None)
                             if (prearm and won and not disarmed
                                     and lid not in self.sent_locations
                                     and ((_global and mid not in prearm[1:])
                                          or (_ow and mid ==
                                              D.OVERWORLD_FIELD_MAP_ID)
                                          or (not _global and not _ow
-                                             and await self._at_ow_tile(*prearm)))):
+                                             and await self._at_doorstep(prearm)))):
                                 where = ("(global)" if _global
                                          else "(overworld)" if _ow
                                          else "at cave mouth")
+                                if _radius:
+                                    self._prearm_latch[rkid] = 0
                                 if gcur & gmask:
                                     await snap.wr(gsa, gcur & ~gmask)
                                     dlog.info(f"  [{rname.lower()}] prearmed gate "
@@ -6808,6 +7198,25 @@ class FF1PSPContext(CommonContext):
                             # key leaves the menu (vanilla consumes it too; the
                             # unconditional restore kept resurrecting it, live
                             # 2026-07-20). The gate/function bit is still restored.
+                            #
+                            # Radius rows restore only after the latch runs out
+                            # (D.PREARM_RESTORE_TICKS): one tick outside the
+                            # window -- a battle at the door, the walk-out
+                            # transition -- used to re-set the gate, and a
+                            # walk-in before the next tick loaded the map gated
+                            # (Astos, live 2026-10-26). Battle/menu ticks
+                            # freeze the count instead of advancing it.
+                            if (won and _radius and not disarmed
+                                    and rkid in self._prearm_latch):
+                                if await self._in_battle():
+                                    continue
+                                seen = self._prearm_latch[rkid] + 1
+                                if seen < D.PREARM_RESTORE_TICKS:
+                                    self._prearm_latch[rkid] = seen
+                                    continue
+                                self._prearm_latch.pop(rkid)
+                                dlog.info(f"  [{rname.lower()}] left the "
+                                          f"doorstep -> won-key bits restored")
                             if won:
                                 # FULL-mask compare, not truthiness: the Levistone
                                 # row's gate mask is TWO bits (0x30) and a partial
@@ -6832,6 +7241,12 @@ class FF1PSPContext(CommonContext):
                                     await snap.wr(psa, pcur | pmask)
                             continue
                         # In the NPC's map, location unchecked.
+                        if (isinstance(prearm, tuple)
+                                and prearm[0] not in (D.PREARM_GLOBAL,
+                                                      D.PREARM_OVERWORLD)):
+                            # walking back out must not restore on the
+                            # transition tick (D.PREARM_RESTORE_TICKS)
+                            self._prearm_latch[rkid] = 0
                         # rmap may be a TUPLE of map ids (the Onrac Caravan's
                         # nested camp 0x1F + tent 0x17) while _npc_reset_lastmap
                         # is a SCALAR mid -- `scalar != tuple` is ALWAYS True, so
@@ -6943,6 +7358,83 @@ class FF1PSPContext(CommonContext):
                     await snap.wr(qsa, qcur | D.ELF_PRINCE_QUEST_MASK)
                     dlog.info("  [mystic key] quest flag re-asserted from "
                                 "checked location (save rollback)")
+
+            with self._stage("astos-quest"):
+                # --- Astos via shadow quest flag (v353, same split) ------------
+                # The Western Keep's map init and the Astos cutscene read/write
+                # flag 67 instead of flag 7 (the Crystal Eye's Matoya gate), so
+                # a won AP eye no longer empties the throne and there is nothing
+                # to hold or prearm. RISE -> check, like the prince above.
+                asa = self.sa(D.ASTOS_QUEST_ADDR)
+                acur = await snap.rd(asa)
+                aset = bool(acur & D.ASTOS_QUEST_MASK)
+                alid = ID.npc_loc_id(D.CRYSTAL_EYE_NPC_ORDINAL)
+                if aset and alid not in self.sent_locations:
+                    self.sent_locations.add(alid)
+                    await self.check_locations([alid])
+                    logger.info("NPC (Crystal Eye) fired -> check (quest flag)")
+                elif not aset and alid in self.sent_locations:
+                    # Checked but the save under us says undone (rollback, or a
+                    # save from a pre-v353 ISO): re-assert so the fight cannot
+                    # re-run and hand out a second native eye.
+                    await snap.wr(asa, acur | D.ASTOS_QUEST_MASK)
+                    dlog.info("  [crystal eye] quest flag re-asserted from "
+                                "checked location (save rollback)")
+                kaddr, kmask = D.key_item_bit(3)
+                kcur = await snap.rd(self.sa(kaddr))
+                if self._key_won(3):
+                    # A won eye always shows in the menu. The deleted map-reset
+                    # row held possession clear inside the keep, so a save made
+                    # there carries it clear, and nothing else re-sets it.
+                    if not (kcur & kmask):
+                        await snap.wr(self.sa(kaddr), kcur | kmask)
+                        dlog.info("  [crystal eye] won key possession restored")
+                elif aset and (kcur & kmask):
+                    # The cutscene sets flag 67 right after the battle but gives
+                    # the vanilla eye (op37) several boxes LATER, so a strip
+                    # gated on the rise would usually find nothing yet. Strip on
+                    # every tick instead; possession only -- the native cutscene
+                    # no longer touches flag 7.
+                    await snap.wr(self.sa(kaddr), kcur & ~kmask)
+                    dlog.info("  [crystal eye] stripped native Crystal Eye "
+                                "(randomized AP item)")
+
+            with self._stage("oxyale-quest"):
+                # --- Gaia fairy via shadow quest flag (v363, same split) -------
+                # Gaia's map init and the fairy's give read/write flag 80
+                # instead of flag 26 (the Oxyale's Onrac mermaid gate), so a
+                # won AP Oxyale no longer turns her into the post-gift line and
+                # there is nothing to hold. RISE -> check, like Astos above.
+                osa = self.sa(D.OXYALE_QUEST_ADDR)
+                ocur = await snap.rd(osa)
+                oset = bool(ocur & D.OXYALE_QUEST_MASK)
+                olid = ID.npc_loc_id(D.OXYALE_NPC_ORDINAL)
+                if oset and olid not in self.sent_locations:
+                    self.sent_locations.add(olid)
+                    await self.check_locations([olid])
+                    logger.info("NPC (Oxyale) fired -> check (quest flag)")
+                elif not oset and olid in self.sent_locations:
+                    # Checked but the save under us says undone (rollback, or a
+                    # save from a pre-v363 ISO): re-assert so she cannot hand
+                    # out a second native Oxyale.
+                    await snap.wr(osa, ocur | D.OXYALE_QUEST_MASK)
+                    dlog.info("  [oxyale] quest flag re-asserted from "
+                                "checked location (save rollback)")
+                kaddr, kmask = D.key_item_bit(16)
+                kcur = await snap.rd(self.sa(kaddr))
+                if self._key_won(16):
+                    # The deleted map-reset row held possession clear inside
+                    # Gaia, so a save made there carries it clear.
+                    if not (kcur & kmask):
+                        await snap.wr(self.sa(kaddr), kcur | kmask)
+                        dlog.info("  [oxyale] won key possession restored")
+                elif oset and (kcur & kmask):
+                    # Her give sets flag 80 one op BEFORE the Oxyale op37, so
+                    # strip on every tick, not only on the rise. Possession
+                    # only -- the give no longer touches flag 26.
+                    await snap.wr(self.sa(kaddr), kcur & ~kmask)
+                    dlog.info("  [oxyale] stripped native Oxyale "
+                                "(randomized AP item)")
 
             with self._stage("consumed-keys"):
                 # --- Spent key items leave the menu (2026-07-21) ----------------
@@ -7208,7 +7700,8 @@ class FF1PSPContext(CommonContext):
                 # made him refuse AND the not-owned gate here swallowed the check --
                 # "Lefein - Elder" was unreachable (live player report).
                 # Oxyale MIGRATED to NPC_MAP_RESET 2026-07-21 (Gaia fairy's
-                # already-gave gate = b1 fairy-freed, live player report; map 0x4B).
+                # already-gave gate, live player report; map 0x4B), and on to
+                # an on-disc gate split in v363 (the oxyale-quest stage).
                 # Bottled Faerie MIGRATED to NPC_MAP_RESET 2026-08-05, emptying this
                 # batch too: the Faerie gained a function bit (0x11521 b2, the state
                 # the Gaia spring actually reads -- live-proven), and that bit is
@@ -7288,7 +7781,9 @@ class FF1PSPContext(CommonContext):
                 # gates (the Western Keep king's MAP-LOAD despawn / the Elf Prince's
                 # talk-time skip), so an AP copy received early killed the location
                 # -- and this poll's `or won` gate then swallowed the check after a
-                # genuine handover (the Smith lesson, live 2026-07-20 x2).
+                # genuine handover (the Smith lesson, live 2026-07-20 x2). Both
+                # have since left NPC_MAP_RESET for on-disc gate splits (prince
+                # v247, Astos v353) -- see the prince-quest / astos-quest stages.
                 # Jolt Tonic MIGRATED 2026-08-03, the last of the Classic-7 batch and
                 # the eleventh confirmed instance: 0x1151D b0 IS Matoya's own
                 # already-traded gate (live player report -- AP tonic owned, Crystal
@@ -8629,7 +9124,7 @@ class FF1PSPContext(CommonContext):
         await self.psp.write(address, bytes(data))
         return True
 
-    async def _ow_live_arena(self):
+    async def _ow_live_arena(self, anchors=None):
         """The overworld tile arena the ENGINE is drawing right now, or None.
 
         Follows the engine's own pointers instead of signature-scanning RAM:
@@ -8646,8 +9141,15 @@ class FF1PSPContext(CommonContext):
         re-prove at write time (scene pointer, grid pointer, vanilla anchor).
         None when this is not the field scene, the map is not the 255x255
         overworld, or the anchor is absent (not decompressed yet / mid-load)
-        -- callers just retry next tick."""
+        -- callers just retry next tick.
+
+        `anchors` = [(byte offset from base, expected bytes)], default the
+        vanilla ANCHOR row. A random overworld has no vanilla row there and
+        passes the moved canal window's tiles instead
+        (OW.anchor_checks(OW.CANAL_WINDOW_ANCHOR_RUNS, shift))."""
         from . import openworld_data as OW
+        if anchors is None:
+            anchors = ((OW.ANCHOR_OFF, OW.ANCHOR),)
         lo, hi = USER_RAM_BASE, USER_RAM_BASE + USER_RAM_SIZE
         try:
             raw = await self.psp.read(D.FIELD_STRUCT_PTR, 4)
@@ -8664,14 +9166,14 @@ class FF1PSPContext(CommonContext):
             base = gptr + D.OW_GRID_PTR_SKEW
             if not (lo <= base and base + OW.GRID_W * OW.GRID_STRIDE <= hi):
                 return None
-            anchor_addr = base + OW.ANCHOR_OFF
-            if await self.psp.read(anchor_addr, len(OW.ANCHOR)) != OW.ANCHOR:
-                return None
+            for off, want in anchors:
+                if await self.psp.read(base + off, len(want)) != want:
+                    return None
         except Exception:
             return None
         guards = ((D.FIELD_STRUCT_PTR, raw),
                   (mo + D.OW_MAP_GRID_PTR_OFF, struct.pack("<I", gptr)),
-                  (anchor_addr, OW.ANCHOR))
+                  *((base + off, want) for off, want in anchors))
         att = aptr if lo <= aptr and aptr + 0x400 <= hi else None
         att_guards = (((D.FIELD_STRUCT_PTR, raw),
                        (mo + D.OW_MAP_ATT_PTR_OFF, struct.pack("<I", aptr)),
@@ -10944,9 +11446,11 @@ class FF1PSPContext(CommonContext):
                 # leave that character completely alone this tick.
                 enforce = []            # (cur_row,) unjoined + item not received
                 join_pending = []       # (creation_slot, cur_row, job, lvl, floor)
+                unjudged = []           # rows whose floor is unreadable this tick
                 for pr, job, lvl in self.missing_party:
                     floor = await self._exp_for_level(lvl)
                     if floor is None:
+                        unjudged.append(row_of(pr))
                         continue
                     cur = row_of(pr)
                     exp = await self.psp.read_u32(
@@ -10968,7 +11472,9 @@ class FF1PSPContext(CommonContext):
                 _mb = await self._rp_mailbox()
                 if _mb is not None:
                     _mask = 0
-                    for _r in hold:
+                    # unjudged rows stay HIDDEN (no writes to them, though):
+                    # dropping their bit showed a missing member for the tick
+                    for _r in hold | frozenset(unjudged):
                         _mask |= 1 << _r
                     await self.psp.write(_mb + IP.RP_MB_MASK_OFF,
                                          bytes([_mask & 0xF]))
@@ -13002,12 +13508,26 @@ class FF1PSPContext(CommonContext):
         Returns True once a game is up. On timeout it says so and returns False;
         the caller carries on regardless (a wrong-but-running emulator is still
         better handled by _verify_bake's own mismatch path than by refusing to
-        bridge)."""
+        bridge).
+
+        A DIRECT-memory attach ends the wait at once: PPSSPPMem accepts a RAM
+        region only when it carries our bake tag, so the game is mapped, and
+        process reads never touch the emulator thread the freeze above came
+        from. Live 2026-10-24: game.status never answered for a fresh bake,
+        the client sat out the full 90 s with memory attached since the
+        first second, and the held-row mask (RPMK, baked 0) stayed unwritten
+        -- a missing member stood in battle and the pause menu until then."""
         said = False
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
             if self.exit_event.is_set():
                 return False
+            mem_ok = getattr(self.psp, "_mem_ok", None)
+            if mem_ok is not None and mem_ok():
+                if said:
+                    dlog.info("  [bridge] game is in memory (direct attach); "
+                              "reading the seed tag now")
+                return True
             try:
                 game = await asyncio.wait_for(self.psp.game_status(), 10)
             except Exception:
@@ -13334,6 +13854,9 @@ class FF1PSPContext(CommonContext):
             ("openworld", self._openworld_loop),
             # Map tab: the party's live overworld cell, ~1/s, change-driven
             ("owmap", self._owmap_loop),
+            # menu world map fog of war: persist/restore the explored-chunk mask
+            # (the on-disc hooks reveal game-side; idles when no mailbox exists)
+            ("mapfog", self._mapfog_loop),
             ("grant", self._grant_loop),
             # poll-based chest detection (tier2-poll-chests): reads the chest
             # bitfield; no exec breakpoints, so JIT block-linking stays enabled

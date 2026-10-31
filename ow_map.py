@@ -54,6 +54,14 @@ OC_POOL_ZONES = {
 
 _terrain = None
 _zone_cells = None
+# Random overworld: hub index per cell (randworld_territories.region_map, 0xFF
+# = no hub), or None on the vanilla map. A generated world's land headings
+# are TERRITORIES ((kind, hub key)), not zones -- see set_regions.
+_regions = None
+
+
+_cells = None
+_landmarks = None
 
 
 def terrain():
@@ -61,6 +69,185 @@ def terrain():
     if _terrain is None:
         _terrain = D.terrain()
     return _terrain
+
+
+def cells():
+    """W*H PALETTE indices for the Map tab picture: the baked vanilla art, or
+    a terrain-class fill of the generated grid after set_world."""
+    return _cells if _cells is not None else D.cells()
+
+
+def is_random():
+    """True while the map shows a generated world (set_world)."""
+    return _cells is not None
+
+
+def set_world(world):
+    """Point the map at a random overworld (slot_data["randworld"]["world"]),
+    or back at vanilla with None. Terrain comes from the generated grid's tile
+    classes; landmarks move with the stamp that owns them (the same rule the
+    bake moves entrance records and menu-map markers by) and drop when their
+    site was not placed."""
+    global _terrain, _cells, _landmarks
+    if not world:
+        _terrain = _cells = _landmarks = None
+        return
+    from .randworld import export as RWE, landmarks as RWL
+    from .client.randworld_bake import owner, _shift, _entrance_dist
+    grid = list(RWE.grid_from_slot(world))
+    # world-changing gate cells hold spare gate ids on disc: picture the
+    # CLOSED tile (the client's map edits show a gate once its item is held)
+    for g in world.get("gates") or ():
+        if g.get("name") == "canal":
+            continue
+        for x, y, _o, c in g.get("cells") or ():
+            grid[y * W + x] = c
+    terr = grid_classes(grid)
+    pix = bytearray(W * H)
+    for i, c in enumerate(terr):
+        # two shades per class, dithered like the baked art
+        pix[i] = 2 * c + (((i % W) + (i // W)) & 1)
+    stamps = [p for p in world.get("placed") or [] if p["kind"] != "dock"]
+    moved = []
+    for gx, gy, kind, name, pid in RWL.LANDMARKS:
+        if kind == "dock":
+            continue                    # docks are regenerated; vanilla ones mislead
+        if kind == "cave":
+            # a cave pin sits on its mouth, on whichever stamp carries that
+            # door (the bake parks the rest): a window that merely holds the
+            # pin gave Lifespring (89,157) to Duergar, and on worlds made
+            # before 2026-10-26 the "hellfire" stamp is Bahamut's door, its
+            # window full of parked doors (Hellfire Chasm's, Cardia dots)
+            doors = [p for p in stamps if p.get("ents") and _entrance_dist(p, gx, gy) <= 2]
+            if not doors:
+                continue
+            p = min(doors, key=lambda p: (p["key"] != pid, _entrance_dist(p, gx, gy)))
+            nx, ny = _door(p, gx, gy)
+        else:
+            own = [p for p in stamps if p["key"] == pid]
+            p = owner(gx, gy, own, grows=(0,)) if own else None
+            if p is None:
+                continue
+            nx, ny = _shift(p, gx, gy)
+        moved.append((nx, ny, kind, name, pid))
+    _terrain, _cells, _landmarks = terr, bytes(pix), tuple(moved)
+
+
+def _door(p, gx, gy):
+    """Stamp p's placed entrance whose vanilla door is nearest (gx, gy)."""
+    from .client.randworld_bake import _entrance_dist
+    return tuple(min(p["ents"], key=lambda e: _entrance_dist(dict(p, ents=[e]), gx, gy)))
+
+
+def set_regions(regions):
+    """Point land lookups at a random overworld's territory map
+    (slot_data["randworld"]["regions"], decoded), or back at the vanilla
+    zone tables with None. Same map the randworld_regions cave reads, so the
+    heading the tab names is the row the game rolls."""
+    global _regions
+    if regions is not None and len(regions) != W * H:
+        raise ValueError(f"region map is {len(regions)} B, want {W * H}")
+    _regions = bytes(regions) if regions is not None else None
+
+
+def has_regions():
+    return _regions is not None
+
+
+def is_territory(src):
+    """(kind, hub key) -- a random map's land heading (string key)."""
+    return src[0] in LAND_KINDS and isinstance(src[1], str)
+
+
+def _territory_kind(t, forests_on):
+    """Heading kind of a land terrain class on a random map
+    (randworld_territories.heading_kind, over ow_minimap classes)."""
+    if t in (D.T_PLAIN, D.T_MARSH, D.T_GRASS2):     # brush rolls the land row
+        return "ow"
+    if t == D.T_FOREST:
+        return "forest" if forests_on else "ow"
+    if t == D.T_DESERT:
+        return "desert"
+    return None
+
+
+def grid_classes(grid):
+    """Terrain class (D.T_*) per cell of a W*H tile-id grid, by TILE_CLASS."""
+    tc = D.TILE_CLASS
+    n = len(tc)
+    return bytes(tc[t] if 0 <= t < n else D.T_NONE for t in grid[:W * H])
+
+
+# ---- coast line (user call 2026-10-23) ----------------------------------------
+# The menu map's default look (minimap_bake STYLE_FLAT, mockup "D") and the Map
+# tab share ONE rule: every cell is drawn as a 2x2 block, and a land cell's
+# texels on each side that touches open water take COAST_RGB. Lakes (ocean
+# tiles) are open water; rivers neither draw nor cause a line, so a river mouth
+# stays open to the sea.
+COAST_RGB = (28, 40, 64)
+COAST_WATER = frozenset((D.T_OCEAN, D.T_SHALLOWS))
+_NO_COAST = COAST_WATER | {D.T_RIVER}
+COAST_W, COAST_E, COAST_N, COAST_S = 1, 2, 4, 8
+
+
+def coast_mask(terr):
+    """W*H bytes: for a land cell, bit COAST_W / E / N / S set when that
+    neighbour is open water (COAST_WATER); 0 for water and rivers. Neighbours
+    wrap around the grid edge, like the world does."""
+    wet = bytes(1 if c in COAST_WATER else 0 for c in range(256))
+    dry = bytes(0 if c in _NO_COAST else 1 for c in range(256))
+    water = bytes(wet[c] for c in terr)
+    out = bytearray(W * H)
+    for y in range(H):
+        r = y * W
+        up = ((y - 1) % H) * W
+        dn = ((y + 1) % H) * W
+        for x in range(W):
+            if not dry[terr[r + x]]:
+                continue
+            m = 0
+            if water[r + (x - 1) % W]:
+                m |= COAST_W
+            if water[r + (x + 1) % W]:
+                m |= COAST_E
+            if water[up + x]:
+                m |= COAST_N
+            if water[dn + x]:
+                m |= COAST_S
+            out[r + x] = m
+    return bytes(out)
+
+
+def coast_quads(m):
+    """(top-left, top-right, bottom-left, bottom-right) of a cell's 2x2 block:
+    True where coast mask `m` draws the coast line."""
+    w, e, n, s = m & COAST_W, m & COAST_E, m & COAST_N, m & COAST_S
+    return (bool(w or n), bool(e or n), bool(w or s), bool(e or s))
+
+
+def rgba_2x(cells, coast, pal, coast_rgba, plain=()):
+    """Bottom-up RGBA rows (a Kivy texture) of a 2W x 2H picture: cell i is a
+    2x2 block of pal[cells[i]] (4-byte entries) with its coast_quads(coast[i])
+    texels in coast_rgba. Cells whose index is in `plain` (fog) draw no coast."""
+    cache = {}
+    rows = []
+    for y in range(H - 1, -1, -1):              # bottom-up: S texel row first
+        top, bot = [], []
+        r = y * W
+        for x in range(W):
+            c = cells[r + x]
+            k = (c, 0 if c in plain else coast[r + x])
+            v = cache.get(k)
+            if v is None:
+                px = pal[c]
+                tl, tr, bl, br = coast_quads(k[1])
+                v = cache[k] = ((coast_rgba if tl else px) + (coast_rgba if tr else px),
+                                (coast_rgba if bl else px) + (coast_rgba if br else px))
+            top.append(v[0])
+            bot.append(v[1])
+        rows.append(b"".join(bot))
+        rows.append(b"".join(top))
+    return b"".join(rows)
 
 
 def raw_zone_of(x, y):
@@ -207,6 +394,8 @@ def cells_for_source(src, forests_on=True, opts=None, zones=None):
         return water_cells(src, opts, zones)
     if kind not in LAND_KINDS:
         return []
+    if is_territory(src):
+        return territory_cells(src, forests_on, opts)
     try:
         acc = (int(key[0]), int(key[1]))
     except (TypeError, ValueError, IndexError):
@@ -226,6 +415,25 @@ def cells_for_source(src, forests_on=True, opts=None, zones=None):
     return out
 
 
+def territory_cells(src, forests_on=True, opts=None):
+    """Cells of a random map's (kind, hub) heading: the hub's territory,
+    clipped to the heading's terrain. A territory rolls ONE row, so there is
+    no zone narrowing to do."""
+    if _regions is None:
+        return []
+    from . import randworld_territories as RWT
+    hub = RWT.HUB_INDEX.get(src[1])
+    if hub is None:
+        return []
+    if opts is not None:
+        forests_on = bool(opts.get("forests", forests_on))
+    kind = src[0].replace("_harder", "")
+    terr = terrain()
+    reg = _regions
+    return [i for i in range(W * H)
+            if reg[i] == hub and _territory_kind(terr[i], forests_on) == kind]
+
+
 def cells_for_sources(srcs, forests_on=True, zones=None):
     """{src: [cells]} for several headings at once (a monster's places)."""
     return {tuple(s): cells_for_source(s, forests_on, zones=zones)
@@ -242,6 +450,11 @@ def source_label(src, opts=None):
         if kind == "ocean" and not (opts or {}).get("ocean"):
             return "Ocean"
         return BD.SOURCE_LABELS.get((kind, key), f"{kind}:{key}")
+    if is_territory(src):
+        from . import randworld_territories as RWT
+        if key in RWT.HUB_NAME:
+            return f"{KIND_WORD[kind]} ({RWT.HUB_NAME[key]})"
+        return f"{KIND_WORD[kind]} ({key})"
     label = BD.SOURCE_LABELS.get((kind, tuple(key)))
     if label:
         return label
@@ -290,6 +503,15 @@ def place_at(gx, gy, forests_on=True, opts=None):
             D.T_DESERT: "desert", D.T_GRASS2: "t4"}.get(t)
     if kind is None:
         return "", None
+    if _regions is not None:
+        # random map: the territory under the cell, not the vanilla zone
+        # table (which named Western Keep plains "Elfheim", 2026-10-25)
+        from . import randworld_territories as RWT
+        h = _regions[gy * W + gx]
+        if h >= len(RWT.HUB_KEYS):
+            return "No encounters here", None
+        src = (_territory_kind(t, forests_on), RWT.HUB_KEYS[h])
+        return source_label(src), src
     acc = access_of(zone_of(gx, gy), kind)
     if acc is None:
         return "No encounters here", None
@@ -360,7 +582,7 @@ def label_matches(label, src):
 
 
 def landmarks():
-    return list(D.LANDMARKS)
+    return list(_landmarks if _landmarks is not None else D.LANDMARKS)
 
 
 # ---------------------------------------------------------------- squares --
@@ -382,7 +604,7 @@ PIN_AREA_PREFIX = (
     ("castle_cornelia", "cornelia"), ("mk_castle_cornelia", "cornelia"),
     ("shops_cornelia", "cornelia"),
     ("chaos_shrine", "chaos"), ("mk_chaos_shrine", "chaos"),
-    ("shops_pravoka", "pravoka"),
+    ("shops_pravoka", "pravoka"), ("pravoka_town", "pravoka"),
     ("matoyas_cave", "matoya"),
     ("mount_duergar", "duergar"), ("mk_mount_duergar", "duergar"),
     ("elven_castle", "elfheim"), ("mk_elven_castle", "elfheim"),
@@ -410,18 +632,25 @@ PIN_AREA_PREFIX = (
     ("bonus_2", "lifespring"), ("bonus_static_2", "lifespring"),
     ("bonus_3", "whisperwind"), ("bonus_static_3", "whisperwind"),
 )
+# random maps: each Dragon Caves chest cave is its own site and pin
+# (randworld/landmarks.py); the vanilla map keeps the one Cardia pin
+PIN_AREA_RANDOM = (
+    ("dragon_caves_plains", "cardia_plains"), ("dragon_caves_marsh", "cardia_marsh"),
+    ("dragon_caves_forest", "cardia_forest"),
+)
 # bonus dungeon index (logic.BONUS_DUNGEONS order) -> pin
 PIN_BONUS = ("earthgift", "hellfire", "lifespring", "whisperwind")
-# NPC tiles are numbered, not named: tracker's npc_N -> pin.
+# NPC tiles are numbered, not named: tracker's npc_N -> pin. The Caravan (8)
+# is its own site at (17,44), not Onrac (logic REGION_SITE "onrac_caravan").
 PIN_NPC = {1: "cornelia", 2: "pravoka", 3: "crescent", 4: "ice", 5: "sarda",
-           6: "lufenia", 7: "waterfall", 8: "onrac", 9: "gaia", 10: "wkeep",
+           6: "lufenia", 7: "waterfall", 8: "caravan", 9: "gaia", 10: "wkeep",
            11: "matoya", 12: "elfheim", 13: "mirage", 14: "duergar"}
 # bestiary dungeon key (bestiary_data.CAVE_MAP_DUNGEON values) -> pin
 PIN_DUNGEON = {
     "chaos_f1": "chaos", "chaos_basement": "chaos", "marsh": "marsh",
     "earth": "earth", "gurgu": "gulg", "ice": "ice", "trials": "trials",
     "waterfall": "waterfall", "mirage": "mirage", "fortress": "mirage",
-    "onrac": "onrac", "sunken": "onrac",
+    "titan": "titan", "sunken": "onrac",
 }
 # monster-tile map id -> pin, for the maps without a dungeon row
 PIN_TILE_PLACE = {0x58: "wkeep"}
@@ -444,7 +673,7 @@ def pin_of_area(key):
         except ValueError:
             return None
     best = None
-    for prefix, pin in PIN_AREA_PREFIX:
+    for prefix, pin in PIN_AREA_PREFIX + (PIN_AREA_RANDOM if is_random() else ()):
         if key.startswith(prefix) and (best is None or len(prefix) > best[0]):
             best = (len(prefix), pin)
     return best[1] if best else None
@@ -478,7 +707,7 @@ def pin_of_source(src):
         kind, key = src[0], src[1]
     except (TypeError, IndexError):
         return None
-    if kind == "cave":
+    if kind in ("cave", "cfs"):
         return PIN_DUNGEON.get(BD.CAVE_MAP_DUNGEON.get(key))
     if kind == "tile":
         # monster tiles sit inside a dungeon, or in the Western Keep

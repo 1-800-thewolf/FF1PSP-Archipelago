@@ -514,20 +514,22 @@ _CAVE_DUNGEONS = {
     "mirage":         (0x50, 0x51, 0x52),
     "fortress":       tuple(range(0x5c, 0x61)),
     "chaos_basement": (0x20, 0x21, 0x22, 0x23, 0x24, 0x26, 0x27),  # 0x25 -> sunken
-    "onrac":          (0x28,),                             # Sabertooth cave (side)
+    # Titan's Tunnel (Giant's Cave): the encounter map id reads 0x28 on Titan's
+    # floor (v260 live RE, 2026-08-11). Was keyed "onrac" until 2026-10-30.
+    "titan":          (0x28,),
     "sunken":         (0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x25),  # water
 }
 # harder-mode target: which dungeon's pool a map rerolls from instead of its own.
 # Follows the story/difficulty progression so "one tier up" reads as the NEXT real
 # dungeon (Marsh -> Cavern of Earth -> Gurgu -> ...), not a random power-neighbor.
-# Water (sunken) stays sea; the side cave (onrac) and terminal dungeon step to a
+# Water (sunken) stays sea; the side cave (titan) and terminal dungeon step to a
 # sensible land successor / to themselves -- never across the land/sea line.
 _CAVE_HARDER_DUNGEON = {
     "chaos_f1": "marsh", "marsh": "earth", "earth": "gurgu", "gurgu": "ice",
     "ice": "trials", "trials": "waterfall", "waterfall": "mirage",
     "mirage": "fortress", "fortress": "chaos_basement",
     "chaos_basement": "chaos_basement",
-    "onrac": "gurgu", "sunken": "sunken",
+    "titan": "gurgu", "sunken": "sunken",
 }
 _CAVE_MAP_DUNGEON = {mid: name
                      for name, mids in _CAVE_DUNGEONS.items() for mid in mids}
@@ -594,12 +596,13 @@ _OVERWORLD_BOSS_SLOTS = {
     (12, 6): 0x7a,   # Lich     -> Citadel of Trials region
     (13, 7): 0x79,   # Marilith -> Lufenia / Mirage Desert
 }
-# The Onrac overworld region draws encounters from cave-table map 0x28 (the
-# Sabertooth zone), so Astos/Piscodemon at Onrac physically live in zones_caves
-# but are gated by the OVERWORLD toggle. (cave map_id, slot) -> formation id.
-_ONRAC_BOSS_SLOTS = {
-    (0x28, 7): 0x7d,   # Astos      -> Onrac overworld
-    (0x28, 6): 0x1c,   # Piscodemon -> Onrac overworld
+# Cave map 0x28 is Titan's Tunnel. These were meant as Onrac overworld cameos,
+# but the overworld (map id 0) only ever reads the overworld tables
+# (re_only/encounter_census.py), so they have always spawned in the tunnel.
+# Placement still rides the OVERWORLD toggle. (cave map_id, slot) -> formation id.
+_TITAN_BOSS_SLOTS = {
+    (0x28, 7): 0x7d,   # Astos      -> Titan's Tunnel
+    (0x28, 6): 0x1c,   # Piscodemon -> Titan's Tunnel
 }
 
 
@@ -812,10 +815,10 @@ def boss_soft_plan(dungeon_harder=False, overworld_harder=False, minion_plan=Non
     so with cameos off and minions off this is empty and the feature is a strict
     no-op. A boss is only listed if something actually puts it somewhere soft.
 
-    The Onrac cameos are listed under BOTH cave map 0x28 and the overworld: they are
-    stamped into cave row 0x28 but the party is physically on overworld tiles when
-    they fire, and which id the game reports there hasn't been live-captured --
-    covering both costs nothing (no scripted fight lives on either)."""
+    The Titan's Tunnel cameos are listed under cave map 0x28 only. They used to be
+    listed under the overworld too, on the belief that they fired on Onrac's
+    overworld; that softened every harder-overworld Piscodemon (a normal roll
+    there)."""
     everywhere = set()
     map_soft = {}
 
@@ -834,10 +837,8 @@ def boss_soft_plan(dungeon_harder=False, overworld_harder=False, minion_plan=Non
     if overworld_harder:
         for (_zone, _slot), fid in _OVERWORLD_BOSS_SLOTS.items():
             add(CAMEO_OVERWORLD, _CAMEO_FID_MONSTER[fid])
-        for (rec, _slot), fid in _ONRAC_BOSS_SLOTS.items():
-            mon = _CAMEO_FID_MONSTER[fid]
-            add(rec, mon)
-            add(CAMEO_OVERWORLD, mon)
+        for (rec, _slot), fid in _TITAN_BOSS_SLOTS.items():
+            add(rec, _CAMEO_FID_MONSTER[fid])
     # Minions: a rolled add that IS a boss. Skip a pool that picked the host's own
     # species (Garland/Vampire/Astos pools do) -- softening it would soften the boss
     # itself, and no map can separate a boss from its clone.
@@ -876,9 +877,13 @@ def _draw_formation(rng, low, high):
     return fid
 
 
-def strip_land_sea(block, vanilla, hi=None):
+def strip_land_sea(block, vanilla, hi=None, zone_tier=None):
     """Revert any land-zone slot the shuffle filled with a water fight that does
     not belong there, back to that slot's VANILLA land formation.
+
+    zone_tier -- the row -> tier map the table was rolled with (default
+    ZONE_TIER). A random overworld rolls one row per HUB instead
+    (randworld_zone_tier) and passes randworld_vanilla_block as `vanilla`.
 
     Two rules (see _LAND_SHARK_BAN / _LAND_AQUATIC): sharks are stripped from
     every zone, other aquatic fights only from zones outside the Crescent Lake
@@ -888,6 +893,7 @@ def strip_land_sea(block, vanilla, hi=None):
     before a rule change are corrected on the next client relaunch -- no
     regeneration needed. zones_overworld is entirely terrain-0 LAND, so stripping
     across the whole table can never remove a legitimate sea encounter."""
+    zt = ZONE_TIER if zone_tier is None else zone_tier
     out = bytearray(block)
     for i, fid in enumerate(out):
         # `hi` is the companion high-byte table. A slot with a non-zero high byte
@@ -897,7 +903,7 @@ def strip_land_sea(block, vanilla, hi=None):
         # already exclude water fights by construction.
         if hi is not None and hi[i]:
             continue
-        tier = ZONE_TIER[i // 8]
+        tier = zt[i // 8]
         if fid in _LAND_SHARK_BAN:
             out[i] = vanilla[i]
         elif (fid in _LAND_AQUATIC and tier not in _AQUA_TIERS
@@ -944,8 +950,11 @@ def overworld_zone_tables(seed, player, harder=False):
                                    harder=harder)
 
 
-def shuffle_zones_overworld(rng, block, harder=False):
+def shuffle_zones_overworld(rng, block, harder=False, zone_tier=None):
     """Roll every zone's 8 slots and return (low, high) 512-byte tables.
+
+    zone_tier -- row -> tier (default ZONE_TIER, the vanilla map's 64 zones).
+    A random overworld passes randworld_zone_tier(): one row per hub.
 
     Normal mode is unchanged: a cumulative _TIER_BAND index slice of
     _BATTLE_RANK, in random slot order, u8 only (high table stays all zero).
@@ -960,7 +969,7 @@ def shuffle_zones_overworld(rng, block, harder=False):
     stand on dry land."""
     out = bytearray(block)
     hi = bytearray(512)
-    for zi, tier in enumerate(ZONE_TIER):
+    for zi, tier in enumerate(ZONE_TIER if zone_tier is None else zone_tier):
         if tier == TIER_NONE:
             out[zi * 8:zi * 8 + 8] = bytes(8)          # formation 0 = no encounter
             continue
@@ -981,7 +990,62 @@ def shuffle_zones_overworld(rng, block, harder=False):
         for j, fid in enumerate(_rank_slots(picks)):
             out[zi * 8 + j] = fid & 0xFF
             hi[zi * 8 + j] = fid >> 8
-    return strip_land_sea(bytes(out), block, hi), bytes(hi)
+    return strip_land_sea(bytes(out), block, hi, zone_tier), bytes(hi)
+
+
+# ---- random overworlds (ff1psp/randworld_territories) -----------------------
+# A generated world has no 32x32 zone geography: every territory rolls ONE land
+# roster, its hub's (user 2026-10-14), and the region-map patch points the
+# territory's cells at that row. Row h = randworld_territories.HUB_KEYS[h];
+# rows past the hubs are TIER_NONE (formation 0, never read).
+# Each hub's vanilla HOME zone (the zone its vanilla site or heading stands in,
+# with ZONE_TIER == the hub's tier) lends its vanilla row as strip_land_sea's
+# fallback, so a reverted aquatic slot falls back to a fight of the right tier.
+RANDWORLD_HUB_HOME_ZONE = {
+    "cornelia": 36, "pravoka": 38, "duergar": 35, "elfheim": 52, "wkeep": 43,
+    "melmond": 34, "sarda": 40, "crescent": 54, "gulg": 53, "onrac": 9,
+    "trials": 11, "mirage": 14, "lufenia": 31, "gaia": 6,
+}
+# _OVERWORLD_BOSS_SLOTS stamps by VANILLA zone; on a random map rows 12/13 are
+# the Lufenia/Gaia hubs, so the cameos follow their region's hub instead.
+RANDWORLD_BOSS_ZONE_HUB = {52: "elfheim", 12: "trials", 13: "mirage"}
+
+
+def randworld_zone_tier():
+    """Row -> tier for a random overworld's zones_overworld (64 rows)."""
+    from . import randworld_territories as RWT
+    tiers = tuple(RWT.HUB_TIER[k] for k in RWT.HUB_KEYS)
+    return tiers + (TIER_NONE,) * (64 - len(tiers))
+
+
+def randworld_vanilla_block(vanilla=None):
+    """The 512-byte fallback block for strip_land_sea: hub h's row = the
+    vanilla row of its home zone; unused rows zero."""
+    from . import randworld_territories as RWT
+    van = RD.VANILLA["zones_overworld"] if vanilla is None else vanilla
+    out = bytearray(512)
+    for h, key in enumerate(RWT.HUB_KEYS):
+        z = RANDWORLD_HUB_HOME_ZONE[key]
+        out[h * 8:h * 8 + 8] = van[z * 8:z * 8 + 8]
+    return bytes(out)
+
+
+def randworld_boss_slots():
+    """_OVERWORLD_BOSS_SLOTS re-keyed onto hub rows."""
+    from . import randworld_territories as RWT
+    return {(RWT.HUB_INDEX[RANDWORLD_BOSS_ZONE_HUB[rec]], slot): fid
+            for (rec, slot), fid in _OVERWORLD_BOSS_SLOTS.items()}
+
+
+def randworld_zone_tables(seed, player, harder=False):
+    """overworld_zone_tables for a random overworld: (low, high) 512-byte
+    tables, one row per hub. Same derived rng stream, so it is reproducible
+    from set_rules exactly like the vanilla roll."""
+    import random as _random
+    rng = _random.Random(f"{seed}-{player}-owzones")
+    return shuffle_zones_overworld(rng, randworld_vanilla_block(),
+                                   harder=harder,
+                                   zone_tier=randworld_zone_tier())
 
 
 def _cave_dungeon_pool(block, name):
@@ -1023,7 +1087,7 @@ def cave_zone_table(seed, player, *, dungeon_harder=False,
     cv = (shuffle_zones_caves(rng, RD.VANILLA["zones_caves"], harder=True)
           if dungeon_harder else bytearray(RD.VANILLA["zones_caves"]))
     if overworld_harder:
-        cv = _stamp_boss_slots(cv, _ONRAC_BOSS_SLOTS)   # Onrac routes via cave map 0x28
+        cv = _stamp_boss_slots(cv, _TITAN_BOSS_SLOTS)   # Titan's Tunnel, cave map 0x28
     if dungeon_harder:
         cv = _stamp_boss_slots(cv, _DUNGEON_BOSS_SLOTS)
     return bytes(cv)
@@ -1892,7 +1956,8 @@ def reserved_placeholder_map(counts, hint_caps=None, hint_target=0):
 def shuffle_shop_items(rng, block, tier=SHOP_TIER_OVERWORLD, ap_slots=False,
                        ap_blocked=None, block_mana_items=False,
                        ap_reserve=None, hint_reserve=None,
-                       extra_slots=_EXTRA_SLOTS_DEFAULT, force_item_ids=()):
+                       extra_slots=_EXTRA_SLOTS_DEFAULT, force_item_ids=(),
+                       needle_towns=None):
     """Randomize weapon/armor/item store inventories (rows j=0..2). Port of the
     randomizeStores() fill for those categories. Magic stores (j=3..6) are NOT
     touched here -- see shuffle_magic_shops. `block` is the 0x600-byte region
@@ -2048,9 +2113,16 @@ def shuffle_shop_items(rng, block, tier=SHOP_TIER_OVERWORLD, ap_slots=False,
     # shops the player can reach at the start. Overwrites a slot whose id is
     # stocked more than once so the guarantee can never be what creates a
     # duplicate.
-    _start_idx = [_DEF_IDX[(0, 2)], _DEF_IDX[(1, 2)]]      # Cornelia, Pravoka
-    if rng.random() < 0.5:                                 # town picked per seed
-        _start_idx.reverse()
+    # `needle_towns` (random map, user 2026-10-18): Cornelia plus every town
+    # reachable from the start on THAT map, instead of Cornelia / Pravoka.
+    if needle_towns is None:
+        _start_idx = [_DEF_IDX[(0, 2)], _DEF_IDX[(1, 2)]]      # Cornelia, Pravoka
+        if rng.random() < 0.5:                                 # town picked per seed
+            _start_idx.reverse()
+    else:
+        _start_idx = [_DEF_IDX[(c, 2)] for c in sorted(set(needle_towns) | {0})
+                      if (c, 2) in _DEF_IDX]
+        rng.shuffle(_start_idx)
     _start_idx = [i for i in _start_idx if i in plan]
 
     def _needle_spot(idx, stock_only):
@@ -2100,6 +2172,10 @@ def shuffle_shop_items(rng, block, tier=SHOP_TIER_OVERWORLD, ap_slots=False,
                   block_mana_items, used=used[2], plan=plan)
     return out
 
+
+# shop city index (the _CITY_STARTS order) -> its overworld site
+SHOP_CITY_SITE = {0: "cornelia", 1: "pravoka", 2: "elfheim", 3: "melmond",
+                  4: "crescent", 5: "onrac", 6: "gaia"}
 
 GOLD_NEEDLE_ID = 0x0c                    # the guaranteed starting-town cure
 REMEDY_ID = 0x0a                         # ordinary stock, guarantees nothing
@@ -3610,7 +3686,8 @@ def build_shuffle_tables(rng, *, shop_tier=SHOP_TIER_UNSHUFFLED, magic_shops=Fal
                          block_mana_items=False,
                          shop_extra_slots=_EXTRA_SLOTS_DEFAULT,
                          shared_tails=False, force_shop_item_ids=(),
-                         ow_tables=None, cv_table=None):
+                         needle_towns=None,
+                         ow_tables=None, cv_table=None, randworld=False):
     """Assemble the enabled Tier-A shuffles into per-physical-table patched bytes.
     Multiple features can touch the same table (e.g. equip_perms + item_prices
     both edit `weapons`); they are layered onto one bytearray so a single
@@ -3764,7 +3841,8 @@ def build_shuffle_tables(rng, *, shop_tier=SHOP_TIER_UNSHUFFLED, magic_shops=Fal
                                                if shop_ap_prices is not None else None),
                                    hint_reserve=hint_caps or None,
                                    extra_slots=shop_extra_slots,
-                                   force_item_ids=force_shop_item_ids)
+                                   force_item_ids=force_shop_item_ids,
+                                   needle_towns=needle_towns)
     if magic_shops:
         shops = shuffle_magic_shops(rng, shops)
         # Slot magic: a spell's LEVEL is its charge pool, so the costly list
@@ -3897,8 +3975,8 @@ def build_shuffle_tables(rng, *, shop_tier=SHOP_TIER_UNSHUFFLED, magic_shops=Fal
     # each zone's named-tier band, on = the _OW_HARDER_POOL threat pools +
     # hand-picks + boss cameos, v192) -- the map corrections apply in both modes.
     # Caves stay vanilla unless dungeon_harder. The overworld branch also
-    # touches the cave table, but solely to stamp the Onrac-region boss cameos
-    # (Astos/Piscodemon), which physically live in cave map 0x28.
+    # touches the cave table, but solely to stamp the Titan's Tunnel boss cameos
+    # (Astos/Piscodemon, cave map 0x28).
     # ow_tables = the caller's precomputed (low, high) pair from
     # overworld_zone_tables(). It is passed in rather than rolled here because
     # the BESTIARY has to see the same table at set_rules time, long before this
@@ -3912,10 +3990,13 @@ def build_shuffle_tables(rng, *, shop_tier=SHOP_TIER_UNSHUFFLED, magic_shops=Fal
         ow, ow_hi = shuffle_zones_overworld(rng, V["zones_overworld"],
                                             harder=overworld_harder)
     if overworld_harder:
-        ow = _stamp_boss_slots(ow, _OVERWORLD_BOSS_SLOTS)
+        # randworld: ow_tables holds one row per HUB (randworld_zone_tables),
+        # so the cameos go to their region's hub row, not the vanilla zone
+        boss_slots = randworld_boss_slots() if randworld else _OVERWORLD_BOSS_SLOTS
+        ow = _stamp_boss_slots(ow, boss_slots)
         # a curated cameo is a u8 id, so clear any high byte left in that slot
         ow_hi = bytearray(ow_hi)
-        for (rec, slot) in _OVERWORLD_BOSS_SLOTS:
+        for (rec, slot) in boss_slots:
             ow_hi[rec * 8 + slot] = 0
         ow_hi = bytes(ow_hi)
     result["zones_overworld"] = bytes(ow)
@@ -3937,7 +4018,7 @@ def build_shuffle_tables(rng, *, shop_tier=SHOP_TIER_UNSHUFFLED, magic_shops=Fal
             cv = (shuffle_zones_caves(rng, V["zones_caves"], harder=True)
                   if dungeon_harder else bytearray(V["zones_caves"]))
             if overworld_harder:
-                cv = _stamp_boss_slots(cv, _ONRAC_BOSS_SLOTS)   # Onrac routes via cave map 0x28
+                cv = _stamp_boss_slots(cv, _TITAN_BOSS_SLOTS)   # Titan's Tunnel, cave map 0x28
             if dungeon_harder:
                 cv = _stamp_boss_slots(cv, _DUNGEON_BOSS_SLOTS)
         result["zones_caves"] = bytes(cv)
@@ -3994,7 +4075,14 @@ def patches_from_slot_data(sd):
         # old overworld shuffle baked into the LAND table (RNG-neutral, idempotent --
         # a no-op on tables already clean). See strip_land_sea / [[vehicle-encounter-table]].
         if name == "zones_overworld":
-            patched = strip_land_sea(patched, van, ow_hi)
+            if (sd or {}).get("randworld"):
+                # random overworld: one row per hub, not per vanilla zone --
+                # stripping against ZONE_TIER would revert hub rows to the
+                # wrong zones' vanilla fights (randworld_zone_tables)
+                patched = strip_land_sea(patched, randworld_vanilla_block(van),
+                                         ow_hi, randworld_zone_tier())
+            else:
+                patched = strip_land_sea(patched, van, ow_hi)
         # Fix seeds generated before the sell-price fix: any buyable consumable
         # whose sell != buy//2 let you buy low + sell high for infinite gil.
         # RNG-neutral + idempotent (recomputes sell from the already-rolled buy).

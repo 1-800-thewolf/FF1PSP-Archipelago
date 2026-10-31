@@ -1031,6 +1031,8 @@ class TrackerMixin:
         self._map_here = None         # "You are in: ..." label
         self._map_sel = []            # [(src, title, zones)] currently lit
         self._map_pos = None          # last (grid_x, grid_y) or None
+        self._map_fog = 0             # fog_of_war explored-chunk mask
+        self._map_fog_on = False      # fog_of_war applies (random map)
         self._map_here_src = None     # land heading under the party
         self._map_here_zone = None    # encounter zone under the party
         # monsters the party's OWN zone rolls; a heading covers several zones,
@@ -1381,6 +1383,12 @@ class TrackerMixin:
                 self._tabbar.set_text(idx, f"Summary  {n}")
                 self._tabbar.set_shine(idx, n > 0)
                 continue
+            # a section this seed put nothing in leaves the strip
+            # (TrackerState.section_shown: the pool is fixed, no reshuffle)
+            shown = state.section_shown(section)
+            self._tabbar.set_visible(idx, shown)
+            if not shown:
+                continue
             found, total = state.section_rollup(section)
             display = TR.SECTION_DISPLAY[section]
             if total <= 0:
@@ -1587,6 +1595,10 @@ class TrackerMixin:
 
     def _paint_shops(self, payload):
         self._shops_note.text = self._shops_note_text(payload)
+        # a town the world left out (map_size: Lufenia) has no tab
+        present = {t["city"] for t in payload["towns"]}
+        for city, idx in self._shops_town_idx.items():
+            self._shops_tabbar.set_visible(idx, city in present)
         for town in payload["towns"]:
             city = town["city"]
             shop_rgb = TR.SHOP_TOWN_COLOR.get(city, TR.SECTION_COLOR["shops"])
@@ -2020,6 +2032,8 @@ class TrackerMixin:
             kind = p[0]
             if kind in OM.WATER_KINDS:
                 return (kind, int(p[1]))
+            if isinstance(p[1], str):
+                return (kind, p[1])         # random-map territory (kind, hub)
             return (kind, (int(p[1][0]), int(p[1][1])))
         except (TypeError, ValueError, IndexError):
             return None
@@ -2316,6 +2330,8 @@ class TrackerMixin:
             "[color=6E6E6E]Each tab lists the monsters still holding a "
             "check there.[/color]"))
         for skey in TR.BESTIARY_SECTION_ORDER:
+            if not TR.bestiary_section_shown(payload, skey):
+                continue                    # no tab for it either
             box.add_widget(self._bestiary_summary_line(
                 skey, by_key.get(skey), clickable=clickable))
 
@@ -2368,11 +2384,17 @@ class TrackerMixin:
             sec = by_key.get(skey)
             name = TR.BESTIARY_SECTION_DISPLAY.get(skey, skey)
             box = self._bestiary_section_box[skey]
+            # a section the seed never filed a check in leaves the strip
+            # (the sample is fixed, so nothing reshuffles mid-game)
+            shown = TR.bestiary_section_shown(payload, skey)
+            self._bestiary_tabbar.set_visible(idx, shown)
+            if not shown:
+                continue
             self._paint_bestiary_tab(idx, skey, strip.get(skey))
             if sec is None:
-                # Nothing LEFT here (or the seed never put anything here). The
-                # tab stays in place -- a static strip never reshuffles under
-                # the player -- and stays open, like a completed Tracker tab.
+                # Nothing LEFT here. The tab stays in place -- a static strip
+                # never reshuffles under the player -- and stays open, like a
+                # completed Tracker tab.
                 box.add_widget(_offer_label(
                     "[color=81C784]Nothing left to hunt here.[/color]"))
                 continue
@@ -2481,6 +2503,8 @@ class TrackerMixin:
         self._map_tab_widget = self.add_client_tab("Map", root)
         self._map_tab = root
         self._map_refresh_legend()
+        self._map_view.set_world(self._map_fog_on and OM.is_random())
+        self._map_view.set_fog(self._map_fog)
         self._map_set_pos(self._map_pos)
         self._map_refresh_squares()
         self._map_apply_edits()
@@ -2658,6 +2682,39 @@ class TrackerMixin:
         except Exception as ex:
             logger.debug(f"Map edits repaint failed: {ex}")
 
+    def update_map_world(self, world, fog=False, regions=None):
+        """Thread-safe entry point: slot_data["randworld"]["world"] (None on
+        the vanilla map), whether fog_of_war applies, and the decoded
+        territory map (randworld_territories.decode_regions) that names the
+        land heading under each cell. Repaints the Map tab from the
+        generated grid with the landmarks moved."""
+        self._map_fog_on = bool(fog) and bool(world)
+
+        def _apply(_dt):
+            try:
+                OM.set_world(world)
+                OM.set_regions(regions if world else None)
+            except Exception as ex:
+                logger.warning(f"Map tab: could not load the random map ({ex})")
+                OM.set_world(None)
+                OM.set_regions(None)
+                world_ok = False
+            else:
+                world_ok = bool(world)
+            if self._map_view is not None:
+                self._map_view.set_world(bool(fog) and world_ok)
+                self._map_view.set_fog(self._map_fog)
+            self._map_set_pos(self._map_pos)
+            self._map_refresh_squares()
+        Clock.schedule_once(_apply, 0)
+
+    def update_map_fog(self, mask):
+        """Thread-safe entry point: the slot's explored-chunk mask (int)."""
+        self._map_fog = int(mask or 0)
+        Clock.schedule_once(
+            lambda _dt: self._map_view is not None
+            and self._map_view.set_fog(self._map_fog), 0)
+
     def update_map_pos(self, pos):
         """Thread-safe entry point from the client's asyncio loop: the party's
         overworld grid cell, or None off the overworld."""
@@ -2692,6 +2749,9 @@ class TrackerMixin:
         more = len(rows) - len(shown)
         if more > 0:
             body += f", +{more} more"
+        if OM.has_regions():
+            # a random map's territory rolls one row on every cell
+            return f"{head}\n[color=9AA0A6]Rolls here:[/color] {body}"
         return (f"{head}\n[color=9AA0A6]Rolls in this zone "
                 f"({self._map_here_zone}):[/color] {body}")
 
@@ -2707,8 +2767,13 @@ class TrackerMixin:
         # cannot give. Drives the panel's second line AND the Bestiary tab's
         # "(in this zone)" tags, so it is computed before the Map-tab guard
         # below: the tags must work whether or not the Map tab is built.
-        rows = (OM.here_rows(bst.get("zone_rows"), pos[0], pos[1], forests, opts)
-                if pos is not None else [])
+        if pos is None:
+            rows = []
+        elif OM.has_regions():
+            # random map: the territory heading's own row, on every terrain
+            rows = list((bst.get("source_rows") or {}).get(src) or ()) if src else []
+        else:
+            rows = OM.here_rows(bst.get("zone_rows"), pos[0], pos[1], forests, opts)
         mons = frozenset(int(r["mon"]) for r in rows)
         src_changed = src != self._map_here_src
         self._map_here_src = src
@@ -3094,8 +3159,9 @@ class _OwMapView(Widget):
     """The overworld picture, a highlight overlay, landmark pins and the
     party dot.
 
-    Two 255x255 RGBA textures (the baked map, the highlight) are drawn
-    NEAREST-filtered into the largest square that fits the widget; the
+    RGBA textures (the map at 2x2 texels per cell so land can carry the menu
+    map's coast line, the 255x255 highlights) are drawn NEAREST-filtered into
+    the same, largest square that fits the widget; the
     overlay is re-blitted only when the lit set changes and the pins are
     redrawn only on relayout or a position change, so an idle tab costs
     nothing per frame. Kivy textures are bottom-up, so map row y lands on
@@ -3123,6 +3189,10 @@ class _OwMapView(Widget):
         self._hg_rects = {}     # section -> (x0, y0, x1, y1) hit box
         self.on_hunt_click = None
         self._edits = {}        # {(x, y): terrain class} live world edits
+        self._fog_on = False    # fog_of_war on a random map
+        self._fog = None        # explored-chunk mask, None = no fog
+        self._coast = None      # OM.coast_mask of the drawn cells
+        self._coast_key = None
         # party marker: the in-game map's pulsing diamond -- grows over
         # 0.5 s then snaps back to small (user call 2026-09-05)
         self._party = InstructionGroup()
@@ -3186,27 +3256,43 @@ class _OwMapView(Widget):
 
     # -- textures ---------------------------------------------------------
     @staticmethod
-    def _new_texture():
-        tex = Texture.create(size=(OWD.W, OWD.H), colorfmt="rgba")
+    def _new_texture(scale=1):
+        tex = Texture.create(size=(OWD.W * scale, OWD.H * scale), colorfmt="rgba")
         tex.mag_filter = "nearest"
         tex.min_filter = "nearest"
         return tex
 
     def _blit_base(self):
         """The baked picture with the live world edits painted over it (each
-        edited cell takes its new terrain's base shade)."""
+        edited cell takes its new terrain's base shade), every land side that
+        touches open water edged in the menu map's dark coast line (user call
+        2026-10-23: OM.coast_mask, the rule minimap_bake's flat style bakes)."""
         W, H = OWD.W, OWD.H
-        cells = bytearray(OWD.cells())
+        cells = bytearray(OM.cells())
         for (x, y), cls in self._edits.items():
             if 0 <= x < W and 0 <= y < H and 0 <= cls * 2 < len(OWD.PALETTE):
                 cells[y * W + x] = cls * 2
+        # cell index = 2 * terrain class + shade; the mask only changes with
+        # the world or its edits, not with every fog reveal
+        key = bytes(cells)
+        if self._coast_key != key:
+            self._coast = OM.coast_mask(bytes(c >> 1 for c in key))
+            self._coast_key = key
         pal = [bytes((r, g, b, 255)) for r, g, b in OWD.PALETTE]
-        rows = []
-        for y in range(H - 1, -1, -1):          # bottom-up
-            row = cells[y * W:(y + 1) * W]
-            rows.append(b"".join(pal[c] for c in row))
-        self._base_tex.blit_buffer(b"".join(rows), colorfmt="rgba",
-                                   bufferfmt="ubyte")
+        fogged = len(pal)
+        pal.append(bytes(self._FOG_RGBA))
+        if self._fog is not None:
+            # fog_of_war: the menu map's 8x8-tile chunks, same mask the game
+            # keeps (chunk = (gy>>3)*32 + (((gx+9)&255)>>3))
+            mask = self._fog
+            for y in range(H):
+                cy = (y >> 3) * 32
+                for x in range(W):
+                    if not (mask >> (cy + (((x + 9) & 255) >> 3))) & 1:
+                        cells[y * W + x] = fogged
+        buf = OM.rgba_2x(cells, self._coast, pal, bytes(OM.COAST_RGB + (255,)),
+                         plain=(fogged,))
+        self._base_tex.blit_buffer(buf, colorfmt="rgba", bufferfmt="ubyte")
         self._base_rect.texture = self._base_tex
         self.canvas.ask_update()
 
@@ -3215,10 +3301,39 @@ class _OwMapView(Widget):
         if self._base_tex is not None:
             self._blit_base()
 
+    _FOG_RGBA = (18, 18, 24, 255)
+
+    def set_world(self, fog):
+        """The map's picture / landmarks changed (ow_map.set_world): repaint.
+        `fog` False = no fog; True = fog on, nothing explored yet."""
+        self._fog_on = bool(fog)
+        self._fog = 0 if self._fog_on else None
+        if self._base_tex is not None:
+            self._blit_base()
+        self._blit_overlay()
+        self._blit_here()
+        self._relayout()
+
+    def set_fog(self, mask):
+        """Explored-chunk mask (int, bit c = chunk c); ignored with fog off."""
+        if not self._fog_on or mask == self._fog:
+            return
+        self._fog = int(mask)
+        if self._base_tex is not None:
+            self._blit_base()
+        self._blit_overlay()
+        self._blit_here()
+        self._draw_pins()
+        self._draw_rings()
+
+    def _hidden(self, gx, gy):
+        f = self._fog
+        return f is not None and not (f >> ((gy >> 3) * 32 + (((gx + 9) & 255) >> 3))) & 1
+
     def _ensure_textures(self):
         if self._base_tex is not None:
             return
-        self._base_tex = self._new_texture()
+        self._base_tex = self._new_texture(2)
         self._blit_base()
         self._hl_tex = self._new_texture()
         self._water_tex = self._new_texture()
@@ -3245,23 +3360,36 @@ class _OwMapView(Widget):
                 buf[o:o + 4] = px
         return bytes(buf)
 
+    def _unfogged(self, layers):
+        """`layers` with every cell still under fog_of_war dropped -- a
+        clicked monster / zone lights only ground the player has explored."""
+        if self._fog is None:
+            return layers
+        W = OWD.W
+        return [([i for i in cells if not self._hidden(i % W, i // W)], rgba)
+                for cells, rgba in layers]
+
     def _blit_overlay(self):
         if self._hl_tex is None:
             return
-        self._hl_tex.blit_buffer(self._paint_cells(self._layers),
+        land = self._unfogged(self._layers)
+        water = self._unfogged(self._water)
+        self._hl_tex.blit_buffer(self._paint_cells(land),
                                  colorfmt="rgba", bufferfmt="ubyte")
-        self._water_tex.blit_buffer(self._paint_cells(self._water),
+        self._water_tex.blit_buffer(self._paint_cells(water),
                                     colorfmt="rgba", bufferfmt="ubyte")
         # a texture blit does not by itself dirty the canvas
         self._hl_rect.texture = self._hl_tex
         self._water_rect.texture = self._water_tex
-        self._set_pulsing(self._anything_lit())
+        self._set_pulsing(any(c for c, _r in land + water) or bool(self._dpins))
         self.canvas.ask_update()
 
     def _blit_here(self):
         if self._here_tex is None:
             return
-        self._here_tex.blit_buffer(self._paint_cells([self._here]),
+        # the party's territory is clipped to explored ground too: a random
+        # map's territory can reach far into fog (2026-10-28 playtest)
+        self._here_tex.blit_buffer(self._paint_cells(self._unfogged([self._here])),
                                    colorfmt="rgba", bufferfmt="ubyte")
         self._here_rect.texture = self._here_tex
         self.canvas.ask_update()
@@ -3346,8 +3474,8 @@ class _OwMapView(Widget):
         w = dp(1.8) * 1.5
         r = (sq / 2.0 + dp(3)) * 1.5 - (w - dp(1.8)) / 2.0
         g.add(self._ring_col)
-        for gx, gy, _kind, _name, pid in OWD.LANDMARKS:
-            if not pid or pid not in self._dpins:
+        for gx, gy, _kind, _name, pid in OM.landmarks():
+            if not pid or pid not in self._dpins or self._hidden(gx, gy):
                 continue
             cx, cy = self._cell_center(gx, gy)
             # round, not square (user call 2026-09-06)
@@ -3410,7 +3538,9 @@ class _OwMapView(Widget):
         hunts = self._squares.get("hunts") or {}
         placed = []          # occupied rects, labels avoid them
         labels = []          # (cx, cy, half-size, text, tint)
-        for gx, gy, kind, name, pid in OWD.LANDMARKS:
+        for gx, gy, kind, name, pid in OM.landmarks():
+            if self._hidden(gx, gy):
+                continue
             cx, cy = self._cell_center(gx, gy)
             st = pins_state.get(pid) if (pid and name) else None
             if st is not None:
@@ -3428,7 +3558,8 @@ class _OwMapView(Widget):
             if name and names_on:
                 labels.append((cx, cy, r, name, (1, 1, 1, 1)))
         self._hg_rects = {}
-        for skey, (gx, gy) in OWD.HUNTING_SQUARES.items():
+        # the hunting-ground squares sit on vanilla geography
+        for skey, (gx, gy) in (() if OM.is_random() else OWD.HUNTING_SQUARES.items()):
             st = hunts.get(skey)
             if st is None:
                 continue

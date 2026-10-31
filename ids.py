@@ -214,6 +214,10 @@ WORLD_LUFENIAN_BRIDGE = 0
 WORLD_LUFENIAN_NITRO  = 1
 WORLD_GAIAN_NITRO     = 2
 WORLD_MOUNT_GULG_KEY  = 3
+# 4.. : the random map's Nitro doors, one per randworld.names.NITRO_ITEM_VARIANTS
+# entry in its frozen order. The client maps them to gate bits through
+# slot_data (randworld world gates: item_id + mask), never by ordinal.
+WORLD_NITRO_VARIANT_BASE = 4
 def world_item_id(n):            return BASE + WORLD_OFF + n
 def is_world_item(iid):          return BASE + WORLD_OFF <= iid < BASE + WORLD_OFF + 0x100
 

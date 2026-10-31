@@ -40,6 +40,10 @@ IS_LINUX = sys.platform.startswith("linux")
 
 _NO_WINDOW = 0x08000000 if IS_WINDOWS else 0        # CREATE_NO_WINDOW
 
+# Console tools' output codepage (see run_text). The "oem" codec only exists on
+# Windows, so this keys off the real OS, not the IS_WINDOWS tests patch.
+_CONSOLE_CP = "oem" if os.name == "nt" else "utf-8"
+
 # Windows image names (tasklist / taskkill).
 WIN_IMAGES = ("PPSSPPWindows64.exe", "PPSSPPWindows.exe")
 
@@ -301,36 +305,56 @@ def _linux_process_table():
 
 
 # ------------------------------------------------------------- Windows I/O ---
+def run_text(args, timeout):
+    """stdout of a console tool as str, "" on any failure. NEVER text=True.
+
+    Non-English Windows (live bundle 2026-10-29, player "Blue": tasklist
+    printed "90.184 K") writes tasklist/netstat in the OEM codepage. text=True
+    decodes with the ANSI one (cp1252), the first non-ASCII byte (0x81 = 'u
+    umlaut' in cp437/850) kills subprocess's reader thread, .stdout comes back
+    None, and every caller silently saw "no PPSSPP port" -- the client waited
+    for the debugger forever. The parsers only need ASCII digits, addresses
+    and image names, so decode lossily: a mangled header word is harmless."""
+    try:
+        raw = subprocess.run(args, capture_output=True, timeout=timeout,
+                             creationflags=_NO_WINDOW).stdout
+    except Exception:
+        return ""
+    return (raw or b"").decode(_CONSOLE_CP, "replace")
+
+
 def _win_ppsspp_pids():
     pids = []
     for exe in WIN_IMAGES:
-        try:
-            out = subprocess.run(
-                ["tasklist", "/FI", f"IMAGENAME eq {exe}", "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=3,
-                creationflags=_NO_WINDOW).stdout
-            pids += [int(p) for p in re.findall(r'^"[^"]+","(\d+)"', out, re.M)]
-        except Exception:
-            pass
+        out = run_text(
+            ["tasklist", "/FI", f"IMAGENAME eq {exe}", "/FO", "CSV", "/NH"], 3)
+        pids += [int(p) for p in re.findall(r'^"[^"]+","(\d+)"', out, re.M)]
     return pids
 
 
-def _win_netstat_listeners():
-    """[(local_addr, port, pid_str)] from `netstat -ano -p TCP` LISTENING rows."""
+def parse_netstat_listeners(ns):
+    """[(local_addr, port, pid_str)] for the LISTEN rows of `netstat -ano`.
+
+    Locale-neutral: the State column is translated (German "ABHÖREN", ...) and
+    may even hold a space, so it is never compared. A TCP LISTEN row is the
+    only kind whose FOREIGN address has port 0 ("0.0.0.0:0" / "[::]:0");
+    proto, local and foreign are the first three columns and the PID the last
+    in every language."""
     rows = []
-    try:
-        ns = subprocess.run(["netstat", "-ano", "-p", "TCP"],
-                            capture_output=True, text=True, timeout=5,
-                            creationflags=_NO_WINDOW).stdout
-    except Exception:
-        return rows
     for ln in (ns or "").splitlines():
         parts = ln.split()
-        if len(parts) >= 5 and parts[3] == "LISTENING":
-            m = re.search(r":(\d+)$", parts[1])
-            if m:
-                rows.append((parts[1], int(m.group(1)), parts[4]))
+        if (len(parts) < 4 or not parts[0].upper().startswith("TCP")
+                or not parts[-1].isdigit() or not parts[2].endswith(":0")):
+            continue
+        m = re.search(r":(\d+)$", parts[1])
+        if m:
+            rows.append((parts[1], int(m.group(1)), parts[-1]))
     return rows
+
+
+def _win_netstat_listeners():
+    """[(local_addr, port, pid_str)] from `netstat -ano -p TCP` LISTEN rows."""
+    return parse_netstat_listeners(run_text(["netstat", "-ano", "-p", "TCP"], 5))
 
 
 def _win_listening_ports(pids):
@@ -347,15 +371,9 @@ def _win_port_owners(port):
               if p == int(port)]
     if not owners:
         return []
-    names = {}
-    try:
-        out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
-                             capture_output=True, text=True, timeout=5,
-                             creationflags=_NO_WINDOW).stdout
-        names = dict((pid, img) for img, pid in
-                     re.findall(r'^"([^"]+)","(\d+)"', out or "", re.M))
-    except Exception:
-        pass
+    out = run_text(["tasklist", "/FO", "CSV", "/NH"], 5)
+    names = dict((pid, img) for img, pid in
+                 re.findall(r'^"([^"]+)","(\d+)"', out, re.M))
     return [(pid, names.get(pid, "?"), addr) for addr, pid in owners]
 
 

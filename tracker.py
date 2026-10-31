@@ -91,6 +91,9 @@ REGION_AREAS = [
     ("chaos_shrine",              "Chaos Shrine F1",           "cornelia"),
     ("castle_cornelia_1f",        "Castle Cornelia",           "cornelia"),
     ("matoyas_cave",              "Matoya's Cave",             "cornelia"),
+    # Pravoka town: no chests (the tile stays EMPTY); it gives Bikke's NPC tile
+    # its section and his check its own site on a random overworld.
+    ("pravoka_town",              "Pravoka",                   "cornelia"),
     # Mount Duergar = the Dwarf Cave (Nerrick opens the canal, Smith forges
     # Excalibur). Reachable from the starting continent on foot with the extended
     # open-progression trail; its 8 Mystic-Key chests split off to a Mystic Key
@@ -127,6 +130,9 @@ REGION_AREAS = [
     ("cavern_of_ice_b1_backdoor", "Cavern of Ice Backdoor",    "fire"),
     ("cavern_of_ice_b2_room",     "Cavern of Ice",             "fire"),
     ("cavern_of_ice_b3_treasury", "Cavern of Ice Treasury",    "fire"),
+    # The desert the airship rises from: home of the Airship EVENT only, so
+    # the tile stays EMPTY.
+    ("airship_desert",            "Ryukhan Desert",            "fire"),
     # --- Water Crystal: Onrac, Caravan, Waterfall, Sunken Shrine ----------
     ("onrac_hub",                 "Onrac",                     "water"),
     ("onrac_caravan",             "Onrac Caravan",             "water"),
@@ -147,7 +153,7 @@ REGION_AREAS = [
     # dungeon progress -- they read as lategame errands, so they tile there.
     ("lefein",                    "Lefein",                    "lategame"),
     ("gaia",                      "Gaia",                      "lategame"),
-    ("dragon_caves_plains",       "Dragon Caves",              "lategame"),
+    ("dragon_caves_plains",       "Dragon Caves Plains",       "lategame"),
     ("dragon_caves_forest",       "Dragon Caves Forest",       "lategame"),
     ("dragon_caves_marsh",        "Dragon Caves Marsh",        "lategame"),
     ("citadel_of_trials_2f",      "Citadel of Trials",         "lategame"),
@@ -201,6 +207,17 @@ SHOP_TOWNS = [
     # its sub-tab shows magic only.
     (7, "Lufenia",       []),
 ]
+
+# city id -> overworld site (a tiny / small random world may leave Lufenia out)
+SHOP_TOWN_SITE = {0: "cornelia", 1: "pravoka", 2: "elfheim", 3: "melmond",
+                  4: "crescent", 5: "onrac", 6: "gaia", 7: "lufenia"}
+
+
+def skipped_sites(slot_data):
+    """Overworld sites a tiny / small random world left out (map_size)."""
+    rw = (slot_data or {}).get("randworld") or {}
+    return frozenset((rw.get("skipped") or {}).get("sites", ()))
+
 
 # Shops sub-tab color per town: each town borrows the tracker section color of the
 # part of the game it belongs to, so the two tabs read as one palette. Cornelia
@@ -531,16 +548,41 @@ WORLD_GATE_ITEMS = {
 STRIP_ITEMS = POOL_GATE_ITEMS + EARNED_GATE_ITEMS
 
 
+def nitro_label(name):
+    """Chip label of a random map's gate item ("Cavern of Ice Nitro" ->
+    "ICE NITRO", "Gaia Nitro (West)" -> "GAIA NITRO W", "Pravoka Bridge" ->
+    "PRAVOKA BRIDGE")."""
+    base, _, side = name.partition(" (")
+    kind = "BRIDGE" if base.endswith(" Bridge") else "NITRO"
+    for tail in (" Nitro", " Bridge"):
+        base = base[:-len(tail)] if base.endswith(tail) else base
+    word = base.split(" of ")[-1] if " of " in base else base.split()[-1 if base.startswith("Mount ") else 0]
+    word = word.replace("'s", "").upper()
+    side = side.rstrip(")")
+    abbr = "".join(p[0] for p in side.replace("east", " east").replace("west", " west").split()).upper()
+    return f"{word} {kind}" + (f" {abbr}" if side else "")
+
+
 def strip_items(slot_data=None):
-    """STRIP_ITEMS plus whichever world-changing chips this seed enabled."""
+    """STRIP_ITEMS plus whichever world-changing chips this seed enabled. A
+    random map names its gate items itself (slot_data randworld world)."""
     sd = slot_data or {}
     extra = []
+    # a tiny / small world leaves out the key items it has no use for
+    dead = set(sd.get("dead_items") or ())
+    pool = [r for r in POOL_GATE_ITEMS if r[0] not in dead]
+    rw_gates = [g for g in ((sd.get("randworld") or {}).get("world") or {}).get("gates") or ()
+                if g.get("name") != "canal" and g.get("item")]
+    short = {LOGIC.MOUNT_GULG_KEY: "GULG KEY"}
+    if rw_gates:
+        extra = [(g["item"], short.get(g["item"]) or nitro_label(g["item"])) for g in rw_gates]
+        return pool + extra + EARNED_GATE_ITEMS
     for key, rows in WORLD_GATE_ITEMS.items():
         if sd.get(key):
             extra += rows
-    if not extra:
+    if not extra and not dead:
         return list(STRIP_ITEMS)
-    return POOL_GATE_ITEMS + extra + EARNED_GATE_ITEMS
+    return pool + extra + EARNED_GATE_ITEMS
 
 # Long token name -> the short label used on tiles' "needs:" line. Kept COMPLETE
 # (every gate, including the ones the strip hides) so a dim tile's "needs: CANAL"
@@ -548,6 +590,8 @@ def strip_items(slot_data=None):
 SHORT_TOKEN = {n: s for n, s in POOL_GATE_ITEMS}
 for _rows in WORLD_GATE_ITEMS.values():
     SHORT_TOKEN.update(dict(_rows))
+from .randworld.names import GATE_ITEM_VARIANTS as _GATES       # noqa: E402
+SHORT_TOKEN.update({_n: nitro_label(_n) for _n in _GATES})
 SHORT_TOKEN.update({
     LOGIC.CANAL: "CANAL", LOGIC.AIRSHIP: "AIRSHIP",
     LOGIC.GARLAND_DEFEATED: "GARLAND", LOGIC.VAMPIRE_DEFEATED: "VAMPIRE",
@@ -594,8 +638,23 @@ def _reachable(alts, extra, owned):
     return not unmet(alts, extra, owned)
 
 
+_VANILLA_BONUS = {}
+
+
+def _bonus_alts(dg, sites, early):
+    """A bonus dungeon's entrance alternatives (its site's rule; the seal is
+    the caller's). sites=None: the vanilla rule for this `early` (callers
+    that predate the site provider)."""
+    if sites is None:
+        sites = _VANILLA_BONUS.get(bool(early))
+        if sites is None:
+            sites = _VANILLA_BONUS[bool(early)] = LOGIC.vanilla_site_rules(
+                bool(early), False)
+    return LOGIC.bonus_entrance_rule(sites, dg)
+
+
 def resolve_tokens(owned_names, region_rules, forbid=(), crystals_needed=4,
-                   bonus_crystals=False, early=False, party_cap=0):
+                   bonus_crystals=False, early=False, party_cap=0, sites=None):
     """Run the EVENTS fixpoint: grant each event's token once its region rule and
     extra reqs are satisfied, repeating until stable. Returns a NEW set of every
     item name plus every derived gate token.
@@ -650,18 +709,13 @@ def resolve_tokens(owned_names, region_rules, forbid=(), crystals_needed=4,
             for dg, _nm, _fl, _cap, crystal, _a in LOGIC.BONUS_DUNGEONS:
                 if crystal in tokens or crystal in banned:
                     continue
-                extra = ([LOGIC.FIEND_TOKEN[crystal]]
-                         + list(LOGIC.DLC_DUNGEON_EXTRA_TOKENS.get(dg, [])))
+                extra = [LOGIC.FIEND_TOKEN[crystal]]
                 # The "Cleared" event stands in for the Fiend it replaces, so it
                 # inherits that Fiend's party gate (set_rules' _clear_locs loop).
                 _pn = LOGIC.PARTY_GATE_CLEAR_DG.get(dg)
                 if _pn is not None and _pn <= party_cap:
                     extra.append(LOGIC.PARTY_TOKENS[_pn])
-                if dg == 3:
-                    alts = [[]] if early else [list(LOGIC.WHISPERWIND_SHIP_CANAL_ALT)]
-                else:
-                    alts = [[]]
-                if _reachable(alts, extra, tokens):
+                if _reachable(_bonus_alts(dg, sites, early), extra, tokens):
                     tokens.add(crystal)
                     changed = True
     return tokens
@@ -689,7 +743,7 @@ _BONUS_BY_DG = {dg: (nm, tok) for dg, nm, _fl, _cap, tok, _a
 
 
 def classify(lid, region_rules, shop_overrides, early, bonus_crystals=False,
-             party_cap=0):
+             party_cap=0, sites=None, randworld=False, skip_lute=False):
     """location id -> (area_key, alts, extra) or None if the id isn't ours.
 
     Mirrors the four rule-application loops in __init__.set_rules exactly: chests
@@ -716,14 +770,9 @@ def classify(lid, region_rules, shop_overrides, early, bonus_crystals=False,
         # crystal (which they help produce) -- mirrors set_rules' dungeon_gate.
         if bonus_crystals:
             gate_tok = LOGIC.FIEND_TOKEN[gate_tok]
-        extra = [gate_tok] + list(LOGIC.DLC_DUNGEON_EXTRA_TOKENS.get(dg, []))
-        if dg == 3:
-            # Whisperwind Cove also needs Ice Cave access: the early-progression
-            # canoe river (free) OR Ship + Nitro Powder.
-            alts = [[]] if early else [list(LOGIC.WHISPERWIND_SHIP_CANAL_ALT)]
-        else:
-            alts = [[]]
-        return bonus_area_key(dg), alts, extra
+        # the dungeon's entrance = its site's rule (vanilla: the entrance
+        # vehicles + Whisperwind's Ice Cave access; random worlds: the graph)
+        return bonus_area_key(dg), _bonus_alts(dg, sites, early), [gate_tok]
 
     if _is_npc_loc(lid):
         ordinal = lid - ID.BASE - ID.NPC_OFF
@@ -739,7 +788,10 @@ def classify(lid, region_rules, shop_overrides, early, bonus_crystals=False,
         # (an AND on top of every alternative), so no bypass skips it.
         _pn = LOGIC.PARTY_GATE_NPC.get(_nm)
         return (npc_area_key(ordinal),
-                LOGIC.npc_rule_alts(ordinal, region_rules.get(region, []), extra),
+                LOGIC.npc_rule_alts(ordinal,
+                                    region_rules.get(LOGIC.npc_region(
+                                        ordinal, region, skip_lute=skip_lute), []),
+                                    extra, randworld=randworld),
                 [] if _pn is None or _pn > party_cap
                 else [LOGIC.PARTY_TOKENS[_pn]])
 
@@ -753,11 +805,8 @@ def classify(lid, region_rules, shop_overrides, early, bonus_crystals=False,
             _nm, gate_tok = _BONUS_BY_DG[_dg]
             if bonus_crystals:
                 gate_tok = LOGIC.FIEND_TOKEN[gate_tok]
-            extra = [gate_tok] + list(LOGIC.DLC_DUNGEON_EXTRA_TOKENS.get(_dg, []))
-            if _dg == 3:
-                alts = [[]] if early else [list(LOGIC.WHISPERWIND_SHIP_CANAL_ALT)]
-            else:
-                alts = [[]]
+            extra = [gate_tok]
+            alts = _bonus_alts(_dg, sites, early)
             # starting_party_members: the boss-chamber chest also needs a party
             # big enough to beat its superboss (logic.PARTY_GATE_STATIC_DG).
             _pn = LOGIC.PARTY_GATE_STATIC_DG.get(_dg)
@@ -881,6 +930,16 @@ class TrackerState:
                 t += a.total
         return f, t
 
+    def section_shown(self, section):
+        """Does the section's sub-tab belong in the strip? Summary always; any
+        other only once the seed put a location there. A seed's pool never
+        changes, so a tab that leaves never comes back mid-game (a tiny world
+        with no Fiend dungeons there drops Earth, a seed with no shop offers
+        drops Shops). Before the pool is known (pool_total 0) every tab stays."""
+        if section == SUMMARY or not self.pool_total:
+            return True
+        return self.section_rollup(section)[1] > 0
+
     def section_in_logic(self, section):
         """True if any area in the section has reachable checks left -- drives the
         sub-tab's in-logic shine (e.g. Water shines while Sunken Shrine is open)."""
@@ -911,7 +970,7 @@ STRIP_GATES = [n for n, _s in STRIP_ITEMS] + [
 
 
 def _unused_gates(st, locs, region_rules, crystals_needed=4,
-                  bonus_crystals=False, early=False, party_cap=0):
+                  bonus_crystals=False, early=False, party_cap=0, sites=None):
     """Which held gates the player has not cashed in yet.
 
     "Used" is defined by counterfactual rather than by a hand-written table of
@@ -933,7 +992,7 @@ def _unused_gates(st, locs, region_rules, crystals_needed=4,
         without = resolve_tokens(st.owned - {name}, region_rules, forbid=(name,),
                                  crystals_needed=crystals_needed,
                                  bonus_crystals=bonus_crystals, early=early,
-                                 party_cap=party_cap)
+                                 party_cap=party_cap, sites=sites)
         deps = found = 0
         for _lid, alts, extra, checked in locs:
             if unmet(alts, extra, st.tokens):
@@ -996,15 +1055,13 @@ def evaluate(item_names, pool_loc_ids, checked_loc_ids, slot_data=None,
     """
     sd = slot_data or {}
     early = bool(sd.get("early_open_progression"))
-    extended = bool(sd.get("extended_open_progression"))
-    docks = bool(sd.get("northern_docks"))
-    trails = bool(sd.get("northern_foot_trails"))
-    gulg_key = bool(sd.get("mount_gulg_key"))
 
-    region_rules = LOGIC.region_rules_for(early, extended, docks,
-                                          trails, gulg_key)
-    shop_overrides = LOGIC.shop_rules_for(early, extended, docks,
-                                          trails, gulg_key)
+    # the seed's site provider (logic.site_rules_for_slot = __init__._site_rules):
+    # a random overworld ships its own rules and no yaml option adds anything
+    sites = LOGIC.site_rules_for_slot(sd)
+    randworld = bool(sd.get("randworld"))
+    region_rules = LOGIC.region_rules_from_sites(sites)
+    shop_overrides = LOGIC.shop_rules_from_sites(sites)
 
     st = TrackerState()
     st.strip_rows = strip_items(sd)
@@ -1056,7 +1113,7 @@ def evaluate(item_names, pool_loc_ids, checked_loc_ids, slot_data=None,
     st.tokens = resolve_tokens(st.owned, region_rules,
                                crystals_needed=crystals_needed,
                                bonus_crystals=bonus_crystals, early=early,
-                               party_cap=party_cap)
+                               party_cap=party_cap, sites=sites)
     # Endgame gate progress for the strip's totals line. Beaten count (game
     # truth) when the client has one; fixpoint (reachable) only as the
     # no-game-attached fallback.
@@ -1091,9 +1148,13 @@ def evaluate(item_names, pool_loc_ids, checked_loc_ids, slot_data=None,
     best_needs = {}
     locs = []      # (lid, alts, extra, checked) -- reused by _unused_gates
 
+    # skip_lute_cutscene as baked (always on in new seeds; pre-v344 seeds lack
+    # the key): the Princess check reads Chaos Shrine's rule.
+    skip_lute = bool((sd.get("on_disc") or {}).get("skip_lute_cutscene")) or randworld
     for lid in pool_loc_ids:
         info = classify(lid, region_rules, shop_overrides, early, bonus_crystals,
-                        party_cap=party_cap)
+                        party_cap=party_cap, sites=sites, randworld=randworld,
+                        skip_lute=skip_lute)
         if info is None:
             continue
         area_key, alts, extra = info
@@ -1135,7 +1196,7 @@ def evaluate(item_names, pool_loc_ids, checked_loc_ids, slot_data=None,
     st.unused = _unused_gates(st, locs, region_rules,
                               crystals_needed=crystals_needed,
                               bonus_crystals=bonus_crystals, early=early,
-                              party_cap=party_cap)
+                              party_cap=party_cap, sites=sites)
     return st
 
 
@@ -1175,7 +1236,7 @@ BESTIARY_COLOR_UNLOCK = 0.5
 # floors, then open-world surfaces, then water, then bonus content.
 _BESTIARY_KIND_ORDER = {
     "scripted": 0, "dlc_boss": 0,
-    "cave": 2, "hd": 2, "cf": 2, "ff": 2, "tile": 2,
+    "cave": 2, "hd": 2, "cf": 2, "cfs": 2, "ff": 2, "tile": 2,
     "ow": 3, "ow_harder": 3, "forest": 4, "forest_harder": 4,
     "desert": 5, "desert_harder": 5, "t4": 6, "t4_harder": 6,
     "ocean": 7, "oc": 7, "river": 8, "rr": 8,
@@ -1247,14 +1308,40 @@ def _bestiary_minion_places(minion_plan, opts):
     return out
 
 
+def _is_territory(src):
+    """A random overworld's land heading: (kind, hub key), e.g. ("t4",
+    "wkeep") -- logic.randworld_land_sources. The baked tables key land by
+    (tier, node) tuples, so a string key is always a territory."""
+    return src[0] in LOGIC.RWT.LAND_KINDS and isinstance(src[1], str)
+
+
+def _bestiary_source_section(src):
+    if _is_territory(src):
+        return LOGIC.RWT.HUB_SECTION.get(src[1])
+    return LOGIC.BESTIARY_SOURCE_SECTION.get(src)
+
+
 def _bestiary_source_label(src, opts):
     """Baked label, except where it depends on the seed's options: with
     regional_ocean off there is only ONE sea, so the vanilla pool is plain
     "Ocean" rather than "Starting Ocean"."""
+    if _is_territory(src):
+        return LOGIC.RWT.heading_label(src[0], src[1])
     label = LOGIC.SOURCE_LABELS.get(src, f"{src[0]}:{src[1]}")
     if src[0] == "ocean" and not opts.get("ocean"):
         return "Ocean"
+    # a tiny random world: every outer quadrant rolls this one pool
+    if src[0] == "oc" and (opts.get("randworld") or {}).get("ocean_outer_pool") == src[1]:
+        return "Outer Ocean"
     return label
+
+
+def bestiary_section_shown(payload, skey):
+    """Does a Bestiary section tab belong in the strip? Only when the seed
+    filed a monster check there: the sample is fixed for the seed, so a tab
+    that never held anything (a tiny world's merged or skipped hunting
+    grounds) leaves for good, while a cleared one stays, greyed."""
+    return ((payload or {}).get("strip") or {}).get(skey, {}).get("total", 0) > 0
 
 
 def _bestiary_unlock_at(total):
@@ -1372,7 +1459,7 @@ def _bestiary_source_open(src, mon, opts, tokens, party_cap):
 def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
                   tokens=None, party_cap=0, ow_sources=None,
                   cave_sources=None, odds=None, ow_zones=None,
-                  zone_rows=None):
+                  zone_rows=None, source_rows=None):
     """Payload for the Bestiary tab.
 
     bst           -- slot_data "bestiary" dict (None/falsy = off)
@@ -1408,6 +1495,10 @@ def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
     zone_rows     -- logic.overworld_zone_rows(): {zone: [{"mon", "name",
                      "pct"}]}, what a single zone rolls, for the Map tab's
                      "You are in" line.
+    source_rows   -- random overworld only: logic.randworld_source_rows(),
+                     {(kind, hub): rows}. A territory rolls one row on every
+                     cell, so this replaces zone_rows there (ow_zones and
+                     zone_rows describe vanilla 32x32 zones and stay empty).
 
     Returns {"enabled", "done", "total", "progression_on", "sections": [...]},
     each section {"key", "display", "rgb", "dark_text", "remaining", "groups":
@@ -1421,7 +1512,7 @@ def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
     if not bst:
         return {"enabled": False, "done": 0, "total": 0,
                 "progression_on": False, "sections": [], "strip": {},
-                "ow_zones": {}, "zone_rows": {}}
+                "ow_zones": {}, "zone_rows": {}, "source_rows": {}}
     opts = dict(bst.get("opts") or {})
     monsters = [int(m) for m in (bst.get("monsters") or [])]
     checked = {int(m) for m in checked_mons}
@@ -1464,11 +1555,15 @@ def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
         no_prog[mon] = not prog_ok
         for kind, key in _bestiary_display_sources(mon, opts, ow_sources,
                                                    cave_sources):
-            section = LOGIC.BESTIARY_SOURCE_SECTION.get((kind, key))
+            section = _bestiary_source_section((kind, key))
             if section is None:
                 continue
-            order = (_BESTIARY_KIND_ORDER.get(kind, 50),
-                     key if isinstance(key, (int, float)) else str(key))
+            if _is_territory((kind, key)):
+                # hub order (Cornelia first), not the hub key's spelling
+                okey = f"{LOGIC.RWT.HUB_INDEX.get(key, 99):02d}"
+            else:
+                okey = key if isinstance(key, (int, float)) else str(key)
+            order = (_BESTIARY_KIND_ORDER.get(kind, 50), okey)
             place = (section, order, _bestiary_source_label((kind, key), opts))
             places.append(place)
             place_src.setdefault(place, (kind, key))
@@ -1683,6 +1778,7 @@ def bestiary_view(bst, minion_plan, killed_mons, checked_mons, flags_by_mon,
         # several 32x32 encounter zones with different rows.
         "ow_zones": {int(m): sorted(z) for m, z in (ow_zones or {}).items()},
         "zone_rows": {int(z): list(r) for z, r in (zone_rows or {}).items()},
+        "source_rows": {tuple(k): list(r) for k, r in (source_rows or {}).items()},
     }
 
 

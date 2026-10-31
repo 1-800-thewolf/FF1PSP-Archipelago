@@ -705,6 +705,65 @@ class OpenProgression(Choice):
     default = 1
 
 
+class RandomMap(Choice):
+    """🗺️ EXPERIMENTAL: generate a brand-new overworld for this seed. Every
+    town, castle and cave moves; logic follows the generated map.
+
+      off            -- the vanilla map
+      two_continents -- a few big continents, like the original
+      archipelago    -- many islands
+      one_continent  -- one huge landmass split by mountains and rivers
+
+    On a generated map, Open Progression and Northern Docks steer the map
+    maker (more trails / rivers, more docks) instead of adding the vanilla
+    trails and docks; Unlockable Northern Foot Trails and Mount Gulg Key
+    become gates the map maker places. The ship and the airship start where
+    they always do.
+    """
+    internal_name = "random_map"
+    display_name = "Random Map"
+    option_off = 0
+    option_two_continents = 1
+    option_archipelago = 2
+    option_one_continent = 3
+    default = 0
+
+
+class MapSize(Choice):
+    """📏 Random Map only: how big the generated world is.
+
+      tiny   -- about a third of the game's checks: only some dungeons
+                exist (at least one Fiend's), less land, smaller shops
+      small  -- about two thirds of the checks, a little less land
+      normal -- every dungeon, the usual amount of land
+      huge   -- every dungeon on about half again as much land, spread
+                further apart
+
+    Which dungeons a tiny or small world keeps is rolled per seed. Towns
+    are never left out, and the Ship, Canoe and Airship are always in the
+    game. A skipped Fiend lowers Crystals Needed to the Fiends that
+    remain, and its bonus dungeon is skipped with it. No effect on the
+    vanilla map.
+    """
+    internal_name = "map_size"
+    display_name = "Map Size"
+    option_tiny = 0
+    option_small = 1
+    option_normal = 2
+    option_huge = 3
+    default = 2
+
+
+class FogOfWar(Toggle):
+    """🌫️ Random Map only: the world map starts hidden and is revealed as
+    you explore -- both the in-game menu map and the client's Map tab.
+    Explored areas are remembered on the server across sessions.
+    No effect on the vanilla map.
+    """
+    internal_name = "fog_of_war"
+    display_name = "Fog of War"
+
+
 class NorthernDocks(DefaultOnToggle):
     """⚓ Adds two ship docks to the northern continents: one south of Onrac,
     one south of the Mirage Tower desert. Much more of the map becomes
@@ -717,10 +776,15 @@ class NorthernDocks(DefaultOnToggle):
 
 
 class UnlockableNorthernFootTrails(Toggle):
-    """🌉 Adds three AP items that reshape the northern map. 
+    """🌉 Adds three AP items that reshape the northern map.
       • Lufenian Bridge: bridges Pravoka to the Lufenian landmass
       • Lufenian Nitro Powder: blasts the boulder between Lufenia and Gaia
       • Gaian Nitro Powder: blasts the boulder between Gaia and Mirage Desert
+
+    On a Random Map the map maker places these gates itself: the bridge
+    leads to Lufenia, and each Nitro Powder is named after the place its
+    boulder walls in (e.g. "Cavern of Ice Nitro"). Where the land beyond a
+    gate has no grass, the airship cannot land there either.
     """
     internal_name = "unlockable_northern_foot_trails"
     display_name = "Unlockable Northern Foot Trails"
@@ -728,6 +792,7 @@ class UnlockableNorthernFootTrails(Toggle):
 
 class MountGulgKey(Toggle):
     """🌋 Seals Mount Gulg's entrance until you find the Mount Gulg Key.
+    Works on a Random Map too: the seal goes wherever Mount Gulg lands.
     """
     internal_name = "mount_gulg_key"
     display_name = "Mount Gulg Key"
@@ -1075,6 +1140,15 @@ class CrystalsNeeded(Range):
     default = 4
 
 
+class ShortenedTempleOfFiends(Toggle):
+    """👑 Shortens the last dungeon. Touching the Black Orb takes you straight
+    to the room where the Lute is played, and playing the Lute opens stairs
+    straight to Chaos' floor. The floors in between are skipped, along with
+    their 5 chests and the four Fiend rematches."""
+    internal_name = "shortened_temple_of_fiends"
+    display_name = "Shortened Temple of Fiends"
+
+
 class BonusDungeonCrystals(Toggle):
     """💠 Move crystal activation from the four Fiends to the Soul of Chaos bonus
     dungeons. When ON, defeating a Fiend still opens its bonus dungeon, but the
@@ -1284,6 +1358,9 @@ ON_DISC_OPTIONS = {
     # until 2026-08-12. Both legacy feature keys are still honored by
     # iso_patcher.FEATURES so already-generated seeds bake unchanged.
     "loot_in_normally_empty_chests": LootInNormallyEmptyChests,
+    # Black Orb -> Lute room -> Chaos' floor (four exit-table entries). Off =
+    # vanilla exits; world._removed_chest_idx drops the Basement chests when on.
+    "shortened_temple_of_fiends": ShortenedTempleOfFiends,
 }
 # On-disc features that are ALWAYS baked (not yaml-controlled).
 # shop_spell_level: magic shops always honor a spell's (possibly shuffled)
@@ -1312,6 +1389,10 @@ ON_DISC_OPTIONS = {
 # prince_gate_split: repoints the Elf Prince quest chain off the Mystic Key
 # function bit (story flag 9) onto shadow flag 69, so an AP-granted key can
 # never kill the quest and the client never has to hold the door bit clear.
+# The same site table also splits the Crescent Lake sage (flag 18 -> 81) and,
+# since v353, Astos (flag 7 -> 67: a won Crystal Eye no longer empties the
+# Western Keep throne) and, since v363, the Gaia fairy (flag 26 -> 80: a won
+# Oxyale no longer turns her into her post-gift line).
 # The Mystic Key is always a randomized AP item -> unconditional, no toggle.
 ON_DISC_ALWAYS = ("shop_spell_level", "bikke_ship_split",
                   "giant_cave_gate", "mystic_door_gate", "prince_gate_split",
@@ -1363,13 +1444,14 @@ ff1psp_option_groups = [
     OptionGroup("Goal", [
         CrystalsNeeded, BonusDungeonCrystals,
         LuteTabletsRequired, LuteTabletsPercentage, LuteTabletsExtra,
+        ShortenedTempleOfFiends,
     ]),
     OptionGroup("Scale", [
         EncounterRate, XPBoostPercentage, GilBoostPercentage,
         MonsterPowerPercentage, BossDifficultyPercentage,
     ]),
     OptionGroup("World", [
-        OpenProgression, NorthernDocks,
+        RandomMap, MapSize, FogOfWar, OpenProgression, NorthernDocks,
         UnlockableNorthernFootTrails, MountGulgKey,
         LevistoneShardsRequired, LevistoneShardsPercentage, LevistoneShardsExtra,
         LootInNormallyEmptyChests,
@@ -1488,6 +1570,9 @@ class FF1PSPOptions(PerGameCommonOptions):
     priceless_loot_amount: PricelessLootAmount
     only_advanced_jobs_equip_priceless_gear: OnlyAdvancedJobsEquipPricelessGear
     auto_sell_unusable_items: AutoSellUnusableItems
+    random_map: RandomMap
+    map_size: MapSize
+    fog_of_war: FogOfWar
     open_progression: OpenProgression
     northern_docks: NorthernDocks
     unlockable_northern_foot_trails: UnlockableNorthernFootTrails
@@ -1503,6 +1588,7 @@ class FF1PSPOptions(PerGameCommonOptions):
     lute_tablets_required: LuteTabletsRequired
     lute_tablets_percentage: LuteTabletsPercentage
     lute_tablets_extra: LuteTabletsExtra
+    shortened_temple_of_fiends: ShortenedTempleOfFiends
     levistone_shards_required: LevistoneShardsRequired
     levistone_shards_percentage: LevistoneShardsPercentage
     levistone_shards_extra: LevistoneShardsExtra

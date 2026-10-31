@@ -118,7 +118,7 @@ SHORT_NAME = {
     "Sunken Shrine Depths":           "SunkDepths",
     "Mirage Tower":                   "Mirage",
     "Flying Fortress":                "Fortress",
-    "Dragon Caves":                   "DragonCave",
+    "Dragon Caves Plains":            "DragonPlains",
     "Dragon Caves Forest":            "DragonForest",
     "Dragon Caves Marsh":             "DragonMarsh",
     "Citadel of Trials":              "Citadel",

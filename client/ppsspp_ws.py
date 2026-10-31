@@ -15,6 +15,7 @@ import asyncio
 import base64
 import collections
 import json
+import logging
 import time
 
 import requests
@@ -37,6 +38,17 @@ LOCAL_HINT = ("127.0.0.1", 8765)
 _PORTS_CACHE = (0.0, [])
 _PORTS_TTL = 3.0
 
+dlog = logging.getLogger("FF1PSP")
+
+# PPSSPP is running yet none of its LISTEN sockets were found: port discovery
+# itself is broken on this host (2026-10-29: localized netstat decoded to
+# nothing), and the debugger wait would otherwise spin silently. Said ONCE, and
+# only after the state outlives a disc boot (the webserver binds a few seconds
+# after the process appears).
+_NO_PORT_WARNED = False
+_NO_PORT_SINCE = None
+_NO_PORT_GRACE_S = 20.0
+
 # (ip, port) of the most recent SUCCESSFUL dial (any caller: launcher probe or
 # client sockets). Tried first on the next connect() so the three client
 # sockets and every reconnect skip straight to the port that actually works --
@@ -52,14 +64,24 @@ def local_ports():
     ephemeral port at boot -- RemoteISOPort in ppsspp.ini is NOT honored -- so
     dialing the pinned LOCAL_HINT alone times out forever. This finds the real
     port purely locally; the match-server discover() stays as a last resort."""
-    global _PORTS_CACHE
+    global _PORTS_CACHE, _NO_PORT_WARNED, _NO_PORT_SINCE
     now = time.monotonic()
     if now - _PORTS_CACHE[0] < _PORTS_TTL:
         return _PORTS_CACHE[1]
     try:
-        ports = hostproc.listening_ports()
+        pids = hostproc.ppsspp_pids()
+        ports = hostproc.listening_ports(pids) if pids else []
     except Exception:
-        ports = []
+        pids, ports = [], []
+    if not pids or ports:
+        _NO_PORT_SINCE = None
+    elif _NO_PORT_SINCE is None:
+        _NO_PORT_SINCE = now
+    elif not _NO_PORT_WARNED and now - _NO_PORT_SINCE >= _NO_PORT_GRACE_S:
+        _NO_PORT_WARNED = True
+        dlog.warning("  [ports] PPSSPP is running (pid %s) but none of its "
+                     "listening ports were found. Falling back to the pinned "
+                     "port %d", ",".join(map(str, pids)), LOCAL_HINT[1])
     _PORTS_CACHE = (now, ports)
     return ports
 

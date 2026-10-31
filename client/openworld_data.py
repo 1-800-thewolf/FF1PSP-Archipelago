@@ -243,6 +243,53 @@ CANAL_BRIDGE_GRID_EDITS = {
     (94, 157): 369,
     (94, 158): 385,
 }
+# RANDOM OVERWORLDS (user 2026-10-16: "use my hand selected tiles used in
+# vanilla"): re_only/ow_rando/gates.py stamps the vanilla canal window
+# x92..96 y155..158 VERBATIM and by pure translation (no mirror), so the bridge
+# above is painted at the moved canal as the same three tiles, shifted by the
+# window's stamp shift (slot_data["randworld"]["stamps"]["canal"],
+# shift_cells). Same canal-open gate (CANAL_OPEN_*) as vanilla: Nerrick's
+# event sets it wherever the canal sits. The arena's vanilla ANCHOR row (y132) is not part of any stamp on
+# a generated map, so _ow_live_arena proves a moved arena by THESE window
+# tiles instead: runs no paint touches -- row y155 north of the canal (unique
+# in the vanilla grid) and row y158 either side of the bridge's foot. The
+# canal ids (y156..157) are left out: Nerrick's blast repaints them.
+CANAL_WINDOW_ANCHOR_RUNS = (
+    ((92, 155), (0x012, 0x0E1, 0x0F0, 0x0F1, 0x018)),
+    ((92, 158), (0x000, 0x032)),
+    ((95, 158), (0x020, 0x000)),
+)
+
+
+def shift_cells(cells, shift):
+    """{(x, y): v} moved by a stamp shift (dx, dy) on the 255x255 torus."""
+    dx, dy = shift
+    return {((x + dx) % GRID_W, (y + dy) % GRID_W): v
+            for (x, y), v in cells.items()}
+
+
+def anchor_checks(runs, shift=(0, 0)):
+    """[(arena byte offset, expected bytes)] for tile runs [((x, y), ids)]
+    moved by `shift` -- the form ApClient._ow_live_arena re-proves. A run the
+    shift carries across the x seam is split there (grid rows do not continue
+    across it)."""
+    dx, dy = shift
+    out = []
+    for (x0, y0), ids in runs:
+        y = (y0 + dy) % GRID_W
+        start, buf = None, []
+        for i, t in enumerate(ids):
+            x = (x0 + dx + i) % GRID_W
+            if buf and x != start + len(buf):
+                out.append((y * GRID_STRIDE + start * 2,
+                            b"".join(v.to_bytes(2, "little") for v in buf)))
+                buf = []
+            if not buf:
+                start = x
+            buf.append(t)
+        out.append((y * GRID_STRIDE + start * 2,
+                    b"".join(v.to_bytes(2, "little") for v in buf)))
+    return out
 # _SA = canonical save-block address; the live address is session-dependent, so the
 # client MUST read it through self.sa() (the save block shifts, e.g. +0x7000). Read
 # raw it is always 0x00 and the bridge is withheld forever (bug, 2026-07-29).

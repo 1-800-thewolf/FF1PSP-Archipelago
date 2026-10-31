@@ -34,8 +34,13 @@ _ISO_GLOB = "Final Fantasy*20th Anniversary*.iso"
 
 
 def _find_iso():
+    # Patched test copies sit beside the dump as "<dump> - SOME TEST.iso", and
+    # " - " sorts before ".iso" -- a plain sort picked a PATCHED ISO as the
+    # vanilla source (test_patch "found 0 boot EBOOT.BIN record", 2026-10-25).
+    # A copy's name extends the dump's, so shortest first.
     for d in _ISO_DIRS:
-        hits = sorted(glob.glob(os.path.join(d, _ISO_GLOB)))
+        hits = sorted(glob.glob(os.path.join(d, _ISO_GLOB)),
+                      key=lambda p: (len(os.path.basename(p)), p))
         if hits:
             return hits[0]
     # Nothing on disk. Hand back the historical path so "file not found" messages
@@ -70,8 +75,9 @@ def ram2file(ram):
     return SEG_FILE_OFF + (ram - VADDR)
 
 
-def _iso_find_boot_bins(f):
+def _iso_find_boot_bins(f, fname="BOOT.BIN"):
     """Every BOOT.BIN on the disc, as [(path, file_offset, size), ...].
+    `fname` picks another file name (iso_already_baked walks for EBOOT.BIN).
 
     BOOT_ISO_OFF is the offset on the ISO this project was RE'd against
     ("(USA) (En,Ja) (FW3.03)"). Nothing guarantees another dump puts the file
@@ -118,13 +124,41 @@ def _iso_find_boot_bins(f):
                 if flags & 2:
                     if depth < 4:
                         walk(elba, elen, depth + 1, f"{path}/{nm}")
-                elif nm.upper() == "BOOT.BIN":
+                elif nm.upper() == fname:
                     out.append((f"{path}/{nm}", elba * SECTOR, elen))
 
         walk(lba, size, 0, "")
     except (OSError, struct.error):
         pass
     return out
+
+
+ALREADY_BAKED_MSG = (
+    "this ISO was already patched by the randomizer (it is a patched copy, "
+    "not your original disc image), so it cannot be patched again. Pick your "
+    "original, unmodified Final Fantasy ISO instead. The client always makes "
+    "its own patched copy and never changes the file you pick.")
+
+
+def iso_already_baked(f):
+    """True if this image is one of OUR baked outputs (or any image whose game
+    EBOOT.BIN was swapped for a plaintext ELF). A retail EBOOT.BIN is always the
+    KIRK-encrypted `~PSP` container; build_iso appends the patched plaintext ELF
+    and repoints the record at it. Such an image passes the disc-id gate and
+    load_boot_elf (BOOT.BIN is still the vanilla ELF), then the bake dies on
+    _find_boot_eboot_record with "found 0" -- an earlier test bake picked as
+    the source ISO on 2026-10-25 did exactly that. The UPDATE/ copy is the
+    firmware updater's and is ignored."""
+    for path, off, _size in _iso_find_boot_bins(f, "EBOOT.BIN"):
+        if "UPDATE" in path.upper():
+            continue
+        try:
+            f.seek(off)
+            if f.read(4) == b"\x7fELF":
+                return True
+        except OSError:
+            pass
+    return False
 
 
 # Words that identify the build every patch address in this project was RE'd

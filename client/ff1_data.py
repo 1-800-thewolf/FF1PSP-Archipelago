@@ -866,6 +866,13 @@ LUTE_KEYITEM_ADDR  = 0x08D1153B
 LUTE_KEYITEM_MASK  = 0x80          # b7: Lute key item -> set at princess-gives-Lute
 # ordinal must match LOGIC.NPC_LOCATIONS / ids.npc_loc_id (Princess kept at 1)
 PRINCESS_NPC_ORDINAL = 1
+# skip_lute_cutscene (always on): Garland's script ends in Chaos Shrine right
+# after the post-battle box (iso_patcher.apply_skip_lute_cutscene -- no
+# throne-room teleport, so no Lute give), and the
+# Princess check fires on story flag 1 = 0x08D1151C b1, which that script sets at
+# the kill (`2d 04 01 00` @0x089A87B0; live trace 2026-10-25).
+GARLAND_DEFEATED_FLAG_ADDR = 0x08D1151C
+GARLAND_DEFEATED_FLAG_MASK = 0x02
 
 # --- lute_tablets: "Lute Tablets N of M" line in the Key Items menu ----------
 # The menu lists a key item iff its possession bit is set, and for the Lute that
@@ -1177,8 +1184,10 @@ WARP_CUBE_NPC_ORDINAL  = 7
 #
 # Rows: (name, map_id (FIELD_MAP_ID_SA u32, captured live), gate_addr, gate_mask,
 #        key_id, npc_ordinal, hold_poss, prearm, consumed).
-#        prearm = (ow_x, ow_y, radius)
-#        on the overworld, or None for talk-time NPCs. Add a row per NPC once its
+#        prearm = (ow_x, ow_y, radius, site) -- a DOORSTEP: VANILLA field
+#        coords + the ow_rando site key it belongs to, always read through
+#        site_door() so a random overworld moves the window with the site --
+#        or None for talk-time NPCs. Add a row per NPC once its
 #        map id is captured; a migrated NPC MUST be removed from the legacy
 #        not-owned-gated batch below.
 # prearm sentinel: hold the gate clear in EVERY map (not just at an overworld
@@ -1216,6 +1225,74 @@ PREARM_OVERWORLD = "ow"
 # floor here rather than editing each tuple: the tuples stay honest about
 # where the actual doorstep is.
 PREARM_MIN_RADIUS = 10
+
+# Field ticks a RADIUS-doorstep row waits, after it last held its gate (in the
+# window or in its map), before the won-key restore may re-SET that gate. The
+# restore is the dangerous half (same lesson as MAP_SCOPED_HOLD_RESTORE_TICKS):
+# without this, ONE tick outside the window -- a battle at the door, the
+# map-transition frame of walking out, a pause menu -- re-set the gate and the
+# player could walk in before the next tick cleared it again, so the map LOADED
+# gated (Astos throne empty, live bundle 2026-10-26; the same window exists on
+# every radius row). Battle/menu ticks (ApClient._in_battle) do not count at
+# all, so a long fight at the door never releases the hold. Cost: a won key's
+# function bit comes back ~6 s after the player walks away from the door --
+# every radius row's consumer (Elf Prince, Lich, Mirage Tower, ...) is far
+# from its doorstep.
+PREARM_RESTORE_TICKS = 3
+
+# Overworld width in tiles. The map is a TORUS (it wraps both ways), so a
+# doorstep window that a random overworld puts near an edge spills over it.
+OW_TILES = 255
+
+
+def site_door(doorstep, randworld=None):
+    """(field_x, field_y, radius) of a site's overworld doorstep window, or
+    None when this seed's world has no such site.
+
+    `doorstep` = (vx, vy, radius, site): VANILLA field coords (grid x + 1, see
+    GULG_TILE) plus the ow_rando site key whose mouth it watches (NPC_MAP_RESET
+    / MAP_SCOPED_FUNCTION_HOLD prearms, GULG_TILE). `randworld` =
+    slot_data["randworld"] (randworld_territories.Territories.export), None or
+    {} on the vanilla map -> the vanilla window, unchanged.
+
+    On a random overworld every site except Cornelia, the Pravoka pier and the
+    Lykion desert is a vanilla stamp TRANSLATED somewhere else, so the window
+    moves by the stamp's shift (export "doors"[site][0]["shift"]) and keeps its
+    hand-tuned offset from the mouth. Without a shift it centres on the stand
+    cell, else the entrance. A site the export does not carry -> None: the
+    vanilla cell would sit on some unrelated place of the generated map, and
+    holding a function bit there is worse than not prearming at all."""
+    vx, vy, radius, site = doorstep
+    if not randworld:
+        return (vx, vy, radius)
+    recs = (randworld.get("doors") or {}).get(site)
+    if not recs:
+        return None
+    rec = recs[0]
+    if rec.get("shift") is not None:
+        dx, dy = rec["shift"]
+        return ((vx - 1 + dx) % OW_TILES + 1, (vy + dy) % OW_TILES, radius)
+    xy = rec.get("door") or rec.get("ent")
+    if xy is None:
+        return None
+    return (xy[0] % OW_TILES + 1, xy[1] % OW_TILES, radius)
+
+
+def stamp_shift(randworld, key):
+    """(dx, dy) the random overworld moved a NON-site stamp by (export
+    "stamps", e.g. "canal"), or None: vanilla map, or this world has none."""
+    recs = ((randworld or {}).get("stamps") or {}).get(key)
+    return tuple(recs[0]) if recs else None
+
+
+def ow_near(x, y, cx, cy, radius):
+    """Chebyshev |(x, y) - (cx, cy)| <= radius on the overworld torus. Same
+    answer as the plain abs() test anywhere `radius` tiles from an edge, which
+    is every vanilla doorstep; a moved one can sit across the wrap."""
+    dx = abs(x - cx) % OW_TILES
+    dy = abs(y - cy) % OW_TILES
+    return (min(dx, OW_TILES - dx) <= radius
+            and min(dy, OW_TILES - dy) <= radius)
 
 # Player-facing explanation for a prearm hold that is currently keeping a WON
 # key's possession bit clear (prearm_poss rows only). Without this the player
@@ -1283,7 +1360,7 @@ NPC_MAP_RESET = [
     # possession too), so the prearm window must clear possession as well or
     # the map still loads gated.
     ("Warp Cube", 0x0000004E, WARP_CUBE_EVENT_ADDR, WARP_CUBE_EVENT_MASK,
-     14, WARP_CUBE_NPC_ORDINAL, True, (47, 27, 8), None,
+     14, WARP_CUBE_NPC_ORDINAL, True, (47, 27, 8, "waterfall"), None,
      WARP_CUBE_EVENT_MASK, True),
     # Sarda / Sage's Cave (2026-07-16): SAME collision as the robot -- 0x1151D b7
     # is BOTH the Earth Rod function bit (KEY_ITEM_FUNCTION_BITS[10], gates Lich)
@@ -1294,7 +1371,7 @@ NPC_MAP_RESET = [
     # Earth Rod is NOT consumed-strippable: its function bit gates Lich/Earth
     # Crystal for the rest of the game, and the rod stays in the vanilla menu too.
     ("Earth Rod", 0x0000002F, EARTH_ROD_EVENT_ADDR, EARTH_ROD_EVENT_MASK,
-     10, EARTH_ROD_NPC_ORDINAL, False, (23, 184, 8), None),
+     10, EARTH_ROD_NPC_ORDINAL, False, (23, 184, 8, "sarda"), None),
     # Adamantite / Flying Fortress (2026-07-19): THIRD instance of the same
     # collision (robot, Sarda, now this). 0x11520 b1 is BOTH the Adamantite
     # function bit (KEY_ITEM_FUNCTION_BITS[7], gates the Smith turn-in) and the
@@ -1333,28 +1410,20 @@ NPC_MAP_RESET = [
     # loop kept resurrecting it).
     ("Adamantite", 0x0000003A, 0x08D11520, 0x02, 7, 13, False,
      (PREARM_GLOBAL, 0x2E, 0xFF), (0x08D11520, 0x08)),
-    # Astos / Western Keep (2026-07-20): FOURTH instance of the collision.
-    # 0x1151C b7 is BOTH the Crystal Eye function bit (KEY_ITEM_FUNCTION_BITS[3],
-    # Matoya's trade gate) and the Western Keep king's "Astos already dealt with"
-    # despawn gate, and the despawn is decided at MAP LOAD (live 2026-07-20:
-    # clearing b7 did nothing until a walk-out/walk-in; then the king was back).
-    # An AP Crystal Eye received before the fight set b7 -> king gone forever ->
-    # "Western Keep - Astos" unreachable; on top of that the legacy Classic-7
-    # poll's `or won` gate swallowed the check even after a genuine kill (the
-    # Smith lesson again). Migrated OUT of that poll to this table.
-    # Map id 0x33 + doorstep tile (95,179) captured live 2026-07-20 (mapid_watch
-    # / df_probe). hold_poss=True: whether the king's event ALSO reads
-    # possession is unverified, so hold it clear in-map like the robot -- the
-    # cost is the eye leaving the key-item menu only while inside the keep.
-    # Radius prearm (not GLOBAL): the keep has a real overworld doorstep, and
-    # b7 must stay SET elsewhere -- it is Matoya's trade gate.
-    # consumed=None on purpose: the eye's natural sink is Matoya's trade, but
-    # her "done" bit is the Jolt Tonic function bit (0x1151D b0), which an AP
-    # Jolt Tonic grant ALSO sets -- using it would strip the eye's menu entry
-    # on an unrelated AP delivery. A lingering spent eye is cosmetic; fine.
-    # (literal ordinal 10 = CRYSTAL_EYE_NPC_ORDINAL, defined below this table.)
-    ("Crystal Eye", 0x00000033, 0x08D1151C, 0x80, 3, 10,
-     True, (95, 179, 8), None),
+    # Crystal Eye / Astos: NO ROW (v353). Was the FOURTH instance (2026-07-20):
+    # story flag 7 = 0x1151C b7 is both the eye's function bit (Matoya's trade
+    # gate) and the Western Keep's "Astos already beaten" gate, which the keep's
+    # map init reads at LOAD to empty the throne. The row held b7 clear in the
+    # keep with a doorstep prearm (95,179), but the won-key restore re-set it on
+    # every tick outside that window -- a battle at the door, or reaching the
+    # door between two 2 s ticks, let the keep load with b7 set and the throne
+    # empty (live player bundle 2026-10-26, twice in one visit). Cured at the
+    # ROOT by two more iso_patcher._NGS_SITES rows: the keep's check and the
+    # Astos cutscene's set now use shadow flag 67 (NPC_GATE_SPLIT_FLAG_BASE +
+    # key id 3), so flag 7 belongs to the AP grant + Matoya alone. Client
+    # detection = ASTOS_QUEST_* rise (ApClient _npc_loop "astos-quest" stage);
+    # key id 3 sits in OWNED_FUNCTION_REASSERT so a won eye keeps Matoya
+    # trading across save reloads.
     # Mystic Key / Elf Prince: NO ROW. Formerly the FIFTH instance (0x1151D b1
     # = both the Mystic Key function bit and the quest's already-done gate),
     # and the row's in-map hold deadlocked the four Elven Castle Mystic Key
@@ -1403,26 +1472,20 @@ NPC_MAP_RESET = [
     ("Levistone", 0x00000024, LEVISTONE_EVENT_ADDR, LEVISTONE_EVENT_MASK,
      11, LEVISTONE_NPC_ORDINAL, True, (PREARM_GLOBAL, 0xFF), None,
      LEVISTONE_EVENT_MASK | LEVISTONE_AIRSHIP_MASK),
-    # Oxyale / Gaia fairy (2026-07-21): SEVENTH instance. 0x1151F b1 (fairy
-    # freed) is BOTH the Oxyale location detector AND one bit of its function
-    # mask (KEY_ITEM_FUNCTION_BITS[16] = 0x0E, b1 freed + b2 mermaid gate +
-    # b3 sub-ready): an AP Oxyale received before visiting the freed fairy ->
-    # she gives her "has the oxyale helped you out?" already-gave line and the
-    # old not-owned-gated batch poll was suppressed by the same ownership
-    # (live player report 2026-07-21). Gaia FIELD_MAP_ID 0x4B captured live at
-    # the spring. Gate MASK = 0x0C (b2+b3), NOT b1: b1 (fairy freed) is her
-    # SPAWN/dialogue precondition -- holding it clear left her fluttering
-    # silently with no talk event at all (live 2026-07-21, first attempt used
-    # 0x0E). Her already-gave read must be in b2/b3; b1 stays owned by the
-    # normal delivery path (KEY_ITEM_FUNCTION_BITS[16] still 0x0E). 16 removed
-    # from OWNED_FUNCTION_REASSERT (fought the hold), so this row's won-key
-    # restore asserts b2+b3 (the Onrac mermaid/sub gate) for a won Oxyale;
-    # only b1 is left to the one-time grant. Holding b2/b3 clear costs nothing
-    # inside Gaia (the sub is in Onrac). prearm=None: talk-time flavour
-    # presumed (Elf Prince pattern); if live test shows map-load, add a Gaia
-    # doorstep radius prearm. hold_poss=True conservative.
-    # (Literals: OXYALE_* constants are defined below this table.)
-    ("Oxyale", 0x0000004B, 0x08D1151F, 0x0C, 16, 9, True, None, None),
+    # Oxyale / Gaia fairy: NO ROW (v363). Was the SEVENTH instance
+    # (2026-07-21): story flag 26 = 0x1151F b2 is both the Oxyale's function
+    # bit (the Onrac mermaid/sub gate) and the fairy's "already gave" gate.
+    # The row held b2+b3 clear inside Gaia with prearm=None on the guess that
+    # her talk was talk-time flavour -- it is not: Gaia's MAP INIT reads flag
+    # 26 at load and binds her give event only while it is clear, so the
+    # in-map entry clear always came one load too late and the won-key
+    # restore re-set the bit on every exit (live player bundle 2026-10-30:
+    # AP Oxyale bought in Onrac, "has the oxyale helped you out?" on every
+    # visit, location dead). Cured at the ROOT by two iso_patcher._NGS_SITES
+    # rows: the init's inverted check and the fairy's give now use shadow
+    # flag 80 (NPC_GATE_SPLIT_FLAG_BASE + key id 16). Client detection =
+    # OXYALE_QUEST_* rise (ApClient _npc_loop "oxyale-quest" stage); key 16's
+    # full 0x0E mask is back in OWNED_FUNCTION_REASSERT.
     # Chime / Lefein elder (2026-08-02): NINTH instance, and the last of the
     # legacy not-owned-gated batch that had this collision. 0x1151F b7 is BOTH
     # the Chime function bit (KEY_ITEM_FUNCTION_BITS[12], Mirage Tower / Sky
@@ -1440,7 +1503,7 @@ NPC_MAP_RESET = [
     # costs the menu entry only while inside Lefein). consumed=None: the Chime
     # is never spent.
     ("Chime", 0x00000050, CHIME_EVENT_ADDR, CHIME_EVENT_MASK,
-     12, CHIME_NPC_ORDINAL, True, (230, 92, 8), None),
+     12, CHIME_NPC_ORDINAL, True, (230, 92, 8, "lufenia"), None),
     # Matoya / Jolt Tonic (2026-08-03): ELEVENTH instance and the LAST member of
     # the legacy Classic-7 poll -- the one this file has listed as "still latent"
     # since 2026-07-20. 0x1151D b0 is BOTH the Jolt Tonic function bit
@@ -1464,7 +1527,7 @@ NPC_MAP_RESET = [
     # (literal ordinal 11 = JOLT_TONIC_NPC_ORDINAL, defined below this table --
     # same reason the Astos/Elf Prince rows spell theirs out.)
     ("Jolt Tonic", 0x00000023, 0x08D1151D, 0x01,
-     4, 11, True, (161, 110, 8), None),
+     4, 11, True, (161, 110, 8, "matoya"), None),
     # Bottled Faerie / Onrac Caravan (2026-08-05): migrated out of the legacy
     # not-owned-gated batch because the Faerie GAINED a function bit this
     # session (KEY_ITEM_FUNCTION_BITS[15] = 0x11521 b2, see the note there), and
@@ -1485,7 +1548,7 @@ NPC_MAP_RESET = [
     # unusable as a consumed detector -- see the KEY_ITEM_CONSUMED notes.
     # (literals: BOTTLE_* constants are defined below this table.)
     ("Bottled Faerie", (0x0000001F, 0x00000017), 0x08D11521, 0x04,
-     15, 8, True, (18, 44, 8), None),
+     15, 8, True, (18, 44, 8, "caravan"), None),
 ]
 
 # Overworld value of FIELD_MAP_ID_SA (the FINE per-map id). Distinct from the
@@ -1503,11 +1566,14 @@ BOTTLE_EVENT_ADDR      = 0x08D11521   # b2: Caravan sold the Bottled Faerie
 BOTTLE_EVENT_MASK      = 0x04
 BOTTLE_NPC_ORDINAL     = 8
 
-# Oxyale fairy-release: native release sets both 0x1151F b1 AND b2. b1 is the
-# stable LOCATION detector; b2 is what the Onrac sub MERMAID's presence gates on
-# (grant must set b2 too -- see KEY_ITEM_FUNCTION_BITS[16], mask 0x0E, and the
-# 2026-07-17 RE that finally caught this). Do NOT drop b2 from the grant mask.
-OXYALE_EVENT_ADDR      = 0x08D1151F   # b1: fairy freed -> gave Oxyale (detector)
+# Oxyale fairy chain, per the disc scripts (v363 RE): the spring release sets
+# flag 25 = 0x1151F b1 (fairy freed, `2d 04 19 00` + bottle removed), her give
+# set flag 26 = b2 (now repointed to shadow flag 80, see OXYALE_QUEST_*), and
+# the Onrac sub event sets flag 27 = b3. b2 is what the Onrac sub MERMAID's
+# presence gates on (grant must set b2 too -- see KEY_ITEM_FUNCTION_BITS[16],
+# mask 0x0E, and the 2026-07-17 RE that finally caught this). Do NOT drop b2
+# from the grant mask. The location detector is OXYALE_QUEST_*, not this.
+OXYALE_EVENT_ADDR      = 0x08D1151F   # b1: fairy freed (her spawn precondition)
 OXYALE_EVENT_MASK      = 0x02
 OXYALE_NPC_ORDINAL     = 9
 
@@ -1524,7 +1590,7 @@ OXYALE_NPC_ORDINAL     = 9
 # KEY_ITEM_FUNCTION_BITS -- splits UNVERIFIED; a live strip/receive sweep resolves them).
 # Same inherited WART (finding the AP item before the native NPC misses the check).
 # Ordinals 10..12 (1=Princess .. 9=Oxyale; last used was 9). See wiring report.
-CRYSTAL_EYE_NPC_ORDINAL = 10   # Astos (Western Keep); detect Crystal Eye poss 0x1153B b5
+CRYSTAL_EYE_NPC_ORDINAL = 10   # Astos (Western Keep); detect = shadow quest flag 67
 JOLT_TONIC_NPC_ORDINAL  = 11   # Matoya's Cave;         detect Jolt Tonic  poss 0x1153B b4
 MYSTIC_KEY_NPC_ORDINAL  = 12   # Elf Prince (Elven); detect = shadow quest flag (below)
 
@@ -1539,6 +1605,23 @@ MYSTIC_KEY_NPC_ORDINAL  = 12   # Elf Prince (Elven); detect = shadow quest flag 
 # list so the event can never re-run after a rollback.
 ELF_PRINCE_QUEST_ADDR = 0x08D11524   # story flag 69
 ELF_PRINCE_QUEST_MASK = 0x20
+
+# Astos, same scheme (v353): shadow flag 64 + Crystal Eye key id 3 = 67 ->
+# 0x1151C + 67//8 = 0x11524, bit 67%8 = 3. Read by the Western Keep's map init
+# (throne empty when set) and set by the Astos cutscene right after his battle;
+# zero other refs on disc. The cutscene hands over the vanilla eye (op37) a few
+# boxes AFTER the set, so the native-eye strip must run every tick, not only on
+# the rise.
+ASTOS_QUEST_ADDR = 0x08D11524        # story flag 67
+ASTOS_QUEST_MASK = 0x08
+
+# Gaia fairy, same scheme (v363): shadow flag 64 + Oxyale key id 16 = 80 ->
+# 0x1151C + 80//8 = 0x11526, bit 80%8 = 0 (the sage's flag 81 is b1 of the
+# same byte). Read by Gaia's map init (fairy offers while clear) and set by
+# her give, right BEFORE the Oxyale op37 -- same order as Astos, so the
+# native-Oxyale strip runs every tick, not only on the rise.
+OXYALE_QUEST_ADDR = 0x08D11526       # story flag 80
+OXYALE_QUEST_MASK = 0x01
 
 # Crescent Lake sage, same scheme (v255): shadow flag 64 + canoe key id 17 = 81
 # -> 0x1151C + 81//8 = 0x11526, bit 81%8 = 1. Set by the one repointed
@@ -1646,8 +1729,9 @@ SAGE_TILE = (47, 22, 5)
 # entrance is grid (181,196), so field (182,196). Radius 4 = 4 tiles each way,
 # i.e. the player gets the "you need the key" note while still approaching.
 # Used only to LOG a hint when mount_gulg_key is on and the key is not held;
-# the actual seal is openworld_data.GULG_SEAL_GRID_EDITS.
-GULG_TILE = (182, 196, 4)
+# the actual seal is openworld_data.GULG_SEAL_GRID_EDITS. 4th field = site
+# key: read through site_door() so a random overworld moves it with the cave.
+GULG_TILE = (182, 196, 4, "gulg")
 # Pravoka town (Bikke / the pirates). Same role for the Bikke detectors: his
 # "defeated" (id63) and "ship available" (id5) flags are SAVE-CARRIED, so seeing
 # them set proves nothing about THIS session -- a save slot from another session
@@ -1851,13 +1935,19 @@ OWNED_FUNCTION_REASSERT = (
     # reassert. Safe from the old fight-the-hold problem: the Mystic Key row
     # left NPC_MAP_RESET entirely, so nothing holds b1 clear anywhere, ever.
     5,    # Mystic Key -> locked doors 0x1151D b1
+    # 3 Crystal Eye ADDED v353, same reason as the Mystic Key: the Astos gate
+    # split moved the keep's despawn to flag 67, so flag 7 is Matoya's trade
+    # gate alone and nothing native sets it any more. Its NPC_MAP_RESET row
+    # (whose out-of-map restore used to keep it up) is gone, so nothing holds
+    # it clear anywhere and the reassert cannot fight a hold.
+    3,    # Crystal Eye -> Matoya trade gate 0x1151C b7
     9,    # Star Ruby-> Titan accept 0x1151D b5 + FED b6 (opens Titan's Tunnel)
-    # 16 Oxyale NARROWED 2026-07-21 (see OWNED_FUNCTION_REASSERT_MASK): b2/b3
-    # migrated to the NPC_MAP_RESET row (Gaia fairy already-gave gate; full
-    # reassert fought the hold); b1 (fairy freed = her SPAWN bit) stays
-    # reasserted here or a save reload could despawn her forever (the grant
-    # never re-runs).
-    16,   # Oxyale   -> fairy-freed b1 ONLY (masked below; b2/b3 = map-reset row)
+    # 16 Oxyale: FULL 0x0E mask again since v363. It was narrowed to b1 on
+    # 2026-07-21 because b2/b3 belonged to the Gaia NPC_MAP_RESET row and a
+    # full reassert fought its hold; the fairy gate split moved her gate to
+    # flag 80 and deleted the row, so nothing holds b2/b3 clear anywhere and
+    # a won Oxyale must keep the Onrac mermaid gate open across save reloads.
+    16,   # Oxyale   -> fairy freed b1 + mermaid gate b2 + sub-ready b3
     # 17 Canoe RESTORED 2026-08-10 (v258): briefly removed for the v256/v257
     # sage holds, which held both canoe bits clear in Crescent Lake so his
     # handover could fire. The sage location is PROXIMITY-detected now (his
@@ -1875,13 +1965,9 @@ OWNED_FUNCTION_REASSERT = (
 
 # Per-key override of the reassert mask (default = the full
 # KEY_ITEM_FUNCTION_BITS mask). Lets a key stay on the reassert list for the
-# bits a NPC_MAP_RESET row does NOT own. Oxyale: the map-reset row holds/
-# restores b2+b3 (the fairy's already-gave gate + mermaid/sub function);
-# reasserting those here would fight the in-Gaia hold, but b1 (fairy freed =
-# her spawn bit) belongs to no row and must survive save reloads.
-OWNED_FUNCTION_REASSERT_MASK = {
-    16: 0x02,   # Oxyale -> fairy-freed b1 only
-}
+# bits a NPC_MAP_RESET row does NOT own. Empty since v363 (its only entry,
+# the Oxyale's b1-only narrowing, went with the Gaia row).
+OWNED_FUNCTION_REASSERT_MASK = {}
 
 # --- On-disc gate splits: shadow story flag owned by the AP grant (v260) -----
 # For a key whose vanilla function bit is SHARED with an event that other
@@ -1922,7 +2008,8 @@ GATE_SPLIT_SHADOW_BITS = {
 # instant it arrives. That rules out (do NOT add, each checked 2026-07-21):
 #   * Crystal Eye (3)  -- Matoya-done IS the Jolt Tonic function bit 0x1151D b0,
 #                         which an unrelated AP Jolt Tonic grant also sets.
-#                         Already documented on its NPC_MAP_RESET row.
+#                         (Its NPC_MAP_RESET row is gone since v353; the
+#                         reasoning stands.)
 #   * Bottled Faerie(15)-- freed-at-spring is 0x1151F b1, part of the Oxyale
 #                         function mask 0x0E -> an AP Oxyale would strip it.
 #                         Needs a live-captured distinct bit.
@@ -2017,13 +2104,15 @@ PROMOTED_JOB_MIN = KNIGHT          # 6; ids 6..11 are the promoted classes
 # hold becomes permanent. `spent` names that condition:
 #   None         -- no spend state; restore as before.
 #   'promotion'  -- once any party row reads a promoted job id, never restore.
-# Rows: (name, maps, key_id, addr, mask, prearm(ow_x, ow_y, radius) or None,
+# Rows: (name, maps, key_id, addr, mask,
+#        prearm(ow_x, ow_y, radius, site) or None -- a doorstep, read through
+#        site_door() like the NPC_MAP_RESET ones,
 #        mode, restore_ord or None, spent or None).
 MAP_SCOPED_FUNCTION_HOLD = [
-    ("Rat's Tail", (0x0000002F,), 13, 0x08D1151E, 0x80, (122, 39, 6),
+    ("Rat's Tail", (0x0000002F,), 13, 0x08D1151E, 0x80, (122, 39, 6, "trials"),
      "won", None, "promotion"),
     # Bottled Faerie / Gaia spring (2026-08-05). Gaia FIELD_MAP_ID 0x4B (same id
-    # the Oxyale NPC_MAP_RESET row uses) + overworld doorstep (214,22) captured
+    # the old Oxyale NPC_MAP_RESET row used) + overworld doorstep (214,22) captured
     # live. The spring's release reads 0x11521 b2, so while the AP Faerie is
     # unwon that bit must be clear in Gaia -- with the doorstep prearm because
     # every other NPC/event in this game binds at MAP LOAD and there is no
@@ -2032,7 +2121,7 @@ MAP_SCOPED_FUNCTION_HOLD = [
     # check has fired the sale genuinely happened, so the bit goes back on
     # outside Gaia and the Caravan stays reverted to its tonic shop (the
     # 2026-07-16 fix's whole point -- do not regress it).
-    ("Bottled Faerie", (0x0000004B,), 15, 0x08D11521, 0x04, (214, 22, 8),
+    ("Bottled Faerie", (0x0000004B,), 15, 0x08D11521, 0x04, (214, 22, 8, "gaia"),
      "unwon", 8, None),
 ]
 
@@ -2079,6 +2168,18 @@ FIELD_PARTY_Y_OFF = 0x68F2         # u16 party tile Y
 # are only VALID/current when this is 1 -- at battle entry/exit and map transitions
 # they read stale, which made Dangerous Forests mis-gauge forest state. Gate on it.
 FIELD_ONFIELD_OFF = 0x68B4         # u8: 1 = on field, 0 = in battle
+
+# --- Menu world map fog of war (random overworlds) ----------------------------------
+# On-disc hooks (re_only/ow_rando/mapfog.py) reveal the map game-side as the party
+# moves; the explored mask lives in a mailbox inside the cave segment, which is
+# NOT in the save -- the client persists it in AP DataStorage and ORs it back
+# after connect (user 2026-10-14: played online only). Located by its magic.
+MAPFOG_SCAN_LO = 0x08B30E00        # cave segment start (eboot_patch.SAFE_CAVE_VADDR)
+MAPFOG_SCAN_LEN = 0x40000
+MAPFOG_MAGIC = b"FFOG"
+MAPFOG_MASK_OFF = 0x10             # u8[128]: bit c = chunk c explored
+MAPFOG_APPLIED_OFF = 0x90          # u8[128]: chunk drawn into the cached map (game-only)
+MAPFOG_MASK_LEN = 128
 # CAVEAT (measured 2026-07-16, 150 samples / 15 s while WALKING the overworld):
 # this reads 0 in ~2/3 of samples even though the party X/Y above track movement
 # correctly the whole time (66 distinct tiles seen). So "1 = coords valid" holds

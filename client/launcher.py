@@ -274,6 +274,16 @@ def iso_verdict(path: str):
     "not FF1". complaint is one player-facing line, "" when ok."""
     disc = iso_disc_id(path)
     if disc.replace("-", "") == SUPPORTED_DISC_ID.replace("-", ""):
+        # Right disc id, but one of our own patched outputs: it passes every
+        # header check, then the bake dies on the relocated EBOOT.BIN record.
+        try:
+            from .eboot_patch import iso_already_baked, ALREADY_BAKED_MSG
+            with open(path, "rb") as f:
+                if iso_already_baked(f):
+                    return False, (ALREADY_BAKED_MSG[0].upper()
+                                   + ALREADY_BAKED_MSG[1:])
+        except OSError:
+            pass
         return True, ""
     if not disc:
         try:
@@ -588,6 +598,62 @@ def _set_in_section(lines, section, key, value):
     return lines
 
 
+def _ini_value(lines, section, key):
+    """`key`'s value inside [section] of a list of ini lines, or None."""
+    sec_hdr = f"[{section}]"
+    inside = False
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("["):
+            inside = s == sec_hdr
+            continue
+        if inside and s and not s.startswith(";"):
+            k, sep, v = s.partition("=")
+            if sep and k.strip() == key:
+                return v.strip()
+    return None
+
+
+# What the player's ppsspp.ini said BEFORE patch_ini forced our values, so a
+# /logs bundle can show it (2026-10-31: a black screen only when launched
+# through the client, and nothing in the bundle said what their PPSSPP was set
+# to normally). First-seen wins per ini+key: later launches find our own
+# values already there and record nothing, so the player's originals survive.
+INI_BEFORE_FILE = "ppsspp_ini_before.json"
+_FORCED_INI_KEYS = (("General", "RemoteISOPort"),
+                    ("General", "RemoteDebuggerOnStartup"),
+                    ("CPU", "CPUCore"), ("CPU", "FastMemoryAccess"),
+                    ("Graphics", "TextureBackoffCache"),
+                    ("Graphics", "ReplaceTextures"))
+
+
+def load_ini_before() -> dict:
+    """{ini path: {key: value before the client first changed it}}."""
+    try:
+        with open(os.path.join(state_dir(), INI_BEFORE_FILE),
+                  encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _record_ini_before(ini_path, before, after):
+    changed = {k: ("(unset)" if v is None else v) for k, v in before.items()
+               if v != after.get(k)}
+    if not changed:
+        return
+    known = load_ini_before()
+    row = known.setdefault(ini_path, {})
+    for k, v in changed.items():
+        row.setdefault(k, v)
+    try:
+        with open(os.path.join(state_dir(), INI_BEFORE_FILE), "w",
+                  encoding="utf-8") as f:
+            json.dump(known, f, indent=2)
+    except Exception:
+        pass
+
+
 def patch_ini(ini_path: str) -> bool:
     """Enforce the client's required PPSSPP settings pre-launch: remote
     debugger on DEBUG_PORT, and FastMemoryAccess=True -- RE sessions flip it
@@ -610,6 +676,7 @@ def patch_ini(ini_path: str) -> bool:
             lines = text.splitlines()
         else:
             lines = ["[General]"]
+        before = {k: _ini_value(lines, s, k) for s, k in _FORCED_INI_KEYS}
         _set_in_section(lines, "General", "RemoteISOPort", DEBUG_PORT)
         _set_in_section(lines, "General", "RemoteDebuggerOnStartup", "True")
         # RE sessions leave CPUCore=0 (pure interpreter) and/or
@@ -639,6 +706,9 @@ def patch_ini(ini_path: str) -> bool:
         _set_in_section(lines, "Graphics", "ReplaceTextures", "False")
         with open(ini_path, "w", encoding="utf-8") as f:
             f.write(bom + "\n".join(lines) + "\n")
+        _record_ini_before(ini_path, before,
+                           {k: _ini_value(lines, s, k)
+                            for s, k in _FORCED_INI_KEYS})
         return True
     except Exception as e:
         print(f"  [ini] could not patch {ini_path}: {e!r}")
@@ -1039,6 +1109,15 @@ def bake_hash32(bake: dict) -> int:
     if feats.get("_ow_hi"):
         h.update(b"owhi=")
         h.update(bytes(feats["_ow_hi"]))
+    # random overworld: the territory map is cave data too (randworld_regions)
+    if feats.get("_rw_regions"):
+        h.update(b"rwregions=")
+        h.update(bytes(feats["_rw_regions"]))
+    # ...and the generated world the bake writes (grid, stamps, gates)
+    if feats.get("_rw_world"):
+        from . import randworld_bake as _RWB
+        h.update(b"rwworld=")
+        h.update(_RWB.world_digest(feats["_rw_world"]))
     # The open-progression grid bake (_ow_map) and the world_gates bake context
     # (_world_gates) are dicts of toggles: the truthy-name fold above only sees
     # the KEY, so two seeds differing in WHICH toggles are on hashed the same

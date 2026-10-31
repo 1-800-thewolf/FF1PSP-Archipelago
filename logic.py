@@ -351,15 +351,36 @@ def removed_normally_empty_idx(loot_in_normally_empty_chests,
     if legacy_gulg_b5 is not None:
         return frozenset() if bool(legacy_gulg_b5) else GULG_B5_LOOT_INDICES
     return frozenset()
+
+
+# shortened_temple_of_fiends: the Black Orb lands in the Lute room and the slab
+# stairs land on Chaos' floor (iso_patcher.apply_shortened_temple_of_fiends), so
+# the revisited shrine's 1F/2F and Earth/Fire/Water/Air floors are never
+# entered. Their chests (Basement #1-5) are not locations then; the Lute room's
+# own two (Plaza #1-2) stay. The bestiary half rides the generated
+# SOURCE_KEY_GATE ("short_tof"), not this list.
+SHORT_TOF_SKIPPED_REGIONS = ("chaos_shrine_b2", "chaos_shrine_b4")
+
+
+def short_tof_removed_idx(shortened) -> frozenset:
+    """The chest indices a shortened Temple of Fiends seed does NOT own. Shared
+    by create_regions, create_items and the client scout (absent = off)."""
+    if not shortened:
+        return frozenset()
+    from ._locinfo import LOC_INFO
+    return frozenset(idx for idx, (region, _tok) in LOC_INFO.items()
+                     if region in SHORT_TOF_SKIPPED_REGIONS)
+
+
 NPC_LOCATIONS = [
-    ("Cornelia NPC: Princess",       1, "castle_cornelia_1f",    [GARLAND_DEFEATED]),
-    ("Pravoka NPC: Bikke",           2, "chaos_shrine",          []),                # bridge always built -> free
+    ("Chaos Shrine NPC: Garland",    1, "castle_cornelia_1f",    [GARLAND_DEFEATED]),
+    ("Pravoka NPC: Bikke",           2, "pravoka_town",          []),                # bridge always built -> free on vanilla
     ("Crescent Lake NPC: Sage",      3, "crescent_lake",         []),                # talk-gated, no prereq (2026-07-25) -- same access as CL shops
     ("Ice Cave NPC: Levistone",      4, "cavern_of_ice_b2_room", []),               # event pickup (no chest bit)
     ("Sage's Cave NPC: Sarda",       5, "sardas_cave",           [VAMPIRE_DEFEATED, TITAN_FED]),  # Earth Rod
     ("Lefein NPC: Elder",            6, "lefein",                []),               # random AP item (native Chime stripped); region gates Airship+Rosetta(Translated)
     ("Waterfall Cavern NPC: Robot",  7, "waterfall",             []),               # Warp Cube
-    ("Onrac NPC: Caravan",           8, "onrac_hub",             []),               # Bottled Faerie
+    ("Onrac NPC: Caravan",           8, "onrac_caravan",         []),               # Bottled Faerie (its own site; vanilla: Onrac's landmass)
     ("Gaia NPC: Fairy",              9, "gaia",                  [BOTTLED_FAERIE]),  # Oxyale; Gaia = airship-only
     ("Western Keep NPC: Astos",     10, "western_keep",          [CROWN]),           # Crystal Eye (trade Crown)
     ("Matoya's Cave NPC: Matoya",   11, "matoyas_cave",          [CRYSTAL_EYE]),     # Jolt Tonic (trade Crystal Eye)
@@ -385,14 +406,43 @@ NPC_ALT_RULES = {
     5: [AIRSHIP],       # Sage's Cave - Sarda
 }
 
+# On a RANDOM overworld some NPC tokens are geography, which the world graph
+# already answers: Sarda's Titan Fed only says "you came through Titan's
+# tunnel" (the vanilla airship bypass above skips it too), and the graph's
+# Star Ruby edge is that tunnel. NPC_ALT_RULES is geography outright.
+RANDWORLD_NPC_GEOGRAPHY = {
+    5: (TITAN_FED,),    # Sage's Cave - Sarda keeps only the Vampire
+}
 
-def npc_rule_alts(ordinal, region_rule, extra):
+# NPC checks that fire somewhere else under skip_lute_cutscene (always on, no
+# yaml option): Garland's script ends right after his battle (iso_patcher.
+# apply_skip_lute_cutscene), so the party never reaches the throne room and the
+# Princess check fires at the Garland kill (client: story flag 1) -- in Chaos
+# Shrine.
+SKIP_LUTE_NPC_REGION = {
+    1: "chaos_shrine",  # Chaos Shrine NPC: Garland
+}
+
+
+def npc_region(ordinal, region, skip_lute=False):
+    """The region an NPC location's rule is read from."""
+    return SKIP_LUTE_NPC_REGION.get(ordinal, region) if skip_lute else region
+
+
+def npc_rule_alts(ordinal, region_rule, extra, randworld=False):
     """The NPC location's full access rule as OR-of-ANDs: (region alternative AND
     the NPC's extra tokens) for each region alternative, plus any NPC_ALT_RULES
     bypass alternative. Shared by __init__.set_rules and tracker.classify so the
-    generator and the in-game tracker can never disagree."""
-    alts = _and_all(_rule_alts(region_rule), list(extra))
-    bypass = NPC_ALT_RULES.get(ordinal)
+    generator and the in-game tracker can never disagree.
+
+    randworld: the site rule already holds every route the world has, so the
+    vanilla bypasses and the tokens that only restate geography drop out."""
+    extra = list(extra)
+    if randworld:
+        geo = RANDWORLD_NPC_GEOGRAPHY.get(ordinal, ())
+        extra = [t for t in extra if t not in geo]
+    alts = _and_all(_rule_alts(region_rule), extra)
+    bypass = None if randworld else NPC_ALT_RULES.get(ordinal)
     if bypass:
         alts = alts + [list(bypass)]
     return _simplify(alts)
@@ -446,6 +496,9 @@ REGION_RULES = {
     "chaos_shrine":            [],
     "castle_cornelia_1f":      [],                       # treasury chests carry MysticKey per-chest
     "matoyas_cave":            [],                        # bridge always built -> free
+    # Pravoka town (Bikke, the Pravoka shops): free on the vanilla map only
+    # because the bridge is always built; a random world moves it.
+    "pravoka_town":            [],
 
     # tier 1 — Ship (coastal landmasses near Elfland / Pravoka)
     "elven_castle":            [SHIP],
@@ -482,6 +535,12 @@ REGION_RULES = {
     "cavern_of_ice_b1_backdoor": [[AIRSHIP], [CANOE]],
     "cavern_of_ice_b2_room":   [[AIRSHIP], [CANOE]],
     "cavern_of_ice_b3_treasury": [[AIRSHIP], [CANOE]],
+    # The Ryukhan Desert spot the airship rises from (the Airship event). It
+    # is NOT the Ice Cave: the desert is its own landmass south of Crescent
+    # Lake, which the base map reaches only by Ship + Canoe (a river mouth);
+    # early's canoe river makes it Canoe-only (access_nodes "desert"; flood-
+    # verified, RANDWORLD_LOGIC_DESIGN.md D1).
+    "airship_desert":          [SHIP, CANOE],
     "citadel_of_trials_2f":    [[CROWN, CANOE, SHIP, CANAL], [CROWN, CANOE, AIRSHIP]],  # Crown + Canoe + (Ship+Canal OR Airship)
     "waterfall":               [AIRSHIP, CANOE],            # Airship + Canoe (Warp Cube robot)
 
@@ -515,6 +574,8 @@ REGION_RULES = {
 
     # Onrac hub + the Caravan (Bottled Faerie). Both are ACCESS-NODE driven -- see
     # region_rules_for / access_nodes; the values here are just the no-toggle base.
+    # The Caravan (17,44) stands on Onrac's own landmass (flood-verified), so on
+    # the vanilla map it shares Onrac's rule; a random world places it apart.
     "onrac_hub":               [AIRSHIP],
     "onrac_caravan":           [AIRSHIP],
     # Melmond town (Dr Unne). Node-driven; base = Airship OR Ship+Canal.
@@ -659,25 +720,15 @@ def dyn_chest_location_name(dungeon_name, ordinal0):
 # (the WK trail's and Melmond river's north end), so extended-solo needs Ship for its
 # shortcuts -- it never opens start-access on its own.
 
-# Regions the AIRSHIP can also reach: it lands on flat land near them, so once you
-# have the airship you no longer need the Ship (or the Ship+Canal). Each value is
-# the airship alternative's AND-tokens -- usually just [AIRSHIP], but Lower Cavern
-# of Earth still needs the Earth Rod to pass the mud gate on the airship route too.
-# Applied ON TOP of the toggle-adjusted rules (see region_rules_for) so it composes
-# with early/extended/northern_docks. (2026-07-17, per player: airship should open
-# these Ship-gated spots the way the NES randomizer allows.)
-AIRSHIP_REACHES = {
-    "elven_castle":          [AIRSHIP],
-    "western_keep":          [AIRSHIP],
-    "marsh_cave_b2_top":     [AIRSHIP],
-    "marsh_cave_b2_bottom":  [AIRSHIP],
-    "marsh_cave_b3":         [AIRSHIP],
-    "cavern_of_earth_b1":    [AIRSHIP],
-    "cavern_of_earth_b2":    [AIRSHIP],
-    "cavern_of_earth_b3":    [AIRSHIP],
-    "cavern_of_earth_b4":    [AIRSHIP],
-    "cavern_of_earth_lower": [AIRSHIP, EARTH_ROD],
-}
+# SITES the AIRSHIP can also reach on the vanilla map: it lands on flat land near
+# them, so once you have the airship you no longer need the Ship (or the
+# Ship+Canal). Applied ON TOP of the toggle-adjusted site rules (see
+# vanilla_site_rules) so it composes with early/extended/northern_docks; every
+# region on these sites inherits it with its own extra tokens, which is how the
+# Lower Cavern of Earth's airship route keeps its Earth Rod. (2026-07-17, per
+# player: airship should open these Ship-gated spots the way the NES randomizer
+# allows.) Vanilla geography only: a random world's graph knows where it lands.
+AIRSHIP_REACHES = ("elfheim", "wkeep", "marsh", "earth")
 
 
 def _and_all(alts, extra):
@@ -727,7 +778,10 @@ def access_nodes(early: bool, extended: bool, northern_docks: bool = False,
     # northern_docks adds a Ship+Canal route to the northern continents.
     docked = [[SHIP, CANAL]] if northern_docks else []
     onrac = [[AIRSHIP]] + docked                      # Onrac access
-    caravan = [[AIRSHIP]] + _and_all(docked, [CANOE])  # Caravan wants the canoe by sea
+    # The Caravan stands on Onrac's foot landmass (comp 53 in every map state,
+    # flood 2026-10-16), so the docks route needs no Canoe for it. The old
+    # node ANDed one on; nothing but the tracker's Caravan tile read it.
+    caravan = list(onrac)
     mirage_desert = [[AIRSHIP]] + docked
     # unlockable_northern_foot_trails: one corridor, three independent gates.
     # Gaia is a mountain-locked pocket touching BOTH the Lefein landmass and the
@@ -765,99 +819,278 @@ def access_nodes(early: bool, extended: bool, northern_docks: bool = False,
     if gulg_key:
         gulg = _and_all(gulg, [MOUNT_GULG_KEY])
     ice_cave = [[AIRSHIP], [CANOE]]
+    # The airship's desert (the Airship event's spot): its own landmass south
+    # of Crescent Lake. Base map: Ship + Canoe (sail to a river mouth); early's
+    # canoe river joins the Ice Cave rivers to it, so the Canoe alone. The
+    # canal changes nothing here. NOT the Ice Cave's rule, which the event
+    # used to borrow (Canoe alone even with open_progression off: D1).
+    desert = [[CANOE]] if early else [[SHIP, CANOE]]
     return {
         "duergar": duergar, "inner_sea": inner_sea, "melmond": melmond,
         "onrac": onrac, "caravan": caravan, "mirage_desert": mirage_desert,
         "mirage_tower": mirage_tower, "flying_fortress": flying_fortress,
         "crescent": crescent, "gulg": gulg, "gulg_land": gulg_land,
-        "ice_cave": ice_cave,
+        "ice_cave": ice_cave, "desert": desert,
         "giants": giants, "sardas": sardas,
         "lefein_land": lefein_land, "gaia": gaia,
     }
 
 
+# ============== sites: ONE location path for vanilla and random worlds ==========
+# Every location stands at an overworld SITE (a town, castle or cave mouth --
+# ow_rando's placed keys). A region's rule = its site's rule AND the region's own
+# non-geography tokens (REGION_SITE). Only the SITE rule knows geography, and it
+# comes from a provider:
+#   vanilla_site_rules(...)  the hand rules (access_nodes + the yaml toggles)
+#   randworld_site_rules()   the generated world's graph (worldgraph), no
+#                            per-option deltas (user 2026-10-16)
+# so both maps run the same region / shop / NPC / event / bonus code below.
+# RANDWORLD_LOGIC_DESIGN.md has the design; "airship" is the desert spot the
+# airship rises from (the Airship event), a pseudo-site of its own.
+REGION_SITE = {
+    "chaos_shrine":               ("chaos", ()),
+    "chaos_shrine_3f_plaza":      ("chaos", (CRYSTALS_PLACED,)),
+    "chaos_shrine_b2":            ("chaos", (CRYSTALS_PLACED, LUTE)),
+    "chaos_shrine_b4":            ("chaos", (CRYSTALS_PLACED, LUTE)),
+    "castle_cornelia_1f":         ("cornelia", ()),
+    "pravoka_town":               ("pravoka", ()),
+    "matoyas_cave":               ("matoya", ()),
+    "mount_duergar":              ("duergar", ()),
+    "elven_castle":               ("elfheim", ()),
+    "western_keep":               ("wkeep", ()),
+    "marsh_cave_b2_top":          ("marsh", ()),
+    "marsh_cave_b2_bottom":       ("marsh", ()),
+    "marsh_cave_b3":              ("marsh", ()),
+    "melmond":                    ("melmond", ()),
+    "cavern_of_earth_b1":         ("earth", ()),
+    "cavern_of_earth_b2":         ("earth", ()),
+    "cavern_of_earth_b3":         ("earth", ()),
+    "cavern_of_earth_b4":         ("earth", ()),
+    # LOWER Earth Cavern chests sit past the mud gate: Earth Rod on top.
+    "cavern_of_earth_lower":      ("earth", (EARTH_ROD,)),
+    # Giant's Cavern chests sit past the Giant: you need the Ruby to pass him.
+    "giants_cavern":              ("titan", (STAR_RUBY,)),
+    "sardas_cave":                ("sarda", ()),
+    "crescent_lake":              ("crescent", ()),
+    "mount_gulg_b2":              ("gulg", ()),
+    "mount_gulg_b4_agama":        ("gulg", ()),
+    "mount_gulg_b5":              ("gulg", ()),
+    "cavern_of_ice_b1_backdoor":  ("ice", ()),
+    "cavern_of_ice_b2_room":      ("ice", ()),
+    "cavern_of_ice_b3_treasury":  ("ice", ()),
+    "airship_desert":             ("airship", ()),
+    "citadel_of_trials_2f":       ("trials", (CROWN,)),
+    "waterfall":                  ("waterfall", ()),
+    "onrac_hub":                  ("onrac", ()),
+    "onrac_caravan":              ("caravan", ()),
+    # the Sunken Shrine is dived into from Onrac
+    "sunken_shrine_2f_sharknado": ("onrac", (OXYALE,)),
+    "sunken_shrine_3f_split":     ("onrac", (OXYALE,)),
+    "sunken_shrine_3f_vertical":  ("onrac", (OXYALE,)),
+    "sunken_shrine_4f_tfc":       ("onrac", (OXYALE,)),
+    "sunken_shrine_5f":           ("onrac", (OXYALE,)),
+    # The Sky Castle: Mirage Tower needs the Chime; the Warp Cube carries you
+    # from its top into the Flying Fortress.
+    "mirage_tower_1f":            ("mirage", (CHIME,)),
+    "mirage_tower_2f":            ("mirage", (CHIME,)),
+    "flying_fortress_1f":         ("mirage", (CHIME, WARP_CUBE)),
+    "flying_fortress_2f":         ("mirage", (CHIME, WARP_CUBE)),
+    "flying_fortress_3f":         ("mirage", (CHIME, WARP_CUBE)),
+    # Lefein's only AP location is the Elder, unintelligible until Dr Unne
+    # translates the Rosetta.
+    "lefein":                     ("lufenia", (ROSETTA_TRANSLATED,)),
+    "gaia":                       ("gaia", ()),
+    # the Dragon Caves are five caves behind five doors (_locinfo / gen_locinfo
+    # DRAGON_CAVE_REGION): one site per chest cave, so a random map gates each
+    # cave on its own door; the two empty ones are no site at all
+    "dragon_caves_plains":        ("cardia_plains", ()),
+    "dragon_caves_forest":        ("cardia_forest", ()),
+    "dragon_caves_marsh":         ("cardia_marsh", ()),
+}
+# shop town (SHOP_LOCATIONS name prefix) -> its site
+SHOP_TOWN_SITE = {
+    "Cornelia": "cornelia", "Pravoka": "pravoka", "Elfheim": "elfheim",
+    "Melmond": "melmond", "Crescent Lake": "crescent", "Onrac": "onrac",
+    "Gaia": "gaia",
+}
+# bonus dungeon index (BONUS_DUNGEONS order) -> its site; the crystal (or, with
+# bonus_dungeon_crystals, the Fiend token) is ANDed on by the caller
+BONUS_SITE = {0: "earthgift", 1: "hellfire", 2: "lifespring", 3: "whisperwind"}
+# Sites that are not dungeons for the random-map "a dungeon in sphere 0" rule:
+# towns (shops, Lefein), the Caravan and the airship's desert pickup.
+NON_DUNGEON_SITES = frozenset(SHOP_TOWN_SITE.values()) | {"lufenia", "caravan", "airship"}
+
+
+def free_dungeon_sites():
+    """Dungeon sites holding at least one chest that needs nothing beyond
+    REACHING the site: no region extra (Earth Rod, Ruby, Crown, Oxyale,
+    Chime...) and no chest token (Mystic Key). Marsh Cave, the Cavern of
+    Earth and Matoya's Cave are in; Giant's Cavern (Ruby) and the bonus
+    dungeons (a crystal each, BONUS_SITE) are not. user 2026-10-18."""
+    from ._locinfo import LOC_INFO
+    out = set()
+    for region, token in LOC_INFO.values():
+        site, extra = REGION_SITE.get(region, (None, None))
+        if site is None or extra or token or site in NON_DUNGEON_SITES:
+            continue
+        out.add(site)
+    return frozenset(out)
+
+
+def location_sites():
+    """{AP location name: site key} for every location that sits at one
+    overworld site (chests, NPCs, events, shop offers, bonus-dungeon
+    chests); Bestiary kills have none. The random map's backward shortcuts
+    aim at the site a vehicle item landed on (randworld/shortcuts.py)."""
+    from . import data as DATA
+    from ._locinfo import LOC_INFO
+    out = {}
+    for _lid, name, idx in DATA.LOCATIONS:
+        site = REGION_SITE.get((LOC_INFO.get(idx) or (None, None))[0], (None, None))[0]
+        if site:
+            out[name] = site
+    for name, ordn, region, _extra in NPC_LOCATIONS:
+        # random map only, where skip_lute_cutscene is always on
+        site = REGION_SITE.get(npc_region(ordn, region, skip_lute=True),
+                               (None, None))[0]
+        if site:
+            out[name] = site
+    for name, region, _token, _extra in EVENTS:
+        site = REGION_SITE.get(region, (None, None))[0]
+        if site:
+            out[name] = site
+    for nm, _shop, _reqs in SHOP_LOCATIONS:
+        town = nm.split(" Weapon")[0].split(" Armor")[0].split(" Item")[0]
+        if SHOP_TOWN_SITE.get(town):
+            for k in range(64):
+                out[shop_location_name(nm, k)] = SHOP_TOWN_SITE[town]
+    for dg, dname, *_rest in BONUS_DUNGEONS:
+        for o in range(256):
+            out[dyn_chest_location_name(dname, o)] = BONUS_SITE[dg]
+    return out
+
+
+def sphere0_dungeons(site_rules):
+    """free_dungeon_sites() a party reaches with NO items: a site rule
+    (OR-of-AND) holding an empty AND term."""
+    return sorted(s for s in free_dungeon_sites()
+                  if any(len(a) == 0 for a in (site_rules.get(s) or ())))
+
+
+# every site a location rule can name
+SITE_KEYS = tuple(sorted({s for s, _e in REGION_SITE.values()}
+                         | set(SHOP_TOWN_SITE.values()) | set(BONUS_SITE.values())))
+
+
+def vanilla_site_rules(early: bool, extended: bool, northern_docks: bool = False,
+                       trails: bool = False, gulg_key: bool = False) -> dict:
+    """{site: OR-of-AND rule} on the VANILLA map under the open-world toggles."""
+    n = access_nodes(early, extended, northern_docks, trails, gulg_key)
+    # Elfland (Elven Castle, Western Keep, Marsh Cave): the Ship. early carves
+    # the Cornelia->Duergar foot pass and the canal is walkable regardless of
+    # Nitro, so the Canoe alone gets there too; extended (with early) chains
+    # the Duergar->Western Keep foot trail on, so they are free from the START.
+    if early and extended:
+        elfland = [[]]
+    elif early:
+        elfland = [[SHIP], [CANOE]]
+    else:
+        elfland = [[SHIP]]
+    # Whisperwind Cove: the Canoe up the Ice Cave river, plus Ice Cave access:
+    # the early canoe river, else Ship + Canal (conservative: the base map's
+    # own river already reaches it, D4).
+    whisper = _and_all([[]] if early else [list(WHISPERWIND_SHIP_CANAL_ALT)],
+                       DLC_DUNGEON_EXTRA_TOKENS[3])
+    s = {
+        "cornelia": [[]], "chaos": [[]],
+        # bridge always built -> free
+        "pravoka": [[]], "matoya": [[]],
+        "duergar": n["duergar"],
+        "elfheim": elfland, "wkeep": elfland, "marsh": elfland,
+        # Melmond's peninsula holds Melmond, the Cavern of Earth and the
+        # Titan's Tunnel mouth; Sarda's Cave sits beyond the tunnel (or a
+        # plain airship landing)
+        "melmond": n["melmond"], "earth": n["melmond"], "titan": n["melmond"],
+        "sarda": n["sardas"],
+        "crescent": n["crescent"], "gulg": n["gulg"], "ice": n["ice_cave"],
+        "airship": n["desert"],
+        # the Citadel's plateau is river-locked: Canoe on every route
+        "trials": _and_all([[AIRSHIP], [SHIP, CANAL]], [CANOE]),
+        "onrac": n["onrac"], "caravan": n["caravan"],
+        "waterfall": _and_all(n["onrac"], [CANOE]),
+        "mirage": n["mirage_desert"],
+        "lufenia": n["lefein_land"], "gaia": n["gaia"],
+        "cardia_plains": [[AIRSHIP]], "cardia_marsh": [[AIRSHIP]],
+        "cardia_forest": [[AIRSHIP]],
+        # bonus dungeons: their entrance vehicles (the crystal seal is the
+        # caller's)
+        "earthgift": [list(DLC_DUNGEON_EXTRA_TOKENS[0])],
+        "hellfire": [list(DLC_DUNGEON_EXTRA_TOKENS[1])],
+        "lifespring": [list(DLC_DUNGEON_EXTRA_TOKENS[2])],
+        "whisperwind": whisper,
+    }
+    for site in AIRSHIP_REACHES:
+        alts = _rule_alts(s[site])
+        if [AIRSHIP] not in alts:
+            s[site] = alts + [[AIRSHIP]]
+    return {k: _simplify(_rule_alts(v)) for k, v in s.items()}
+
+
+# A token nothing ever grants: the rule of a site the provider never reaches.
+# An EMPTY rule means "free" everywhere rules are read, so a missing site must
+# not fall back to one (the random provider also raises before generation
+# could get here, logic.randworld_site_rules(strict=True)).
+UNREACHABLE = "(unreachable site)"
+
+
+def _site_rule(sites: dict, site):
+    rule = sites.get(site)
+    return [[UNREACHABLE]] if rule is None else _rule_alts(rule)
+
+
+def region_rules_from_sites(sites: dict) -> dict:
+    """{region: rule} = the region's site rule AND its own tokens."""
+    return {region: _simplify(_and_all(_site_rule(sites, site), list(extra)))
+            for region, (site, extra) in REGION_SITE.items()}
+
+
+def shop_rules_from_sites(sites: dict) -> dict:
+    """Shop name -> its town's site rule, so a shop can never disagree with
+    its town."""
+    out = {}
+    for nm, _shop, _reqs in SHOP_LOCATIONS:
+        town = nm.split(" Weapon")[0].split(" Armor")[0].split(" Item")[0]
+        out[nm] = _simplify(_site_rule(sites, SHOP_TOWN_SITE.get(town)))
+    return out
+
+
+def bonus_entrance_rule(sites: dict, dg: int):
+    """A bonus dungeon's entrance rule (its site's; the crystal seal is the
+    caller's)."""
+    return _simplify(_site_rule(sites, BONUS_SITE[dg]))
+
+
+def site_rules_for_slot(slot_data) -> dict:
+    """The site provider a seed's slot_data selects -- the client-side twin of
+    __init__._site_rules: the random overworld's own rules when it ships
+    "randworld", else the vanilla hand rules under its open-world toggles."""
+    sd = slot_data or {}
+    rw = sd.get("randworld")
+    if rw:
+        return randworld_site_rules(rw)
+    return vanilla_site_rules(bool(sd.get("early_open_progression")),
+                              bool(sd.get("extended_open_progression")),
+                              bool(sd.get("northern_docks")),
+                              bool(sd.get("northern_foot_trails")),
+                              bool(sd.get("mount_gulg_key")))
+
+
 def region_rules_for(early: bool, extended: bool, northern_docks: bool = False,
                      trails: bool = False, gulg_key: bool = False) -> dict:
-    """Effective region rules for the open-world toggles. Fresh dict;
-    values are AND-lists or OR-of-AND-lists (see set_rules access())."""
-    r = {k: list(v) for k, v in REGION_RULES.items()}
-    n = access_nodes(early, extended, northern_docks, trails, gulg_key)
-
-    # --- node-driven regions (see access_nodes) ---
-    r["mount_duergar"] = n["duergar"]
-    r["melmond"] = n["melmond"]
-    # Cavern of Earth Upper = Melmond access; Lower = Upper + Earth Rod.
-    for k in ("cavern_of_earth_b1", "cavern_of_earth_b2", "cavern_of_earth_b3",
-              "cavern_of_earth_b4"):
-        r[k] = n["melmond"]
-    r["cavern_of_earth_lower"] = _and_all(n["melmond"], [EARTH_ROD])
-    r["giants_cavern"] = n["giants"]
-    r["sardas_cave"] = n["sardas"]
-    r["onrac_hub"] = n["onrac"]
-    r["onrac_caravan"] = n["caravan"]
-    # Lefein = PHYSICAL access to the Lefein landmass (airship, or the Lufenian
-    # Bridge with the trails option) AND the translated Rosetta, because the only
-    # AP location in town is the Elder and he is unintelligible until Dr Unne
-    # translates it. Town access on its own carries no AP location today (Lefein
-    # has no AP shop and the bestiary files its landmass under its own generated
-    # node), so there is no separate lefein_town region to register.
-    r["lefein"] = _and_all(n["lefein_land"], [ROSETTA_TRANSLATED])
-    # Gaia: the mountain-locked pocket. Airship, or either nitro-powder route.
-    # SHOP_TOWN_REGION points the Gaia shops here, so they follow it exactly.
-    r["gaia"] = n["gaia"]
-    # Sunken Shrine = Onrac access + Oxyale (you still need to breathe down there).
-    # Waterfall = Onrac access + Canoe.
-    for k in ("sunken_shrine_2f_sharknado", "sunken_shrine_3f_split",
-              "sunken_shrine_3f_vertical", "sunken_shrine_4f_tfc",
-              "sunken_shrine_5f"):
-        r[k] = _and_all(n["onrac"], [OXYALE])
-    r["waterfall"] = _and_all(n["onrac"], [CANOE])
-    # Crescent Lake / Mount Gulg / Cavern of Ice (see access_nodes).
-    r["crescent_lake"] = n["crescent"]
-    for k in ("mount_gulg_b2", "mount_gulg_b4_agama", "mount_gulg_b5"):
-        r[k] = n["gulg"]
-    for k in ("cavern_of_ice_b1_backdoor", "cavern_of_ice_b2_room",
-              "cavern_of_ice_b3_treasury"):
-        r[k] = n["ice_cave"]
-    for k in ("mirage_tower_1f", "mirage_tower_2f"):
-        r[k] = n["mirage_tower"]
-    for k in ("flying_fortress_1f", "flying_fortress_2f", "flying_fortress_3f"):
-        r[k] = n["flying_fortress"]
-    # Citadel = Crown + Canoe + (Airship OR Ship+Canal)
-    r["citadel_of_trials_2f"] = _and_all([[AIRSHIP], [SHIP, CANAL]], [CROWN, CANOE])
-
-    if early:
-        # early carves the Cornelia->Duergar foot pass and the canal is walkable
-        # regardless of Nitro, so the whole Elfland landmass (Western Keep, Elven
-        # Castle, Marsh Cave) is reachable with just the CANOE -- ship-free. Added
-        # as an OR alternative to the base [SHIP]; the airship alt is folded in
-        # below, and extended (if also on) upgrades these to free foot access.
-        for k in ("western_keep", "elven_castle", "marsh_cave_b2_top",
-                  "marsh_cave_b2_bottom", "marsh_cave_b3"):
-            r[k] = _rule_alts(r[k]) + [[CANOE]]
-
-    if extended:
-        if early:
-            # Duergar->WK is a plain FOOT trail (no canal needed). With early also on,
-            # Cornelia->Duergar (early pass) chains into Duergar->WK (extended trail), so
-            # you walk there from the START, ship-free and canal-free -> WK / Elven / Marsh
-            # are reachable at start. (Only meaningful WITH early, since reaching Duergar
-            # on foot is what the early pass provides.)
-            for k in ("western_keep", "elven_castle", "marsh_cave_b2_top",
-                      "marsh_cave_b2_bottom", "marsh_cave_b3"):
-                r[k] = []
-    # Airship also reaches these areas -> OR in its alternative on top of whatever
-    # the toggles produced. A region already reachable ([]) stays [] (the airship
-    # alt is harmlessly redundant); everything else gains "or by airship".
-    for region, air_alt in AIRSHIP_REACHES.items():
-        if region not in r:
-            continue
-        alts = _rule_alts(r[region])
-        if air_alt not in alts:
-            r[region] = alts + [list(air_alt)]
-    # Collapse alternatives that composing nodes made redundant (a path needing
-    # everything another needs plus more). Semantics unchanged; rules read cleanly.
-    return {k: _simplify(_rule_alts(v)) for k, v in r.items()}
+    """Effective VANILLA region rules for the open-world toggles. Fresh dict;
+    values are OR-of-AND lists (see set_rules access())."""
+    return region_rules_from_sites(vanilla_site_rules(
+        early, extended, northern_docks, trails, gulg_key))
 
 
 # (RETIRED 2026-07-27: LATE_TOKENS / is_late_rule / late_regions, the "is this
@@ -879,34 +1112,12 @@ def _rule_alts(rule):
     return [list(rule)]
 
 
-# Every AP shop sells inside a town, so its access rule IS that town's access rule.
-# shop name prefix -> the region whose rule it inherits ("" = free from the start).
-SHOP_TOWN_REGION = {
-    "Cornelia":      None,             # start town
-    "Pravoka":       None,             # bridge always built -> free
-    "Elfheim":       "elven_castle",
-    "Melmond":       "melmond",
-    "Crescent Lake": "crescent_lake",
-    "Onrac":         "onrac_hub",
-    "Gaia":          "gaia",
-}
-
-
 def shop_rules_for(early: bool, extended: bool, northern_docks: bool = False,
                    trails: bool = False, gulg_key: bool = False) -> dict:
-    """Shop-name -> access rule. Every item shop simply inherits the rule of the
-    town it stands in (SHOP_TOWN_REGION), so a shop can never disagree with its
-    town's chests."""
-    r = region_rules_for(early, extended, northern_docks, trails, gulg_key)
-    o = {}
-    for nm, _shop, _reqs in SHOP_LOCATIONS:
-        town = nm.split(" Weapon")[0].split(" Armor")[0].split(" Item")[0]
-        region = SHOP_TOWN_REGION.get(town, "__missing__")
-        if region is None:
-            o[nm] = []
-        elif region in r:
-            o[nm] = r[region]
-    return o
+    """VANILLA shop-name -> access rule: every item shop inherits the rule of
+    the town it stands in (SHOP_TOWN_SITE)."""
+    return shop_rules_from_sites(vanilla_site_rules(
+        early, extended, northern_docks, trails, gulg_key))
 
 # ---- event graph: (event_name, region, granted_token, [extra requirements]) --
 # Reachability of an event = its region rule passes AND extra reqs held.
@@ -916,7 +1127,7 @@ EVENTS = [
     # built (the runtime client forces the overworld bridge bit every game), so the
     # BRIDGE token was removed outright (2026-07-17) -- there is no "King's Bridge"
     # event and no King check (nothing left to detect). The Princess IS in the
-    # graph: "Cornelia - Princess" is a real randomized NPC location (NPC_LOCATIONS
+    # graph: "Chaos Shrine NPC: Garland" is a real randomized NPC location (NPC_LOCATIONS
     # ordinal 1, detected via the Lute key-item bit), and the LUTE is a REAL pool
     # item (or assembled from Lute Tablets) that the endgame Black-Orb rule gates
     # on via state.has.
@@ -953,8 +1164,11 @@ EVENTS = [
     # Fire: Kary
     ("Mount Gulg - Kary",           "mount_gulg_b5",       FIRE_CRYSTAL, []),
 
-    # Airship: Levistone raised in the desert
-    ("Ryukhan Desert - Airship",    "cavern_of_ice_b2_room", AIRSHIP, [LEVISTONE]),  # RECON: desert reachable once canoe/ice tier
+    # Airship: Levistone raised in the desert. The desert is its own region
+    # (airship_desert), not the Ice Cave where the Levistone lies: with
+    # open_progression off the Ice Cave is Canoe-only but the desert needs the
+    # Ship too (D1, RANDWORLD_LOGIC_DESIGN.md).
+    ("Ryukhan Desert - Airship",    "airship_desert",      AIRSHIP, [LEVISTONE]),
 
     # Water: Bottled Faerie -> Oxyale -> Kraken (NO submarine in FF1 PSP). The Onrac /
     # Gaia hub is Airship + Canoe (onrac_hub). The Bottled Faerie (Caravan) and Oxyale
@@ -1003,8 +1217,10 @@ from .bestiary_data import (ACCESS_CLASSES, AUTHORED_HARDER_DUNGEONS,
                             CAVE_MAP_DUNGEON, CHAOS_FLOOR_MAP, DUNGEON_MONSTERS,
                             HARDER_TARGET, SOURCE_GATE, SOURCE_KEY_GATE,
                             DUNGEON_DISPLAY, FORMATION_MONSTERS, ZONE_ACCESS,
+                            TERRAIN_TIER_POOLS,
                             SOURCE_SECTION as BESTIARY_SOURCE_SECTION)
 from .client.monster_names import MONSTER_NAME as BESTIARY_MONSTER_NAME
+from . import randworld_territories as RWT
 
 
 def _bestiary_names():
@@ -1116,7 +1332,9 @@ _BESTIARY_DUNGEON_RULES = {
     "mirage":         [[AIRSHIP, CHIME]],
     "fortress":       [[AIRSHIP, CHIME, WARP_CUBE]],
     "chaos_basement": [[CRYSTALS_PLACED, LUTE]],
-    "onrac":          [[AIRSHIP]],
+    # Titan's Tunnel: its far mouth by airship (as Sarda's Cave), or through
+    # Titan from Melmond with the Ruby
+    "titan":          [[AIRSHIP], [SHIP, CANAL, STAR_RUBY]],
     "sunken":         [[AIRSHIP, OXYALE]],
 }
 
@@ -1239,6 +1457,8 @@ def _bestiary_source_rule_ungated(source, opts):
                    stays below.
 
     opts: the seed's bestiary opts dict (see __init__._bestiary_setup)."""
+    if opts and opts.get("randworld"):
+        return _randworld_source_rule(source, opts)
     kind, key = source
     # KeyError here is the point: a kind the generator emitted without a gate
     # must fail loudly rather than default to always-on.
@@ -1283,6 +1503,9 @@ def _bestiary_source_rule_ungated(source, opts):
         return rule
     if kind in ("hd", "cf", "ff"):
         return _BESTIARY_DUNGEON_RULES[key]     # authored rows, keyed by dungeon
+    if kind == "cfs":
+        # one authored chaos row by MAP id (shortened_temple_of_fiends)
+        return _BESTIARY_DUNGEON_RULES[CAVE_MAP_DUNGEON[key]]
     if kind == "dlc":
         # key = dungeon index * 10 + floor band (bestiary_data groups the
         # shared DLC rows per dungeon), so the gate is that ONE dungeon.
@@ -1325,27 +1548,45 @@ def bestiary_place_sources(mon, opts, ow_sources=None, cave_sources=None):
     spawn (the Cobra bug, 2026-08-31). With no table supplied the baked rows
     still answer -- they are exactly right on a seed that rerolled nothing."""
     drop = {"ow", "ow_harder"}
+    if opts and opts.get("randworld"):
+        # every baked land row describes the VANILLA map; a random world's
+        # land places arrive in ow_sources (randworld_land_sources)
+        drop |= _BAKED_LAND_KINDS
     if cave_sources is not None:
         drop.add("cave")
     out = [src for src in BESTIARY_SOURCES.get(mon, ())
            if src[0] not in drop and bestiary_source_rule(src, opts) is not None]
-    out += sorted((ow_sources or {}).get(mon, ()))
-    out += sorted((cave_sources or {}).get(mon, ()))
+    # the rolled places pass the same filter: on a random overworld a
+    # territory heading under MIN_TILES reachable tiles rolls but never opens
+    out += sorted(s for s in (ow_sources or {}).get(mon, ())
+                  if bestiary_source_rule(s, opts) is not None)
+    out += sorted(s for s in (cave_sources or {}).get(mon, ())
+                  if bestiary_source_rule(s, opts) is not None)
     return out
 
 
-def bestiary_minion_monsters(minion_plan, bonus_excluded=False):
+def bestiary_minion_monsters(minion_plan, bonus_excluded=False, opts=None):
     """mon -> OR-of-AND rule, for every add monster the rolled plan actually
     spawns (max > 0). minion_plan = slot_data boss_minions_plan
-    ([[fid, [[mon, lo, hi], ...], layout], ...])."""
+    ([[fid, [[mon, lo, hi], ...], layout], ...]). opts: the bestiary opts --
+    only read for a random overworld, where the bosses' places move."""
+    rw = (opts or {}).get("randworld")
     out = {}
     for fid, groups, _layout in (minion_plan or []):
+        # a boss fight the seed never stages (the fiend refights under
+        # shortened_temple_of_fiends) spawns no adds either
+        if not _gate_open(SOURCE_KEY_GATE.get(("scripted", fid), ()), opts):
+            continue
         if fid in _BESTIARY_SCRIPTED_RULES:
-            rule = _BESTIARY_SCRIPTED_RULES[fid]
+            rule = (_rw_scripted_rule(fid, opts) if rw
+                    else _BESTIARY_SCRIPTED_RULES[fid])
         elif 0x100 <= fid <= 0x110 and not bonus_excluded:
-            rule = _BESTIARY_BONUS_RULES[
-                BESTIARY_DLC_BOSS_BAND[0x80 + fid - 0x100]]
+            band = BESTIARY_DLC_BOSS_BAND[0x80 + fid - 0x100]
+            rule = (_rw_bonus_rule(band, opts) if rw
+                    else _BESTIARY_BONUS_RULES[band])
         else:
+            continue
+        if not rule:
             continue
         for mon, _lo, hi in groups:
             if hi > 0:
@@ -1602,3 +1843,262 @@ def bestiary_rules(mon, opts, minion_rules=None, ow_sources=None,
     if common:
         return common, True
     return every, False
+
+
+# ================= random overworlds (ff1psp/randworld_territories) ==========
+# A generated overworld moves every site, so each place's access comes from the
+# world itself rather than from the vanilla rule tables above (user spec
+# 2026-10-14). The builder exports three answers (Territories.export):
+#   land   (kind, hub) -> rule   one roster per territory per terrain; the rule
+#                                needs >= MIN_TILES reachable tiles of it
+#   water  region -> rule        the compass water regions, by ship / canoe
+#   sites  site key -> rule      which item sets reach the site's door
+# opts["randworld"] = randworld_index(export) switches every bestiary rule over.
+# Dungeons, story fights and bonus dungeons keep their NON-vehicle gates
+# (Chime, Oxyale, the crystals, ...) ANDed onto their site's access: the
+# vehicle half of a vanilla rule is geography, and the geography moved.
+
+# baked land kinds: vanilla geography, dropped wholesale on a random world
+_BAKED_LAND_KINDS = frozenset(("ow", "ow_harder", "desert", "desert_harder",
+                               "t4", "t4_harder", "forest", "forest_harder"))
+
+# bestiary dungeon key -> (site key, extra tokens)
+RANDWORLD_DUNGEON_SITE = {
+    "chaos_f1":       ("chaos", ()),
+    "marsh":          ("marsh", ()),
+    "earth":          ("earth", ()),
+    "gurgu":          ("gulg", ()),
+    "ice":            ("ice", ()),
+    "trials":         ("trials", (CROWN,)),
+    "waterfall":      ("waterfall", ()),
+    "mirage":         ("mirage", (CHIME,)),
+    "fortress":       ("mirage", (CHIME, WARP_CUBE)),
+    "chaos_basement": ("chaos", (CRYSTALS_PLACED, LUTE)),
+    # cave map 0x28 = Titan's Tunnel; the Ruby, as for its chests (either
+    # mouth may be the one a world puts in reach)
+    "titan":          ("titan", (STAR_RUBY,)),
+    "sunken":         ("onrac", (OXYALE,)),
+}
+# scripted fid -> ("dungeon", key) | ("site", key, extra tokens); must cover
+# every _BESTIARY_SCRIPTED_RULES key (test_randworld_logic pins it)
+RANDWORLD_SCRIPTED = {
+    0x7F: ("dungeon", "chaos_f1"),                 # Garland
+    0x7E: ("site", "pravoka", ()),                 # Bikke's Pirates
+    0x1C: ("dungeon", "marsh"), 0x9C: ("dungeon", "marsh"),   # Piscodemon
+    0x7C: ("dungeon", "earth"),                    # Vampire
+    0x7D: ("site", "wkeep", ()),                   # Astos
+    0x7A: ("dungeon", "earth"),                    # Lich
+    0x79: ("dungeon", "gurgu"),                    # Marilith
+    0x78: ("dungeon", "sunken"),                   # Kraken
+    0x77: ("dungeon", "fortress"),                 # Tiamat
+    0x73: ("dungeon", "chaos_basement"), 0x74: ("dungeon", "chaos_basement"),
+    0x75: ("dungeon", "chaos_basement"), 0x76: ("dungeon", "chaos_basement"),
+    0x7B: ("dungeon", "chaos_basement"),           # Chaos
+    0x56: ("dungeon", "fortress"),                 # Warmech
+    0x4C: ("dungeon", "fortress"),                 # Guardians
+}
+RANDWORLD_TILE_SITE = {0x58: ("wkeep", ())}       # Astos' castle tiles
+# bonus dungeon index -> (site key, crystal seal)
+RANDWORLD_BONUS_SITE = {
+    0: ("earthgift", (EARTH_CRYSTAL,)),
+    1: ("hellfire", (FIRE_CRYSTAL,)),
+    2: ("lifespring", (WATER_CRYSTAL,)),
+    3: ("whisperwind", (AIR_CRYSTAL,)),
+}
+
+
+def randworld_index(export):
+    """Territories.export() (plain JSON, as slot_data ships it) -> the
+    lookup logic reads: {"land": {(kind, hub): rule}, "water", "sites"}."""
+    return {
+        "land": {(k, hub): rule for k, hub, _tiles, rule in export["land"]},
+        "water": dict(export["water"]),
+        "sites": dict(export["sites"]),
+        # map_size: dungeons a tiny / small world left out (randworld/sizing)
+        "skipped_dungeons": frozenset((export.get("skipped") or {}).get("dungeons", ())),
+        # map_size tiny + regional oceans: the one pool every quadrant rolls
+        "ocean_outer_pool": export.get("ocean_outer_pool"),
+    }
+
+
+def randworld_site_rules(export, strict=False):
+    """{site: OR-of-AND rule or None} for a random overworld: the world
+    graph's minimal token sets (Territories.export()["sites"]). They already
+    hold every route the world has -- vehicles, the canal ("Canal Opened",
+    Nerrick's event), the gate items the plan placed (Lufenian Bridge,
+    "<Area> Nitro", Mount Gulg Key) -- so NO yaml option adds anything here
+    (user 2026-10-16: open_progression / northern_docks only steer the
+    generator).
+
+    strict (generation): raise rather than build an unbeatable seed when a
+    site a location needs is missing or unreachable, or when Duergar sits
+    only behind the canal Nerrick opens, or the desert only behind the
+    airship it raises."""
+    sites = {k: (None if v is None else [list(a) for a in v])
+             for k, v in export["sites"].items()}
+    if strict:
+        # (map_size: the sites a tiny / small world leaves out hold nothing)
+        gone = set((export.get("skipped") or {}).get("sites", ()))
+        bad = sorted(k for k in SITE_KEYS if not sites.get(k) and k not in gone)
+        if bad:
+            raise ValueError("random overworld: no route to site(s) "
+                             + ", ".join(bad))
+        for site, token in (("duergar", CANAL), ("airship", AIRSHIP)):
+            if all(token in a for a in sites[site]):
+                raise ValueError(f"random overworld: {site} is reachable only "
+                                 f"with {token!r}, which it provides")
+    return sites
+
+
+def _rw_site_rule(site, extra, opts):
+    base = opts["randworld"]["sites"].get(site)
+    if not base:
+        return None                       # not placed, or never reachable
+    rule = _and_all(base, list(extra)) if extra else [list(a) for a in base]
+    # (the Mount Gulg Key needs no special case: the plan's seal is a graph
+    # edge, so the site rule already carries it)
+    return _simplify(rule)
+
+
+def _rw_dungeon_rule(dungeon, opts):
+    if dungeon in opts["randworld"].get("skipped_dungeons", ()):
+        return None                       # left out of a tiny / small world
+    site, extra = RANDWORLD_DUNGEON_SITE[dungeon]
+    return _rw_site_rule(site, extra, opts)
+
+
+def _rw_scripted_rule(fid, opts):
+    how = RANDWORLD_SCRIPTED[fid]
+    if how[0] == "dungeon":
+        return _rw_dungeon_rule(how[1], opts)
+    return _rw_site_rule(how[1], how[2], opts)
+
+
+def _rw_bonus_rule(band, opts):
+    site, extra = RANDWORLD_BONUS_SITE[band]
+    return _rw_site_rule(site, extra, opts)
+
+
+def _randworld_source_rule(source, opts):
+    """_bestiary_source_rule_ungated for a random overworld."""
+    kind, key = source
+    rw = opts["randworld"]
+    if kind in RWT.LAND_KINDS and isinstance(key, str):
+        return rw["land"].get((kind, key))        # a territory heading
+    if kind in _BAKED_LAND_KINDS:
+        return None                               # vanilla geography
+    if not _gate_open(SOURCE_GATE[kind], opts):
+        return None
+    if not _gate_open(SOURCE_KEY_GATE.get(source, ()), opts):
+        return None
+    if kind == "cave":
+        if opts.get("harder_dungeons") and not opts.get("cave_exact"):
+            return None
+        return _rw_dungeon_rule(CAVE_MAP_DUNGEON[key], opts)
+    if kind == "ocean":
+        return rw["water"].get("ocean_start" if opts.get("ocean") else "ocean")
+    if kind == "oc":
+        pool = rw.get("ocean_outer_pool")
+        if pool:
+            # a tiny world: every quadrant rolls this one pool
+            if key != pool:
+                return None
+            alts = [a for k in (1, 2, 3, 4) for a in (rw["water"].get(f"oc{k}") or ())]
+            return _simplify(alts) if alts else None
+        return rw["water"].get(f"oc{key}")
+    if kind == "river":
+        return rw["water"].get("river_south" if opts.get("river") else "river")
+    if kind == "rr":
+        return rw["water"].get("rr")
+    if kind == "scripted":
+        return _rw_scripted_rule(key, opts)
+    if kind == "tile":
+        how = RANDWORLD_TILE_SITE.get(key)
+        if how is not None:
+            return _rw_site_rule(how[0], how[1], opts)
+        return _rw_dungeon_rule(CAVE_MAP_DUNGEON[key], opts)
+    if kind in ("hd", "cf", "ff"):
+        return _rw_dungeon_rule(key, opts)
+    if kind == "cfs":
+        return _rw_dungeon_rule(CAVE_MAP_DUNGEON[key], opts)
+    if kind == "dlc":
+        return _rw_bonus_rule(key // 10, opts)
+    if kind == "dlc_boss":
+        return _rw_bonus_rule(BESTIARY_DLC_BOSS_BAND[0x80 + (key - 0x100)], opts)
+    raise KeyError(f"unknown bestiary source kind {kind!r}")
+
+
+def randworld_water_read(opts):
+    """The Territories water regions _randworld_source_rule reads under these
+    bestiary opts: the ocean and river hunts. The random-map shortcut pass
+    holds only these still (shortcuts.logic_view);
+    test_randworld_shortcuts.test_randworld_water_read pins the parity."""
+    out = {"ocean_start", "oc1", "oc2", "oc3", "oc4"} if opts.get("ocean") else {"ocean"}
+    out |= {"river_south", "rr"} if opts.get("river") else {"river"}
+    return frozenset(out)
+
+
+def randworld_land_sources(rw, zones_overworld, ow_hi=None, opts=None,
+                           odds=None):
+    """{mon: {(kind, hub), ...}} -- what each territory heading rolls.
+
+    rw              -- randworld_index(export)
+    zones_overworld -- rando.randworld_zone_tables' low table (row = hub)
+    ow_hi           -- its high-byte companion (harder_overworld), or None
+    opts            -- bestiary opts (harder_ow picks the forest pool)
+
+    'ow' (plains, marsh and brush) reads the hub's rolled row; forest / desert read the hub
+    tier's authored pool (TERRAIN_TIER_POOLS): a generated world has no
+    vanilla per-zone desert rows to fall back on. Slot = roll index, so the
+    tab's odds come out exactly as on the vanilla map."""
+    out = {}
+    for src, row in _randworld_land_rows(rw, zones_overworld, ow_hi, opts):
+        for slot, fid in enumerate(row):
+            for mon in FORMATION_MONSTERS.get(fid, ()):
+                out.setdefault(mon, set()).add(src)
+                _note_odds(odds, mon, src, slot)
+    return out
+
+
+def _randworld_land_rows(rw, zones_overworld, ow_hi=None, opts=None):
+    """Yield ((kind, hub), 8 formation ids) per territory heading -- the one
+    row each heading rolls (randworld_land_sources has the rules)."""
+    harder = bool((opts or {}).get("harder_ow"))
+    for kind, hub in rw["land"]:
+        tier = RWT.HUB_TIER[hub]
+        # "t4": only a seed generated before brush joined the land row
+        # (2026-10-26) carries one; its disc now rolls the hub's row there.
+        if kind in ("ow", "t4"):
+            h = RWT.HUB_INDEX[hub]
+            if not zones_overworld or len(zones_overworld) < (h + 1) * 8:
+                continue
+            row = []
+            for slot in range(8):
+                i = h * 8 + slot
+                fid = zones_overworld[i]
+                if ow_hi and i < len(ow_hi) and ow_hi[i]:
+                    fid |= ow_hi[i] << 8
+                row.append(fid)
+        else:
+            pool = "forest_harder" if (kind == "forest" and harder) else kind
+            row = TERRAIN_TIER_POOLS[pool][tier]
+        yield (kind, hub), row
+
+
+def randworld_source_rows(rw, zones_overworld, ow_hi=None, opts=None):
+    """{(kind, hub): [{"mon", "name", "pct"}, ...]} -- what ONE territory
+    heading rolls, commonest first: the random-map twin of
+    overworld_zone_rows. A territory rolls a single row everywhere inside it
+    (the randworld_regions cave reads the hub per cell), so this IS the local
+    truth for the Map tab's "You are in" line, on every land terrain."""
+    out = {}
+    for src, row in _randworld_land_rows(rw, zones_overworld, ow_hi, opts):
+        best = {}
+        for slot, fid in enumerate(row):
+            for mon in FORMATION_MONSTERS.get(fid, ()):
+                best[mon] = max(best.get(mon, 0.0), SLOT_ODDS_PCT[slot])
+        rows = [{"mon": m, "name": BESTIARY_MONSTER_NAME.get(m, f"{m:#04x}"),
+                 "pct": p} for m, p in best.items()]
+        rows.sort(key=lambda e: (-e["pct"], e["name"]))
+        out[src] = rows
+    return out

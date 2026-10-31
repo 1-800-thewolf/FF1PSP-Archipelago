@@ -3294,14 +3294,15 @@ _DF_ZONE_TIER = (
 )
 
 
-def _df_data(harder):
+def _df_data(harder, zone_tier=None):
     """Cave data: ZONE_TIER[64] (u8) + POOL[9][_DF_POOL_MAX] (u16, @+64) +
     SLOT_MAP[64] (u8, @+64+18*_DF_POOL_MAX) = 272 B at _DF_POOL_MAX=8. POOL starts
     at an even offset so its `lhu` reads stay aligned. The per-tier CNT array is
     GONE as of v190: the weight map yields slots 0..MAX-1 unconditionally, so every
     pool must be exactly _DF_POOL_MAX deep (asserted below) -- a short row would be
-    read past its end."""
-    zone_tier = bytes(_DF_ZONE_TIER)
+    read past its end. zone_tier: a random overworld's REGION -> tier map
+    (_rw_zone_tier) in place of the vanilla 64 zones."""
+    zone_tier = bytes(_DF_ZONE_TIER if zone_tier is None else zone_tier)
     pools = _DF_TIER_POOL_B if harder else _DF_TIER_POOL_A
     assert len(zone_tier) == 64 and len(pools) == 9 and max(zone_tier) < len(pools)
     assert all(len(p) == _DF_POOL_MAX for p in pools), \
@@ -4132,7 +4133,9 @@ def apply_dangerous_forests(elf: bytearray, feats=None):
     # bypassing the vanilla u8 slot roll. The tail restores $ra from its OWN stack
     # frame (0x1c($sp)), so the jal clobbering $ra is harmless. t0-t4 are free
     # scratch; $s0-$s2/$s4 survive the jal (callee-saved) and drive the pool lookup.
-    data = _df_data(harder)
+    # Random overworld: the "zone" the cave derives from s0 is the REGION the
+    # randworld_regions hook put in a0, so only the tier table changes.
+    data = _df_data(harder, _rw_zone_tier(feats))
     def _code(zonetier_vaddr, pool_vaddr, slotmap_vaddr):
         return A.asm_labels([
             A.lw("t0", _DF_GRID_PTR_OFF, "s4"),      # grid arena
@@ -4299,13 +4302,15 @@ _OC_FORM_EDITS = {
 }
 
 
-def _oc_zone_pool():
+def _oc_zone_pool(outer=0):
     """ZONE_POOL[64] (u8): 0 = starting-sea / no-ocean (keep vanilla flat roll),
-    1..4 = NW/NE/SW/SE regional pool. Inverse of _OC_POOL_ZONES."""
+    1..4 = NW/NE/SW/SE regional pool. Inverse of _OC_POOL_ZONES.
+    outer: map_size tiny (bake context ocean_outer_pool) -- every outer
+    quadrant rolls this one pool; the central sea keeps its vanilla roll."""
     zp = bytearray(64)
     for pool, zones in _OC_POOL_ZONES.items():
         for z in zones:
-            zp[z] = pool
+            zp[z] = outer or pool
     return bytes(zp)
 
 
@@ -4331,7 +4336,7 @@ def apply_regional_ocean_encounters(elf: bytearray, feats=None):
     w = struct.unpack_from("<I", elf, fo)[0]
     if w != _OC_HOOK_W0:
         raise ValueError(f"unexpected terrain-2 hook @{_OC_HOOK:#x}: {w:#010x}")
-    zone_pool = _oc_zone_pool()
+    zone_pool = _oc_zone_pool(int((feats or {}).get("ocean_outer_pool") or 0))
     for p, row in _OC_POOL_ROWS.items():
         assert len(row) == 8, f"ocean pool {p} must be exactly 8 slots (weighted map)"
     pool_rows = b"".join(struct.pack("<H", f)
@@ -4666,11 +4671,12 @@ _T4_TIER_POOL = [
 ]
 
 
-def _tp_data(pools):
+def _tp_data(pools, zone_tier=None):
     """Cave data: ZONE_TIER[64] (u8) + POOL[9][8] (u16, @+64) + SLOT_MAP[64]
     (@+208) = 272 B. Byte-for-byte the same shape dangerous_forests uses, so the
-    two caves share _DF_ZONE_TIER and _slot_weight_map()."""
-    zone_tier = bytes(_DF_ZONE_TIER)
+    two caves share _DF_ZONE_TIER and _slot_weight_map(). zone_tier: a random
+    overworld's REGION -> tier map (_rw_zone_tier)."""
+    zone_tier = bytes(_DF_ZONE_TIER if zone_tier is None else zone_tier)
     assert len(zone_tier) == 64 and len(pools) == 9
     assert max(zone_tier) < len(pools)
     assert all(len(p) == _TP_POOL_MAX for p in pools), \
@@ -4681,8 +4687,186 @@ def _tp_data(pools):
     return data
 
 
+# ---- feature: Random-overworld encounter regions ----------------------------
+# A generated overworld (re_only/ow_rando) moves every site, and the bestiary's
+# rule is that encounters FOLLOW the sites: each hub claims a territory
+# (ff1psp/randworld_territories), and a territory rolls ONE roster per terrain,
+# its hub's (user spec 2026-10-14). The engine's 32x32 zone grid cannot draw a
+# territory border, so this feature replaces the zone with a per-tile REGION.
+#
+# The encounter fn (0x08841e1c) computes zone = ((x+7)>>5) + 8*((y+7)>>5) at
+# 0x08841ef4..0x08841f10 into a0, loading the terrain type into v1 on the way
+# (0x08841f0c). Everything downstream keys off that a0:
+#   terrain 0 land   zones_overworld + a0*8      -> row = region (one per hub)
+#   dangerous_forests  derives a0 back from s0   -> ZONE_TIER[region]
+#   overworld_u16      companion at the same delta -> the region's high bytes
+#   terrain_pools      reads a0 itself here (rw mode) -> ZONE_TIER[region]
+# while the water paths ignore it: the flat river/sea rows take no index, and the
+# regional-ocean / northern-river caves compute their OWN compass zone (water
+# keeps its compass regions -- user call). So one hook covers all land rolls.
+#
+# The hook jumps over the whole zone block into the cave, which redoes the one
+# live displaced load (v1 = terrain type), looks up a0 = the REGION of tile
+# (x, y) -- x the party's own tile x, the index the tile getter and forest ATT
+# read use -- and resumes at 0x08841f14. A land tile outside every territory
+# (0xFF) takes the fn's own "no encounter" exit: row 63 would roll formation 0,
+# which is 3-5 Goblins.
+#
+# That x is the ENGINE's: its grid starts one cell before ours (AMD byte 8,
+# ff1_data.OW_GRID_PTR_SKEW), so field x = grid x + 1 and engine column 0 is
+# grid column 254 of the same row (randworld_bake.disc_cells files it there).
+# The region map is GRID-indexed, so _rw_encode_regions files it in ENGINE
+# columns. v334..v353 read it raw: the east-most column of every territory
+# rolled its east neighbour's roster (engine-grid-starts-one-cell-early).
+#
+# STORAGE: the raw map is 64 KB, and the cave segment cannot hold that -- it
+# pushed the feature mailboxes past the client's 0x10000 scan window and
+# spell_tomes' bss tail out of its 64 KB page (test_patch, 2026-10-15). It is
+# stored as ROW RUNS instead (_rw_encode_regions): u16 ROW_OFF[255] + per row
+# (last_x, region) byte pairs, the last run of a row ending at x = 255. Only
+# tiles you can stand on ever roll, so "no region" cells (sea, mountains, towns)
+# are don't-care and take their row neighbour's value; a row with no territory
+# at all stays one 0xFF run. That keeps every walkable tile exact and packs a
+# generated world to ~2 KB (archipelago_1: 761 runs, 2032 B).
+_RW_ZONE_HOOK = 0x08841EF4
+_RW_ZONE_WORDS = (0x26220007, 0x00021943, 0x26420007, 0x00021143,
+                  0x000210C0, 0x00621021, 0x92030001, 0x304400FF)
+_RW_ZONE_RESUME = 0x08841F14       # addiu v0,zero,4 -- the terrain switch
+_RW_NO_ENCOUNTER = 0x088425C0      # the fn's own `return 0` (lw ra,0x1c(sp) ...)
+_RW_NONE = 0xFF
+_RW_MAP_LEN = 255 * 255
+
+
+def _rw_zone_tier(feats):
+    """REGION -> tier for the forest / desert / grass caves on a random
+    overworld (randworld_territories.HUB_TIER by hub index; unused rows 0), or
+    None on the vanilla map."""
+    if not (feats or {}).get("randworld_regions"):
+        return None
+    from .. import randworld_territories as RWT
+    tiers = [RWT.HUB_TIER[k] for k in RWT.HUB_KEYS]
+    return tuple(tiers + [0] * (64 - len(tiers)))
+
+
+_RW_ROWS = 255
+
+
+def _rw_encode_regions(regions):
+    """255*255 GRID-indexed region bytes -> ROW_OFF u16[255] + run pairs (see
+    STORAGE), filed by ENGINE column: engine (ex, ey) = grid ((ex - 1) % 255,
+    ey), the x the cave is handed. Offsets are relative to the first run pair."""
+    if len(regions) != _RW_MAP_LEN:
+        raise ValueError(f"randworld_regions: region map is {len(regions)} B, "
+                         f"want {_RW_MAP_LEN}")
+    if any(r >= 64 and r != _RW_NONE for r in regions):
+        raise ValueError("randworld_regions: region ids must be < 64 (or 0xFF)")
+    offs, runs = [], bytearray()
+    for y in range(_RW_ROWS):
+        grid_row = regions[y * 255:(y + 1) * 255]
+        row = [grid_row[-1]] + list(grid_row[:-1])   # engine col 0 = grid 254
+        last = None
+        for i, v in enumerate(row):              # don't-care -> left neighbour
+            if v != _RW_NONE:
+                last = v
+            elif last is not None:
+                row[i] = last
+        first = next((v for v in row if v != _RW_NONE), _RW_NONE)
+        row = [first if v == _RW_NONE else v for v in row]   # leading cells
+        offs.append(len(runs))
+        for x in range(255):
+            if x == 254 or row[x + 1] != row[x]:
+                runs += bytes((255 if x == 254 else x, row[x]))
+    if len(runs) > 0xFFFF:
+        raise ValueError("randworld_regions: run table too large for u16 offsets")
+    return b"".join(struct.pack("<H", o) for o in offs) + bytes(runs)
+
+
+def _rw_lookup(encoded, x, y):
+    """Python twin of the cave's lookup (tests): region the party rolls at
+    FIELD (x, y), i.e. of grid tile ((x - 1) % 255, y)."""
+    if not 0 <= y < _RW_ROWS:
+        return _RW_NONE
+    base = _RW_ROWS * 2
+    p = base + struct.unpack_from("<H", encoded, y * 2)[0]
+    while encoded[p] < x:
+        p += 2
+    return encoded[p + 1]
+
+
+def apply_randworld_regions(elf: bytearray, feats=None):
+    """Install the region map + hook. feats["_rw_regions"] = 255*255 bytes,
+    row-major by GRID tile (randworld_territories.Territories.region_map);
+    baked as row runs in ENGINE columns (_rw_encode_regions)."""
+    regions = bytes((feats or {}).get("_rw_regions") or b"")
+    enc = _rw_encode_regions(regions)
+    for i, want in enumerate(_RW_ZONE_WORDS):
+        fo = E.ram2file(_RW_ZONE_HOOK + 4 * i)
+        w = struct.unpack_from("<I", elf, fo)[0]
+        if w != want:
+            raise ValueError(f"unexpected zone code @{_RW_ZONE_HOOK + 4 * i:#x}: "
+                             f"{w:#010x} (want {want:#010x})")
+    data = enc + b"\x00" * (-len(enc) % 4)
+
+    def _code(map_vaddr):
+        return A.asm_labels([
+            A.lbu("v1", 1, "s0"),                    # displaced: terrain type
+            A.addiu("a0", "zero", _RW_NONE),         # default: no region
+            A.sltiu("t1", "s2", _RW_ROWS),
+            ("beq", "t1", "zero", "judge"), A.nop(),  # y off the map
+            A.li("t0", map_vaddr),
+            A.sll("t1", "s2", 1), A.addu("t1", "t0", "t1"),
+            A.lhu("t1", 0, "t1"),                    # ROW_OFF[y]
+            A.addu("t0", "t0", "t1"),
+            A.addiu("t0", "t0", _RW_ROWS * 2),       # p = first run of row y
+            ("label", "walk"),
+            A.lbu("t1", 0, "t0"),                    # run's last x
+            A.sltu("t2", "t1", "s1"),                # last_x < x -> next run
+            ("bne", "t2", "zero", "walk"),
+            A.addiu("t0", "t0", 2),                  # (delay) p += 2, always
+            A.lbu("a0", -1, "t0"),                   # region of the run holding x
+            ("label", "judge"),
+            A.addiu("t1", "zero", _RW_NONE),
+            ("bne", "a0", "t1", "resume"), A.nop(),
+            A.addiu("t1", "zero", 1),
+            ("beq", "v1", "t1", "resume"), A.nop(),  # river: a0 unused
+            A.addiu("t1", "zero", 2),
+            ("beq", "v1", "t1", "resume"), A.nop(),  # sea: a0 unused
+            A.j(_RW_NO_ENCOUNTER), A.addu("v0", "zero", "zero"),   # land, no region
+            ("label", "resume"),
+            A.j(_RW_ZONE_RESUME), A.nop(),
+        ])
+
+    placeholder = data + _code(0x08B30E00)       # same li width as the real one
+    cave_vaddr = E.add_segment_cave(elf, placeholder)
+    real = data + _code(cave_vaddr)
+    assert len(real) == len(placeholder)
+    E.cave_write(elf, cave_vaddr, real)
+    fo = E.ram2file(_RW_ZONE_HOOK)
+    elf[fo:fo + 4] = A.j(cave_vaddr + len(data))
+    elf[fo + 4:fo + 8] = A.nop()
+
+
+# Random overworld: BRUSH ROLLS THE LAND ROW (user call 2026-10-26). Class 9
+# (attr 0x000C, the teal brush) is drawn mostly as green ground, so a player
+# grinding "grass" stood on plains and vice versa. On a generated world terrain 4
+# therefore takes the land path: the hook's delay slot (`lui v0,0x894`) clobbers
+# v0, so the cave rebuilds v0 = region from a0 (randworld_regions' value) and
+# enters the terrain-0 case at 0x08841f54 exactly as the switch's beql would --
+# s0 = zones_overworld + region*8, so dangerous_forests (0x08841f60) and the
+# overworld_u16 companion both see an ordinary land roll. The vanilla map keeps
+# its class-9 pool (_T4_TIER_POOL) untouched.
+_TP_LAND_CASE = 0x08841F54          # terrain 0: `sll v1,v0,3` with v0 = zone
+
+
+def _apply_rw_brush_is_land(elf, fo):
+    code = A.andi("v0", "a0", 0xFF) + A.j(_TP_LAND_CASE) + A.nop()
+    cave_vaddr = E.add_segment_cave(elf, code)
+    elf[fo:fo + 4] = A.j(cave_vaddr)
+
+
 def apply_terrain_pools(elf: bytearray, feats=None):
     assert _TP_POOL_MAX == 8, "cave computes tier*16 (= tier*_TP_POOL_MAX*2) via one sll"
+    rw_tier = _rw_zone_tier(feats)
     for hook, want, pools in ((_TP_T3_HOOK, _TP_T3_HOOK_W0, _DESERT_TIER_POOL),
                               (_TP_T4_HOOK, _TP_T4_HOOK_W0, _T4_TIER_POOL)):
         fo = E.ram2file(hook)
@@ -4690,28 +4874,37 @@ def apply_terrain_pools(elf: bytearray, feats=None):
         if w != want:
             raise ValueError(f"unexpected terrain hook @{hook:#x}: {w:#010x} "
                              f"(want {want:#010x})")
-        data = _tp_data(pools)
+        if rw_tier is not None and hook == _TP_T4_HOOK:
+            _apply_rw_brush_is_land(elf, fo)
+            continue
+        data = _tp_data(pools, rw_tier)
+        # Random overworld: both hooks sit after the zone was put in a0, and
+        # randworld_regions makes that a0 the party tile's REGION. Read it
+        # instead of re-deriving the 32x32 zone (a land tile with no region
+        # never gets here -- that hook exits to "no encounter" first).
+        zone_asm = ([A.andi("t2", "a0", 0xFF)] if rw_tier is not None else [
+            A.addiu("t2", "s1", 7), A.srl("t2", "t2", 5),   # zx 0..8
+            A.srl("t4", "t2", 3), A.subu("t2", "t2", "t4"),  # zx = min(zx, 7)
+            A.addiu("t3", "s2", 7), A.srl("t3", "t3", 5),   # zy 0..8
+            A.srl("t4", "t3", 3), A.subu("t3", "t3", "t4"),  # zy = min(zy, 7)
+            A.sll("t3", "t3", 3),
+            A.addu("t2", "t2", "t3"),                # zone -- now 0..63
+        ])
 
         def _code(zonetier_vaddr, pool_vaddr, slotmap_vaddr):
-            return A.asm_labels([
-                # zone = ((x+7)>>5) + 8*((y+7)>>5), both indices CLAMPED to 7
-                # (s1 = x, s2 = y, s4 = field struct)
-                # v327: the +7 bias gives grid index 8 for coord 249..254, and
-                # the two edges fail differently. The ninth ROW overflows (zone
-                # 64..72), which the guard below catches. The ninth COLUMN
-                # WRAPS -- zone = 8 + 8*zy is column 0 of the NEXT row -- and no
-                # bounds check can see that, because the index is legal. Clamp
-                # both with idx - (idx >> 3) (idx is 0..8, so identity for 0..7
-                # and 7 for 8) and the border joins the zone beside it. No
-                # desert or class-9 cell sits in the overhang on the shipped
-                # map, but open_progression edits the grid, so this is the
-                # rule and not an argument about the current tile set.
-                A.addiu("t2", "s1", 7), A.srl("t2", "t2", 5),   # zx 0..8
-                A.srl("t4", "t2", 3), A.subu("t2", "t2", "t4"),  # zx = min(zx, 7)
-                A.addiu("t3", "s2", 7), A.srl("t3", "t3", 5),   # zy 0..8
-                A.srl("t4", "t3", 3), A.subu("t3", "t3", "t4"),  # zy = min(zy, 7)
-                A.sll("t3", "t3", 3),
-                A.addu("t2", "t2", "t3"),                # zone -- now 0..63
+            # zone_asm (vanilla map): zone = ((x+7)>>5) + 8*((y+7)>>5), both
+            # indices CLAMPED to 7 (s1 = x, s2 = y, s4 = field struct).
+            # v327: the +7 bias gives grid index 8 for coord 249..254, and the
+            # two edges fail differently. The ninth ROW overflows (zone 64..72),
+            # which the guard below catches. The ninth COLUMN WRAPS -- zone =
+            # 8 + 8*zy is column 0 of the NEXT row -- and no bounds check can
+            # see that, because the index is legal. Clamp both with
+            # idx - (idx >> 3) (idx is 0..8, so identity for 0..7 and 7 for 8)
+            # and the border joins the zone beside it. No desert or class-9
+            # cell sits in the overhang on the shipped map, but
+            # open_progression edits the grid, so this is the rule and not an
+            # argument about the current tile set.
+            return A.asm_labels(zone_asm + [
                 # unreachable after the clamp; kept as the out-of-bounds
                 # backstop for any future coordinate change.
                 A.sltiu("t3", "t2", 64),
@@ -7990,17 +8183,52 @@ _NGS_SITES = (
     # right. Repointing a check whose body was not positively identified is the
     # v248 mistake; 0x089A7584's body gives object 0x1394, not the canoe.
     (0x089AB14C, "set",  18, 17),  # Crescent Lake sage: handover (unique on disc)
+    # Astos / Western Keep (v353). Story flag 7 is the Crystal Eye's function
+    # bit (Matoya's trade gate, 0x089A6838) AND the keep's "Astos already beaten"
+    # gate, so a won AP eye emptied the throne before the fight. The keep's map
+    # init (0x089A6E5C, objlist 88: chests 16-18, Mystic door 0x1F4A) checks
+    # flag 7 and, when SET, removes BOTH throne NPCs -- 0x1F86 the king (sprite
+    # 0x47) and 0x1F88 Astos (sprite 0x48), same tile (25,13) -- else binds the
+    # king to the crown event 0x1390 when flag 6 (Crown) is up. Those two NPC
+    # ids appear nowhere else on disc except the Astos cutscene's own spawn of
+    # 0x1F88, so the check is a pure gate. The SET is the disc's ONLY
+    # `2d 04 07 00`, right after the Astos battle op `2b 04 02 ff` (the eye
+    # itself is the op37 `37 04 00 02` further down the same stream). Live
+    # player bundle 2026-10-26: AP eye won, the doorstep prearm lost the race to
+    # the out-of-window restore twice, throne empty. Matoya's check and the
+    # progress-hint chain (0x089A5C60) stay on flag 7 on purpose: they ask
+    # "does the player hold the eye", which AP-eye == flag 7 answers exactly.
+    (0x089A6E6C, "check", 7, 3),   # Western Keep init: throne NPCs gone
+    (0x089A9C30, "set",   7, 3),   # Astos cutscene: beaten (unique on disc)
+    # Gaia fairy (v363). Story flag 26 = 0x1151F b2 is the Oxyale's function
+    # bit (the Onrac mermaid/sub gate, 0x089A7B00) AND the fairy's "already
+    # gave" gate. Gaia's map init (objlist 71: town NPCs 0x1FD6.., spring
+    # triggers 0x139E, fairy NPC 0x1FF4) runs an INVERTED check `2d 08 1a 03`:
+    # flag 26 clear + flag 25 (fairy freed) set -> bind the fairy to her give
+    # event 0x138F, else her post-gift talk. The give is the disc's ONLY
+    # `2d 04 1a 00`, immediately followed by the Oxyale op37 `37 04 00 0f` and
+    # the rebind of 0x1FF4. Live player bundle 2026-10-30: AP Oxyale bought in
+    # Onrac, Gaia loaded with flag 26 set from the won-key restore, the fairy
+    # gave her "has the oxyale helped you out?" line every visit -- the
+    # client row's in-map clear always came one map load too late. The Onrac
+    # check 0x089A7B00 stays on flag 26: it asks "does the player hold the
+    # Oxyale", which AP-Oxyale == flag 26 answers exactly.
+    (0x089A7D18, "ncheck", 26, 16),  # Gaia init: fairy offers (inverted check)
+    (0x089ACA94, "set",    26, 16),  # Gaia fairy: handover (unique on disc)
 )
 
 
 def apply_prince_gate_split(elf: bytearray, feats=None):
-    """Repoint the Elf Prince quest chain's flag operands to the shadow flag.
-    Byte-level: `2d 08 09 02` / `2d 04 09 00` -> id byte (+2) = 64+key_id.
+    """Repoint every _NGS_SITES flag operand (Elf Prince, Crescent Lake sage,
+    Astos, Gaia fairy) to its shadow flag.
+    Byte-level: `2d 08 <f> 02` / `2d 08 <f> 03` (ncheck, inverted polarity) /
+    `2d 04 <f> 00` -> id byte (+2) = 64+key_id.
     Verifies the exact vanilla word at every site (already-patched = no-op)."""
     for addr, kind, van, kid in _NGS_SITES:
         o = E.ram2file(addr)
-        op = _NGS_CHECK_OP if kind == "check" else _NGS_SET_OP
-        want = bytes((op >> 8, op & 0xFF, van, 0x02 if kind == "check" else 0x00))
+        op = _NGS_SET_OP if kind == "set" else _NGS_CHECK_OP
+        space = {"check": 0x02, "ncheck": 0x03, "set": 0x00}[kind]
+        want = bytes((op >> 8, op & 0xFF, van, space))
         new_id = NPC_GATE_SPLIT_FLAG_BASE + kid
         cur = bytes(elf[o:o + 4])
         if cur == want[:2] + bytes((new_id,)) + want[3:]:
@@ -8010,6 +8238,88 @@ def apply_prince_gate_split(elf: bytearray, feats=None):
                 f"prince_gate_split: {kind} @{addr:#010x} reads {cur.hex(' ')}, "
                 f"expected {want.hex(' ')} -- script moved, re-run the probe")
         elf[o + 2] = new_id
+
+
+# skip_lute_cutscene (ALWAYS on, vanilla and random map; no yaml option). Garland's
+# event (event-table id 3, stream 0x089A8734) runs his battle as a scene op and
+# then, in the SAME stream, carries the party to Cornelia's throne room
+# (live trace 2026-10-25, re_only/bp_garland_chain.py, vanilla new game):
+#   0x089A8788  2b 04 00 ff            the Garland battle
+#   0x089A87B0  2d 04 01 00            story flag 1 set: Garland defeated
+#   0x089A8974  03 0c 01 39 ...        teleport -> map 0x39 throne room (20,8)
+#   0x089A8ABC  2d 04 02 00            story flag 2 set (King scene seen)
+#   0x089A8AD8  00 04 ff ff            end
+# The Princess is a separate talk (0x089A61D4): check flag 4, set -> "thank
+# you" (msg 7), clear -> jump to the Lute give at 0x089A8ADC (sets flag 4,
+# grants key 0 = Lute). On a random map that teleport strands a ship/airship
+# parked at Chaos Shrine. The cut: vanilla's post-battle scene runs untouched
+# up to and including the Princess's box (msg 0x132 @0x089A8908; flag 1 is set
+# on the way, 0x089A87B0), then -- where vanilla walks on to the throne-room
+# teleport -- set flags 2 and 4, reload the room, end. The party stays in
+# Chaos Shrine's doorstep, the Princess never hands out a native Lute, and
+# the client sends her check on flag 1.
+# Leaving the room is load-bearing (live 2026-10-25): the map's NPC roster is
+# bound at load, so ending in place left Garland standing (flag 1 already set)
+# and talking to him re-ran this whole event -- his talk has no flag check.
+# v350 reloaded Chaos Shrine 1F (live-verified, but clunky -- user call); the
+# teleport now goes to the OVERWORLD at the shrine's own exit return (exit
+# table map 0x1f -> map 0, tile (121,117); teleport field x = tile x + 1,
+# facing byte as vanilla's bridge-scene overworld teleport). On a random map
+# randworld_bake.move_scene_teleports moves it with the "chaos" stamp
+# (SCENE_FOLLOWS pins _SLC_TELEPORT), exactly like the exit return. Nothing
+# outside the stream points into the orphaned bytes (desk scan of every
+# biased branch pointer in the blob; re-run 2026-10-30 over 0x089A8918..AD8,
+# raw and biased: only the Lute give 0x089A8ADC, which the cut never touches).
+# v361: CLEAR THE RETURN STACK FIRST (bundle 2026-10-30: kill Garland, walk
+# to Cornelia, leave by the town edge -> landed outside Chaos Shrine).
+# Entering a map pushes its exit return on the save+0x43C stack (16 B
+# records, depth save+0x83C; exit handler 0x0884039C), and op 03 never
+# touches it, so the teleport left Chaos Shrine's return at stack[0] with
+# depth 1 on the overworld. A town EDGE exit (trigger kind 1, 0x08840350)
+# lands on stack[0], not the top, and zeroes the depth: the first town left
+# after Garland dropped the party at the shrine (once; depth 0 after it).
+# Vanilla rebuilds the stack around every cross-map script teleport with op
+# 0x6A (0x0884CF24 -> 0x088D5060: idx 0x7FFF = depth 0, idx<0 = pop, else
+# replay exit entry [idx] of map <byte 4>'s link) -- Garland's own tail
+# 0x089A8AC0 runs `6a ff7f`, then pushes map 0 entry 14 and map 0x38 entry 0
+# (castle, throne room), and the cut dropped all three. The overworld needs
+# only the clear, kept before the teleport (nothing may follow it).
+# Box: 0x132 = USEVM05 entry [0x0d], the Princess's rescue speech, used only
+# here; evm_bake.SKIP_LUTE_EXTRA authors it "You obtained {Princess AP item}."
+# (no AP name -> the speech plays). Why the cut sits AFTER the box (live
+# 2026-10-25, re_only/bp_garland_ops.py, v345-v349 black screens): NOTHING may
+# follow the same-map reload teleport (even vanilla's post-teleport fade hangs;
+# the teleport is kept last before the end here too),
+# and a box opened early in the post-battle scene never shows -- op 05 returns,
+# wait op 27 returns in 2 polls, close-wait op 06 spins forever -- even behind
+# vanilla's own post-battle fade-in. Some setup op in 0x089A87B0..0x089A8904
+# (actor placement / camera) readies the window; replaying the vanilla scene
+# up to the box sidesteps finding which.
+_SLC_CUT = 0x089A8918
+_SLC_VANILLA = bytes.fromhex("09 04 28 00 1f 04 20 00 1f 04 21 00 1f 04 22 00"
+                             "1f 04 23 00 09 04 23 00 1f 04 20 10 1f 04 21 10")
+_SLC_PATCH = bytes.fromhex("2d 04 02 00 2d 04 04 00"
+                           "6a 08 ff 7f ff ff ff ff"
+                           "03 0c 01 00 7a 00 75 00 01 00 ff ff"
+                           "00 04 ff ff")
+_SLC_TELEPORT = _SLC_CUT + 16             # randworld_bake.SCENE_FOLLOWS
+assert len(_SLC_PATCH) == len(_SLC_VANILLA)
+
+
+def apply_skip_lute_cutscene(elf: bytearray, feats=None):
+    """End Garland's event after the Princess's box (msg 0x132): flags 2/4,
+    return stack cleared, out to the overworld at Chaos Shrine's door (not
+    the throne room).
+    Verifies the vanilla bytes (already-patched = no-op)."""
+    o = E.ram2file(_SLC_CUT)
+    cur = bytes(elf[o:o + len(_SLC_PATCH)])
+    if cur == _SLC_PATCH:
+        return
+    if cur != _SLC_VANILLA:
+        raise ValueError(
+            f"skip_lute_cutscene: Garland's post-battle script @{_SLC_CUT:#010x} "
+            f"reads {cur.hex(' ')}, expected {_SLC_VANILLA.hex(' ')}")
+    elf[o:o + len(_SLC_PATCH)] = _SLC_PATCH
 
 
 def _lb_blocker_record(msg_id):
@@ -8141,6 +8451,82 @@ def apply_giant_cave_gate(elf: bytearray, feats=None):
         raise ValueError(f"giant_cave_gate: map-40 giant record is not vanilla "
                          f"({rec.hex()} != {_GCG_VANILLA.hex()})")
     struct.pack_into("<HH", elf, o + 4, *_GCG_NEW_XY)
+
+
+# --- feature: shortened_temple_of_fiends (v364, user spec 2026-10-30) ----------
+# The Black Orb drops the party straight into the Lute room, and the Lute
+# room's slab stairs drop it straight onto Chaos' floor. Pure exit-table data.
+#
+# Chaos Shrine maps (objlist index == encounter map id, all file 05_00; static
+# RE 2026-10-30, re_only/dump_objlist.py + the exit table below):
+#   31 (0x1f) present-day shrine; exit #1 on the orb tile (38,27) -> 32
+#   32 (0x20) past 1F  33 (0x21) past 2F  34 (0x22) LUTE ROOM (the slab =
+#   exit #2 at (38,25), lute_block_gate's block; Plaza chests 245/246)
+#   35..38 (0x23-0x26) Earth/Fire/Water/Air floors, the fiend refights and
+#   Basement chests 247-251   39 (0x27) Chaos' floor, up-stairs = exit #1
+#
+# Per-map exit table: u32 ptr per map at _STOF_EXIT_PTRS + 8*map; objlist
+# exit param N reads entry N-1 (classifier 0x08840238). Entry, 20 B (handler
+# 0x0884039c): u32 dest map | u32 room layer | u16 x, u16 y (field*16+8) | u32
+# facing | s16 link | u16 0. link >= 0 PUSHES the dest map's entry [link] on the
+# save+0x43c return stack (the way back Warp/Exit replay), link < 0 pops.
+# Every rewrite below is a byte copy of a vanilla entry that already lands on
+# that tile, so arrival facing and room layer are the game's own, and the
+# stack stays balanced: orb pushes 34[0], 34[0] pops; slab pushes 39[0], 39[0]
+# pops. Exit from anywhere still lands on stack[0] = present shrine (38,28),
+# as vanilla's past does. No script teleport and no 0x6A stack op on the whole
+# disc names maps 31-39 (scanned 2026-10-30), so the exits are the only route.
+#
+# Mirror return (user call): the Lute room's other stairs (10,6) go back to
+# the present shrine below the orb, Chaos' floor's up-stairs back to the Lute
+# room below the slab. Maps 32/33/35-38 become unreachable; the world drops
+# their chests and logic gates their bestiary places (bestiary_data
+# SOURCE_KEY_GATE "short_tof", generated from the two tuples below).
+_STOF_EXIT_PTRS = 0x08944634
+_STOF_SKIPPED_MAPS = (0x20, 0x21, 0x23, 0x24, 0x25, 0x26)
+_STOF_KEPT_MAPS = (0x22, 0x27)            # Lute room, Chaos' floor
+# (map, entry) rewritten <- (map, entry) whose vanilla bytes it takes, and the
+# vanilla bytes it must hold first.
+_STOF_REWRITES = (
+    # orb (31 #1): 32 (38,27) push 32[4]  ->  34 (10,7) push 34[0]  [= 33 #1]
+    ((0x1f, 0), bytes.fromhex("20000000 00000000 68 02 b8 01 00000000 0400 0000"
+                              .replace(" ", "")), (0x21, 0)),
+    # Lute room up (34 #1): 33 (43,24)  ->  present (38,28) pop  [= 32 #5]
+    ((0x22, 0), bytes.fromhex("21000000 01000000 b8 02 88 01 03000000 ffff 0000"
+                              .replace(" ", "")), (0x20, 4)),
+    # slab (34 #2): 33 (38,29) push 33[1]  ->  39 (27,13) push 39[0]  [= 38 #2]
+    ((0x22, 1), bytes.fromhex("21000000 00000000 68 02 d8 01 00000000 0100 0000"
+                              .replace(" ", "")), (0x26, 1)),
+    # Chaos' floor up (39 #1): 38 (35,9)  ->  34 (38,26) pop  [= 33 #2]
+    ((0x27, 0), bytes.fromhex("26000000 01000000 38 02 98 00 03000000 ffff 0000"
+                              .replace(" ", "")), (0x21, 1)),
+)
+# The u32 at +4 is NOT a stairs/warp kind: it is the arrival room LAYER (the
+# engine's 0x690c slot, which script teleports fill from their `z` byte), 1 =
+# inside an enclosed room. (10,7) is inside the Lute room's stair chamber, so
+# the orb entry must be 33 #1 verbatim -- v364 kept the orb's own 0 there and
+# the chamber drew dark with its door toggling backwards (live 2026-10-30).
+
+
+def _stof_entry_off(elf, m, i):
+    ptr = struct.unpack_from("<I", elf, E.ram2file(_STOF_EXIT_PTRS + 8 * m))[0]
+    return E.ram2file(ptr + 20 * i)
+
+
+def apply_shortened_temple_of_fiends(elf: bytearray, feats=None):
+    """Orb -> Lute room -> Chaos' floor (see the block above)."""
+    new = []
+    for (m, i), vanilla, src in _STOF_REWRITES:
+        o = _stof_entry_off(elf, m, i)
+        cur = bytes(elf[o:o + 20])
+        if cur != vanilla:
+            raise ValueError(f"shortened_temple_of_fiends: exit {m:#x}[{i}] is not "
+                             f"vanilla ({cur.hex()} != {vanilla.hex()})")
+        so = _stof_entry_off(elf, *src)
+        new.append((o, bytes(elf[so:so + 20])))
+    # read every source before writing any: no rewrite copies a rewritten entry
+    for o, data in new:
+        elf[o:o + 20] = data
 
 
 # --- feature: chest dedup (aliased treasure indices -> unique) -------------------
@@ -10158,6 +10544,9 @@ FEATURES = {
     # Giant's Cave choke point: moves the Giant onto (12,13). The paired boulder
     # at (11,13) is baked post-build by map_bake (dpk-side, LOAD-BEARING).
     "giant_cave_gate": apply_giant_cave_gate,
+    # Black Orb -> Lute room -> Chaos' floor: four exit-table entries
+    # (shortened_temple_of_fiends yaml). Data only.
+    "shortened_temple_of_fiends": apply_shortened_temple_of_fiends,
     # Lute-block gate (lute_tablets seeds): solid blocker below the Chaos Shrine
     # descent block, spawned only while the Lute is unassembled. Client sets the
     # key from lute_tablets_required.
@@ -10170,6 +10559,9 @@ FEATURES = {
     # (options.ON_DISC_ALWAYS). Kills the Elven Castle door/NPC deadlock class;
     # the client detects the quest on the shadow flag (no NPC_MAP_RESET row).
     "prince_gate_split": apply_prince_gate_split,
+    # Garland's event ends at his kill (no throne-room teleport); the client
+    # sends the Princess check on story flag 1. Forced on for a random map.
+    "skip_lute_cutscene": apply_skip_lute_cutscene,
     # Bikke/ship story-flag split -- always-on (options.ON_DISC_ALWAYS).
     "bikke_ship_split": apply_bikke_ship_split,
     "monk_thief_dabble_in_magic": apply_monkthief_magic,
@@ -10236,6 +10628,13 @@ FEATURES = {
     "foot_stays_foot": apply_foot_stays_foot,
     # MUST STAY LAST: reserves the cave segment's bss tail; add_segment_cave
     # refuses to append after it (see eboot_patch.cave_bss_tail).
+    # Random overworld: a per-tile REGION (the bestiary territory) replaces the
+    # 32x32 zone for every land roll; feeds dangerous_forests / terrain_pools a
+    # region->tier map through the same feats flag. Inert on the vanilla map.
+    # PLACED LAST BUT spell_tomes: its 64 KB map would push every later
+    # feature's mailbox past the client's 0x10000 scan window (ApClient
+    # _MB_SCAN_LEN), and spell_tomes must stay last (bss tail).
+    "randworld_regions": apply_randworld_regions,
     "spell_tomes": apply_spell_tomes,
 }
 
@@ -10762,7 +11161,10 @@ def assert_no_dpk_collisions(iso_path):
 # patched-ISO cache key: without it, a fixed/retuned feature would silently keep
 # reusing a stale cached ISO built by the OLD code (iso size+mtime+feature names
 # all unchanged).
-PATCHER_VERSION = 333 # v333: DLC BOSS + ADDS LOAD ONE SPRITE PACK (player report 2026-10-11: Atomos at boss_minions=light drew as a purple Hundlegs, Atomos' own big shadow still under it). The per-kind battle sprite loader 0x08876F60 keeps ONE pack handle (battle+0x80), releases it before each kind and keeps pointers INTO the loaded pack; releasing a bank's last file resets its arena cursor, so the next kind's pack lands on the same base. Vanilla survives because every kind reloads the same pack; a DLC boss (BOSS_0C) then a normal add (MS2_10C) overwrote the boss's GIM with Hundlegs' (both first bodies at +0x60) while the boss's palette was already taken. Every DLC fid with adds now gets an MS2_<fid> carrying the boss's (and any boss-id add's) BOSS pair too, and a cave on the boss branch's name sprintf (0x0887701C) opens ms2_<fid>.pck for exactly those fids (ms2_bake.redirect_fids feeds both halves). Bake changes for every boss_minions seed with DLC adds. // v332: FOOT STAYS FOOT BY TILE CLASS, NOT BLANKET (player report MeyrimeFF1 2026-10-03: Emergency Exit out of Lifespring Grotto / Waterfall Cavern left the party standing on the water beside the ship, softlocked). v331's one-word retarget skipped the scene-init vehicle re-derive for EVERY mode-0 load, but vanilla Exit/Teleport out of a ship/canoe-entered dungeon arrives on foot and relies on that re-derive to board. The 0x0883D9B8 branch is vanilla again; a cave after the ATT getter (0x0883D9E4) keeps mode 0 only on a walk+sail tile (low byte 0x0f, high nibble != 0xF) -- a class vanilla has no member of, ours has one (canal crossing 0x174 = 0x000F). A save made while stranded self-heals on load.
+PATCHER_VERSION = 365 # v365: SHORTENED TEMPLE ORB LANDS INSIDE THE STAIR CHAMBER (live playtest 2026-10-30: v364's orb entry kept the orb's own +4 = 0, so the party arrived at (10,7) inside the Lute room's enclosed stair chamber with the room layer set to OUTSIDE -- chamber drawn dark, its door toggling the reveal backwards). The +4 u32 is the arrival room layer (the 0x690c slot script teleports fill from their z byte), not a stairs/warp kind; the orb rewrite is now 33 #1 copied verbatim (layer 1). Live RAM patch of the same byte confirmed in game. v364: SHORTENED TEMPLE OF FIENDS (yaml shortened_temple_of_fiends, user spec 2026-10-30). New data-only feature apply_shortened_temple_of_fiends rewrites four exit-table entries: the Black Orb (map 31 #1) lands in the Lute room (map 34, (10,7)) instead of the past 1F; the Lute room's stairs (34 #1) return to the present shrine below the orb; the Lute slab (34 #2) lands at the entrance of Chaos' floor (39, (27,13)); Chaos' floor's up-stairs (39 #1) return below the slab. Each is a byte copy of a vanilla entry landing on that tile, so the save+0x43c return stack stays balanced. Off = vanilla bytes. v363: GAIA FAIRY GATE SPLIT (player bundle 2026-10-30: AP Oxyale bought in Onrac, the fairy gave her post-gift line, location dead). prince_gate_split gains two _NGS_SITES rows: Gaia's map-init INVERTED flag-26 check 0x089A7D18 (new kind "ncheck", `2d 08 1a 03`) and the fairy's unique flag-26 set 0x089ACA94 -> shadow flag 80 (64 + Oxyale key id 16). Flag 26 stays the Oxyale's Onrac mermaid gate; the client's Oxyale NPC_MAP_RESET row is deleted and the location detects on the flag-80 rise. v362:map fog reveal radius foot/canoe 9 tiles, ship 3x (27), airship 6x (54) (user 2026-10-30). v361: SKIP LUTE CLEARS THE RETURN STACK (bundle 2026-10-30: killed Garland, walked to Cornelia, left by the town edge -> landed outside Chaos Shrine). Op 03 never touches the save+0x43C exit-return stack, so the overworld teleport left Chaos Shrine's return at stack[0] (depth 1); a town edge exit (kind 1, 0x08840350) lands on stack[0]. _SLC_PATCH grows to 32 B with vanilla's `6a 08 ff 7f` (depth = 0, Garland's own tail 0x089A8AC0) before the teleport, which moves to 0x089A8928 (randworld_bake.SCENE_FOLLOWS follows). v360: RANDOM-MAP DRAGON CAVES DRAWN APART (playtest 2026-10-30: the menu map showed vanilla's Cardia cluster though the three chest caves are separate sites). minimap_bake no longer cuts the painted Cardia dots (UNCUT_SITES); each placed cardia_plains/marsh/forest entrance gets the drawn CAVE_SPRITE. v359: RANDOM-MAP UNPLACED BUILDING SPRITES HIDDEN, NOT CUT (live 2026-10-29: v355 froze every new game on a map that skipped a building -- pc 0x088491EC = event op 0x30's `b .` trap on a missing field actor). Map 0's load script (0x089A5A8C) runs `30 04 04 i` on the six sprite actors by index (actor i = i-th type-2 record), so randworld_bake.move_records keeps all six records, parks the unplaced ones, and rewrites their op to `30 04 02 i` (clear DRAW, as vanilla scripts hide NPCs). v358: map fog base reveal radius 10 tiles; ship 20, airship 40 (user 2026-10-29). v357: map fog base reveal radius 11 tiles (was 11.4); ship 22, airship 44 (user 2026-10-29). v356: MAP FOG REVEAL RADIUS BY VEHICLE (user 2026-10-29). The mapfog step no longer marks the 3x3 chunks around the party's chunk: on every tile/vehicle change it marks each chunk whose centre lies within R of the party's tile centre (square, x wraps). R = 12 tiles reproduces the old 3x3 exactly; foot/canoe now 11.4 (95%), ship 2x, airship 4x, read from the vehicle mode save+0x2A8 (mapfog_bake.REVEAL_*). v355: RANDOM-MAP SKIPPED BUILDING SPRITES REMOVED (playtest 2026-10-28, tiny map): randworld_bake.move_records parked the skipped W. Keep and Mirage Tower type-2 sprite records (0xc1, 0xc0) on the park cell, drawing a castle with a tower on a mountain by Pravoka; unplaced type-2 records are now cut from the map-0 list (the last six records, no trigger shifts). v354: RANDOM-MAP REGION LOOKUP READS THE PARTY'S OWN TILE (static RE 2026-10-26, engine-grid-starts-one-cell-early). The v334 randworld_regions cave looks up the party's tile x (s1), which is the ENGINE x = grid x + 1 (engine column 0 = grid 254, same row), in a GRID-indexed region map -- so the east-most column of every territory rolled its east neighbour's roster (archipelago_1: 41 of 14401 territory cells). _rw_encode_regions now files each row in ENGINE columns (row rotated right by one); the cave is unchanged.
+                      # v353: ASTOS GATE SPLIT (player bundle 2026-10-26: AP Crystal Eye won, Western Keep throne empty, location dead). prince_gate_split gains two _NGS_SITES rows: the keep's map-init flag-7 check 0x089A6E6C and the Astos cutscene's unique flag-7 set 0x089A9C30 -> shadow flag 67 (64 + eye key id 3). Flag 7 stays the eye's Matoya gate; the client's Crystal Eye NPC_MAP_RESET row (doorstep prearm + in-keep hold) is deleted and the location detects on the flag-67 rise.
+                      # v352: RANDOM-MAP BRUSH ROLLS THE LAND ROW (user call 2026-10-26). Terrain 4 (class 9 teal brush) took its own tier pool on a generated world, but it is drawn mostly as green ground, so players grinding "grass" stood on plains. apply_terrain_pools now sends terrain 4 to the terrain-0 case (0x08841f54) with v0 = region on a random map; vanilla map unchanged.
+                      # v351: SKIP LUTE EXITS TO THE OVERWORLD. After the Princess's box Garland's event now teleports to the overworld at Chaos Shrine's exit return (121,117) instead of reloading the room (user call: the reload looked clunky); randworld_bake.SCENE_FOLLOWS pins the teleport (0x089A8920) to the "chaos" stamp on a random map. // v350: SKIP LUTE CUT MOVED AFTER THE PRINCESS'S BOX. A box opened anywhere earlier in the post-battle scene never showed (v345-v349 black screens: op 05 returns, close-wait op 06 spins forever) even behind vanilla's fade-in, and nothing may follow the same-map reload. The cut now sits at 0x089A8918: vanilla's post-battle scene plays through msg 0x132 (authored as the AP obtain box), then flags 2/4 + reload + end. // v349: (superseded) SKIP LUTE BOX BEFORE THE RELOAD, BEHIND VANILLA'S POST-BATTLE FADE. v348 hung too: nothing may follow the same-map reload teleport (even vanilla's post-teleport fade). The box now plays after vanilla's own post-battle opening (0x089A878C..AC verbatim, incl. the fade-in `15 08 01 01` + wait `3b`), then the reload ends the script. skip_lute_cutscene is always on (yaml option removed). // v348: (superseded) SKIP LUTE BOX FADE-IN (real fix). v345-v347 hung on a black screen: the box opened while the screen was still faded out (op 05 returned at once, close-wait op 06 spun forever -- live op trace). The fade is `15 08 01 04 01 00 00 00` + wait `3b 04 ff ff` (op 16 is not a fade); the box now plays after the reload behind vanilla's post-teleport sequence. // v347: (superseded) SKIP LUTE BOX BEFORE THE RELOAD. v345/v346 froze on a black screen: any op after the same-map reload teleport hangs (v346's added fade-in did not help). The box now plays first, after vanilla's own post-battle opening (`14 04 05 00` + `16 04 00 ff`); the reload teleport is the last op before the end, as in the live-verified v344. // v346: (superseded) fade-in after the reload. // v345: SKIP LUTE OBTAIN BOX. After the Chaos Shrine reload, Garland's event shows message 0x132 (USEVM05 entry [0x0d], the Princess's rescue speech, orphaned by the v344 cut); evm_bake.SKIP_LUTE_EXTRA authors it as "You obtained {Princess AP item}." with the donor font. No AP name = the vanilla speech. // v344: SKIP LUTE CUTSCENE (yaml skip_lute_cutscene, QoL, default on; forced on for a random map -- release blocker: Garland's win teleported the party to Cornelia's throne room, stranding a ship/airship parked at Chaos Shrine). Live trace 2026-10-25 (re_only/bp_garland_chain.py): the teleport sits in Garland's own event stream right after the battle scene op. apply_skip_lute_cutscene rewrites the first post-battle ops @0x089A878C to set story flags 1/2/4, reload Chaos Shrine 1F (map 0x1f, (38,29); the NPC roster binds at load, so ending in place left Garland standing) and end: the party stays in Chaos Shrine and the Princess (flag-4 check @0x089A61D4) never gives a native Lute. Client sends the Princess check on flag 1 (0x08D1151C b1); logic reads her location from chaos_shrine. // v343: MENU MAP OPEN FREEZE ON A RANDOM MAP (live 2026-10-24, sampled pc 0x089143CC = the Wp16 decompressor's overrun trap `b .`, job dst = the cached MINIMAP buffer). The game loads a dpk file at the END of a buffer sized from the record's DECOMPRESSED field and decodes it in place; it traps unless write < read after every token. Since v338 the flat menu map packs to ~35 KB, written under the vanilla +28 (306,684), so it started 42,096 B past dst and outran its own input after ~51 KB (live w-r 42,152). Opens that worked had the file loaded below dst (no in-place check). minimap_bake.write_minimaps now reshapes any stream whose wp16.inplace_lead exceeds INPLACE_MAX_LEAD=24,000 (vanilla's own MINIMAP lead is 24,522..24,568) with wp16.compress_inplace -- literal prefix + greedy tail, ~306,400 B, vanilla's shape -- and writes +28 = the real length. // v342: MAP FOG GATES ON THE FINE MAP ID (player report 2026-10-24: in and out of Cornelia revealed the NW corner of the menu map; sailing the ship revealed nothing). The mapfog step read 0x08D13121 -- a scroll coord (ff1_data TRAP), un-relocated, so dead RAM at a nonzero save delta -- and marked the town's own small x/y as world chunks (live: lastkey moved inside Cornelia and its shop). It now reads the FINE id through the save pointer (save+0x2008 == 0xFF), drops the on-field byte gate (only ever characterized walking/battle), and requires the position to hold STABLE_FRAMES=30 frames without a >8-tile jump before a reveal. Client: the explored mask persists as 32 DataStorage keys of 32 bits (a 0.6.8 server rejects the 1024-bit "or": "Set operation value too large"); the legacy key is read and restored. // v341: MENU MAP FOLLOWS WORLD CHANGES (user 2026-10-24). mapfx_bake builds per-change pixel EFFECTS (save-byte condition + OPEN/CLOSED word runs of both GIMs) and the mapfog cave now carries them with or without fog: every field frame `fx` reads each effect's save byte (story flag 3 King's bridge, 11 canal, save+0x834 bits 4-7 world items) and writes the runs whose state changed -- all of them after each unpack (fx_dirty) -- into the cached map, or with fog into the pristine copy, clearing the effect's chunks from applied so the fog sync redraws them. Random map (flat): one effect per gate incl. the canal + its foot bridge, diffed from full flat renders. Vanilla map (user call: patch the painting): the trails/Gulg always-on paint is inpainted into all three MINIMAPn.PCK (painted synthesis with everything outside the change held fixed; bridges = the painting's own King's bridge sprite stretched over the span), items open on top; canal + King's bridge come from the painting's own variants. Installed on EVERY seed now (vanilla: canal foot bridge + King's bridge). Cosmetic: build/install failures leave a static map. // v340: MENU MAP MARKERS FOR UNMARKED SITES (user 2026-10-24: Lifespring Grotto is lost in open sea on a random world). minimap_bake.DRAWN_SITES (Lifespring, Caravan, Earthgift, Whisperwind, Hellfire) get the painting's own 10x10 cave sprite (yellow, black dot; CAVE_SPRITE) drawn on their placed entrance in every style. The vanilla painting never marked the first four, and Hellfire's painted cut also swallowed a Cardia dragon cave, which now goes back to Cardia. // v339: MENU MAP MARKERS CUT CLEAN (user 2026-10-24: white curls beside W. Keep / Waterfall on the flat map). minimap_bake.marker_components floods a marker's INTERIOR first (red/yellow fill + cream ring; a dock's cream) and lets outline colours join only within MARK_RIM=2 px of it -- the painting draws shore highlights in the frames' cream and ink in their browns, so the old flood through the outline dragged every touching stroke along to the marker's new home. Docks under DOCK_MIN=60 px (Elfheim's, no painted L) are dropped. Shared by all styles. v338: FLAT MENU MAP (user call 2026-10-23, mockup "D"). The random-overworld menu world map (minimap_bake) now defaults to STYLE_FLAT: the client Map tab's terrain colours (ow_minimap_data.PALETTE, two dithered shades per class) at 2x2 px per tile plus a dark coast line on every land side touching open water (ow_map.coast_mask, the same line the Map tab now draws), with the game's own painted town/cave/dock markers moved as before. Both GIM palettes are rewritten (MINI512 keeps only the 9 marker + 8 fog indices; MINI256 is an exact 2x2 box filter of MINI512 in its 200 unused slots). ~38 KB packed of the 306,684 B slot, ~2 s, no fit levels. The v336 painted synthesis and flat-land-on-painted-sea stay buildable (minimap_bake.STYLES) for a future yaml option; nothing player-facing picks them. // v337: RANDOM-MAP FOG OF WAR (yaml fog_of_war, slot_data["randworld"]["world"]["fog"], inert on the vanilla map). Production port of attic/ow_rando_v0/mapfog.py (live-verified 2026-10-14): a full-function wrapper on the Wp16 decompressor 0x0891413C fogs every unexplored 8x8-tile chunk of the cached MINIMAP picture (pristine copy in a 0x50000 bss tail), and a detour on the field per-frame update 0x08864FE0 marks the 3x3 chunks around the party and copies their true pixels back; mask lives in the FFOG mailbox the client persists in DataStorage. Cave placed before the FEATURES loop, assembled after install_magic_power_tables. A failure leaves the placeholder inert (no fog). Also: the menu map keeps the ship pier marker (Pravoka's dock L, which is not a landmark and was painted away) at the harbor stamp. // v336: RANDOM-OVERWORLD MENU MAP (minimap_bake, soft/cosmetic stage after bake_grid, inert on the vanilla map). The menu world map MINIMAP0/1/2.PCK is repainted for the generated grid: a pure-Python port of the prototype painter (attic/ow_rando_v0/mapscreen.py, live-verified 2026-10-14) -- texture-by-numbers copy from the vanilla painting read out of the player's own ISO (no shipped pixels), deep-sea plate re-toned by distance to the new coasts, markers moved with their stamps (non-dock markers follow ONE owner, randworld_bake.owner), FIT_LEVELS coarsens the sea until the PCK fits its 306,684 B dpk slot; one PCK serves all three variants. ~15 s. A failure keeps the vanilla picture (the cursor points still move). // v335: RANDOM OVERWORLD BAKE (randworld_bake, bake context _rw_world from slot_data["randworld"]["world"], inert on the vanilla map). The client writes the v2 generator's grid into MAP_00_AMD.BIN (load-bearing, after build_iso) and, on the ELF, moves every map-0 entrance record, menu-map cursor point, overworld exit return and the Mirage blocker script object with its stamp (src window -> dst), rewrites the terrain class map from a per-tile vanilla vote table, and keeps the King's bridge built (remap table B identity, after world_gates). The vanilla-coordinate open-progression grid edits are skipped on a generated world. // v334: RANDOM-OVERWORLD ENCOUNTER REGIONS (randworld_regions, inert on the vanilla map). A generated world's encounters follow its sites: each hub claims a territory (ff1psp/randworld_territories) and rolls ONE roster per terrain. The cave replaces the encounter fn's 32x32 zone block (0x08841ef4..0x08841f10) with a per-tile REGION lookup (REGION[y*255 + x], x = the party's own tile x, NOT the column-shifted class-map index), so zones_overworld row = hub row, dangerous_forests / terrain_pools take a region->tier map, and the overworld_u16 companion follows the same row; water keeps its compass zones. A land tile outside every territory exits through the fn's own "no encounter" return (formation 0 is 3-5 Goblins, not silence). terrain_pools reads a0 in this mode instead of re-deriving the zone. // v333:DLC BOSS + ADDS LOAD ONE SPRITE PACK (player report 2026-10-11: Atomos at boss_minions=light drew as a purple Hundlegs, Atomos' own big shadow still under it). The per-kind battle sprite loader 0x08876F60 keeps ONE pack handle (battle+0x80), releases it before each kind and keeps pointers INTO the loaded pack; releasing a bank's last file resets its arena cursor, so the next kind's pack lands on the same base. Vanilla survives because every kind reloads the same pack; a DLC boss (BOSS_0C) then a normal add (MS2_10C) overwrote the boss's GIM with Hundlegs' (both first bodies at +0x60) while the boss's palette was already taken. Every DLC fid with adds now gets an MS2_<fid> carrying the boss's (and any boss-id add's) BOSS pair too, and a cave on the boss branch's name sprintf (0x0887701C) opens ms2_<fid>.pck for exactly those fids (ms2_bake.redirect_fids feeds both halves). Bake changes for every boss_minions seed with DLC adds. // v332: FOOT STAYS FOOT BY TILE CLASS, NOT BLANKET (player report MeyrimeFF1 2026-10-03: Emergency Exit out of Lifespring Grotto / Waterfall Cavern left the party standing on the water beside the ship, softlocked). v331's one-word retarget skipped the scene-init vehicle re-derive for EVERY mode-0 load, but vanilla Exit/Teleport out of a ship/canoe-entered dungeon arrives on foot and relies on that re-derive to board. The 0x0883D9B8 branch is vanilla again; a cave after the ATT getter (0x0883D9E4) keeps mode 0 only on a walk+sail tile (low byte 0x0f, high nibble != 0xF) -- a class vanilla has no member of, ours has one (canal crossing 0x174 = 0x000F). A save made while stranded self-heals on load.
                       # v331: WORLD GATES + FOOT STAYS FOOT (2026-09-14). The world-changing AP items (Lufenian span, both trail boulders, the Mount Gulg seal) are now resolved by the ENGINE: fn 0x08839cb4 picks a 512-entry tile-id remap at every overworld load (flag 11 canal / flag 3 bridge -- the unbuilt Cornelia bridge is 0x171->0x184 under table B); apply_world_gates hooks that choice, copies it into its own buffer and writes remap[gate_id] = open/closed per WORLD_GATE_ROWS from the client-owned save byte save+0x834 bits 4-7. The trails base paint + gate ids are baked into MAP_00_AMD.BIN (map_bake, feats["_world_gates"]). Fixes the free ship after loading on the pier: the scene init (0x0883d864) re-derives the vehicle mode from the tile under the party and saw vanilla water where the client had not painted yet. foot_stays_foot (always-on) retargets that init's mode-0 branch so a party saved on foot is never put in a ship/canoe by the tile (covers the canal bridge deck). bake_hash32 now folds the _ow_map / _world_gates toggle VALUES. // v330: BLOOD MAGIC READS THE ENGINE'S OWN ITEM COMMIT TABLE (2026-09-10). Both battle item menus (inventory list, equipped submenu) end their confirm by writing the row's {cat, id, slot} to ctx+0x683C+row*3, and the table survives untouched until the next round's menu (live-proven). The cave now reads that entry for the acting row and charges when the gear's +7 proc equals the committed spell -- no ticket, no resolver stamp leg, no C+0x57 pair, no state of our own; the equipment_rune_gate detour is the gate alone again. Replaces v221's global ticket and v329's per-row ticket. See _BLOOD_COMMIT_TBL.
                       # v329: BLOOD MAGIC TAXES INVENTORY ARMOR + PER-ROW TICKET (user report 2026-09-09: Healing Helm activated from the item list cost nothing while Healing/Judgment Staff cost). The v221 ticket only stamped on the EQUIPPED-gear submenu caller and the cave's inventory leg only accepted cat 2, so armor confirmed from the INVENTORY list (cat 3 at C+0x57) was never charged; the single global slot was also burned by any other actor's item action. Ticket is now 4 per-row slots stamped/cleared on BOTH committing callers, and the inventory leg reads cat 2 (weapon table) or cat 3 (armor table). Superseded by v330.
                       # v328: CRYSTALS GATE OWNS ALL FOUR ANSWERS (user report 2026-09-09: crystals_needed=4, tracker 3/4, Black Orb opened). The vanilla Chaos Shrine EVM scripts check only Marilith/Kraken/Tiamat (19/29/34) -- Lich (17) is implied by vanilla story order (Canoe needs Lich), which open progression breaks. The crystal leg in the getStoryFlag wrapper now installs at every N and answers (count >= needed) for all four fiend ids inside the Shrine in BOTH directions, instead of falling through to the real bits when count < needed. Bake changes for every seed. v327: LAND EDGE ZONE CLAMP (follow-up to v326, user call 2026-09-06). apply_terrain_pools (desert + class-9) and apply_northern_river_encounters computed the same unclamped zone as the ocean cave, so the ninth column wrapped onto column 0 one row down for them too. Both now clamp zx and zy to 7. Only 33 non-ocean cells sit in the overhang on the shipped map (21 plain, 12 shallows, zero desert/class-9/river), so this is a rule change rather than a visible fix -- but open_progression edits the grid, so the tile set is not a guarantee. The map and both generators (ow_map.zone_of, gen_bestiary_areas, gen_ow_minimap) clamp to match. NOT changed: plain-land "Overworld" zones are picked by the ENGINE, not by us (we never hook that select), so those 21 cells keep whatever the engine does -- and whether the engine itself wraps has NOT been verified, only assumed from the shared formula. The map clamps them, so if the engine does wrap, the map and the game disagree on 21 grass cells at the extreme east border. Closing that needs an always-on hook on the engine's own land zone select, which was explicitly declined 2026-09-06 as not worth changing vanilla encounters over 21 tiles. // v326: MAP-EDGE ZONE WRAP (player report 2026-09-06, the vertical band on the Bestiary Map right edge). The +7 zone bias yields grid index 8 for coords 249..254. v233 guarded zone >= 64, which covers the ninth ROW, but the ninth COLUMN wraps instead of overflowing: zone = 8 + 8*zy is column 0 of the NEXT row, so zone_of(250,100) == zone_of(0,132) == 32. 1461 east-edge ocean cells read the far-west pool one row south (NW above y=121, SW below), and 1530 south-edge cells fell to vanilla. Both indices are now clamped to 7 in the regional-ocean cave (idx - (idx>>3)), so the edges join the zone beside them. Land features use the same formula and were audited but NOT changed. Mirrored by ow_map.ocean_zone_of. // v325: STARTING LAKE NO LONGER ROLLS SE OCEAN (player report 2026-09-06). Regional Ocean assigned each 32x32 zone by majority vote, so zone 38 -- the bay east of Cornelia outside Pravoka, 150 starting-lake tiles vs 360 outer tiles -- went to the SE pool and the pre-canal lake rolled White Sharks and Sahagin Queens. The generator rule is now a veto (any zone holding a basin tile is pool 0, re_only/build_ocean_regions.compute_zone_pool) and zone 38 is out of _OC_POOL_ZONES[4]; its 360 outer tiles go vanilla with it, the same trade zones 35/36/37/43/52 already make. Zone table is baked on disc, hence the bump. Mirrored in ow_map.OC_POOL_ZONES. // v324: BOSS ADDS ONLY IN SCRIPTED FIGHTS (player report 2026-09-05). A random encounter of a minion-host formation (Marsh Cave Piscodemon 0x1C, every boss cameo) spawned the plan's adds because they live in the formation record. Two caves in apply_boss_minions: the random-encounter commit tail latches RANDOM, the battle-start fid read consumes it and copies slots 1-3 from the vanilla bytes (random) or the adds (scripted). See the _BMA_* block. // v323: REST HEAL SKIPS HELD ROWS (player report 2026-09-04). Tent/Cottage and inn heal loops now skip RPMK-held rows on disc (_RP_REST_T/_I caves), so a rest can no longer revive a soft-dead missing member; closes the "save prompt shows 4 members after a tent" race and the per-rest "MISSING member cannot be revived" log spam. // v322: Northern foot trail, Mt Gulg key, game crash related to missing party members, other smaller bugs // v321: PHANTOM SPELL DOTS ON HELD MAGIC-SHOP ROWS (player report 2026-09-04). The reduced_party leg-13 cave returns jr ra for a held row at the magic shop's member-strip call site 0x08820D8C -- but the helper it skips (0x08820E18) also CLEARS and REBUILDS that row's spell-slot dot word at ctx+0x7080+row*4, and it is the ONLY store to that word in the whole module (scanned 0x08820000..0x08824000). So a held column rendered whatever bits the word last carried: three missing members each showed a filled Lv1 dot while their spell blocks (rec+0x21, u8[8][3]) were all zero. Save state was never wrong -- display only, and only when the stale value is nonzero, which is why the gap shipped with the feature (06a2c63) and went a month unreported. Fix: the held leg now zeroes ctx+0x7080+row*4 before jr ra (a0 = ctx at the call site, v0 = the mask test's dead scratch), so a held row draws three empty slots. Equip-shop twin unchanged -- its helper writes no ctx word. Cave bytes change, hence the bump. // v320: ONE DEAD-SPACE ALLOCATOR + SYMPTOM MACHINERY REMOVED (2026-09-03). dpk_space.DonorPool is built once in stage 3 and handed to every dpk baker: extern/caravan claim() their fixed J1 records up front, job_sprite_bake and ms2_bake free/coalesce/alloc from what remains. An extent leaves the pool exactly once, so two live records cannot overlap by construction; reserved_names, _donor_pool, donors_used and extra_reserved are gone (three collisions in a month were all that convention failing). assert_no_dpk_collisions stays as the invariant. Removed from the disc: the v299/v311 null-holder guards, the v318 STLR recorder and the FF1PSP_FORCE_* harnesses -- all built to chase a symptom of the collision, none needed now that it cannot occur. Cave bytes change, hence the bump. // v319: ROOT CAUSE FIXED -- ms2_bake._donor_pool handed out FM_DBG_ debug donors even when another baker had reserved them (2026-09-03). Reproduced the player's exact bake and party state locally with the v318 recorder: the sprite ctor's caller was fn 0x08877564 (per-row JOB%02x.gim from Job_Normal.pck), Job.oti/Job.aob/JOBxx all resolved null because the pack loaded into slot 3 entry 5 decompressed to MS_14.GIM/MS_14_S.GIM -- MS2_102.PCK (DLC fid 0x102, minted for the player's boss_minions_plan) had been written at 0x2ff6800, the FM_DBG_CAMPJ1 extent that job_sprite_bake had already relocated JOB_NORMAL.PCK onto (and correctly reported). The reserved check in _donor_pool only guarded the FM_*J1/J2 branch, not FM_DBG_. Fix: `n not in reserved` now gates BOTH branches. Plus a LOAD-BEARING post-bake audit (assert_no_dpk_collisions) that raises if any two non-donor records share bytes, so this class can never bake silently again. The on-disc null-holder guards (v311) and the STLR recorder (v318) stay; every earlier mitigation was already retired in v318. Bake output changes, hence the bump. // v318: MITIGATIONS RETIRED, STILLBORN RECORDER SHIPPED (2026-09-03). On-disc state returns to v311 (SNGD guards only). v314-v317 each made one null non-null and relocated the crash one dereference downstream; the final player bundle (RA 0x088fba28, v0 inside our cave, a0 = 0x8746341 garbage) showed the engine mutating the injected objects themselves. Root cause was never identified because nothing recorded WHICH caller handed the ctor a null GIM. New read-only STLR ring at the ctor's loader-failure point (0x088FB88C) records caller RA, GIM ptr, size, a3, t0, kind and obj for the last 8 failures; the client logs and the bundle carries them. Also: Violet's exact bake (her on_disc + boss_minions_plan + real key names, worst-case remote bank) reproduced offline and audited -- ZERO live-vs-live dpk collisions, JOB_NORMAL.PCK at its vanilla offset -- so the 'missing/relocated pack' cause of RA 0x088fba28 is ruled out for her seed. Cave bytes change, hence the bump. // v317: CLOSED SAFE OBJECT GRAPH -- ends the null-deref whack-a-mole (2026-09-03). FIFTH attempt; the previous four each fixed one dereference and were killed by the next one downstream. What finally made the pattern visible: the sentinel cell 0x089E891C is not 'uninitialised bss' and was not 'released to zero' (both earlier diagnoses were WRONG) -- it is EXPLICITLY BORN NULL by `lui v0,0x89f / sw zero,-0x76e4(v0)`, and there are SIX identical initialisers (0x088E7524, 0x088E7C70, 0x088E812C, 0x088E97F8, 0x088E990C, 0x088FC324), one per accessor function. v315/316 hooked the fallback TABLE head inside only ONE of those six functions, so whichever accessor won the race in the player's session left the hook unfired -- the bundle showed fallback_fix_count = 0 and the identical crash. Root shape: consumers dereference the sentinel WITHOUT a null check (`lw a0,(v1); lw t9,8(a0); lw t9,N(t9); jalr t9`, 228 such sites) while the release path DOES null-check it, so null is a meaningful 'no resource' value the consumers simply fail to honour. THE FIX: a closed fixed point rather than another point patch. SAFE_OBJ(0x100) has +0 = itself and +8 = SAFE_VTBL; SAFE_VTBL(0x100) is 64 slots all pointing at SAFE_STUB; and SAFE_STUB RETURNS &SAFE_OBJ (lui/jr/ori, address in the delay slot) instead of 0 -- that return value is what closes the loop, because a consumer that dereferences the RETURN lands back on safe memory instead of on a fresh null, which is exactly how every previous fix relocated the crash one frame later. All six sentinel initialisers now store &SAFE_OBJ instead of zero, so the cell is born VALID regardless of which accessor runs first; the ctor obj+0xC redirect is kept and points at the same SAFE_OBJ. Every other offset of SAFE_OBJ reads 0, which is what the engine's own empty paths expect (counts/sizes -> loops iterate zero times); we deliberately do NOT fabricate a resource with real dimensions, which was v312 and terminated PPSSPP. All 6 sites scanned: identical shape, branch-target clean, none a delay slot. // v316: PIN THE SAFE_ENTRY REFCOUNT (2026-09-03). v315's SAFE_ENTRY started its refcount at 0 and would have survived exactly ONE acquire/release cycle. Caught by walking the deref chain against live PPSSPP RAM rather than trusting static verification: after one simulated acquire, the game's own release path ran and SAFE_ENTRY[+0] came back ZERO on the next read. Cause -- these resource-ref cells are REFCOUNTED, and the release leg at 0x088fb964..0x088fb994 decrements [cell+8], and when the result is not > 0 it calls the destructor and executes `sw zero, (v0)`, nulling the resource pointer at [cell+0]. So a zero-initialised refcount is self-defeating: acquire 0->1, release 1->0, bgtz fails, our +0 pointer is zeroed, and the very next deref crashes exactly as before. This ALSO corrects the v315 root-cause note: 0x089E891C did not read 0 because it was uninitialised bss, it read 0 because it had been released to zero by this same path. Fix: SAFE_ENTRY[+8] is pinned at 0x40000000, so every release takes the `bgtz` branch, the teardown is unreachable, and +0 is never nulled. Value chosen far above any plausible acquire depth and far below overflow so the engine's own arithmetic stays well-defined in both directions. // v315: STILLBORN-SAFE HOLDER + FALLBACK ARRAY (2026-09-03). Player bundle proved v314 alone was insufficient: SBSH counter went up (ctor fix intercepted one stillborn), SNGD counters stayed 0 (guards not needed), but the game still crashed at 0x088fe1f8 with v1 = 0x089E891C. That address is fallback+0xB4 -- the second element of a stride-0xB4 array of static empty resource records. It's reached via a completely different code path than the ctor fix covers: function 0x088fe180 (44 callers) reads a resource pointer by calling obj->vtable[+0x6c] (fn 0x088e97c8), which returns 0x089E8938 (the head of the fallback array) whenever the requested resource index is out of bounds -- which is TRUE for any object with obj[+0x9c] == 0 (a stillborn). The caller then does `lw v1, ([0x089E8938])` = 0x089E891C, `lw a0, ([0x089E891C])` = 0 (bss), and jalr's through 0. v314's obj+0xC fix doesn't help here because this path never touches obj+0xC. Fix v315 adds a SECOND hook at 0x088e987c (inside vtable[+0x6c]'s one-time init sequence; site scanned clean, not a delay slot). Right after the vanilla init writes 0x089E891C to 0x089E8938, our hook OVERWRITES that cell with &SAFE_ENTRY (a 12-byte cave struct whose +0 field holds &SAFE_INTERMEDIATE, so `a0 = [SAFE_ENTRY]` is non-null and the deref chain resolves through cave memory to STUB). The init is gated by a marker byte at 0x089E8928 and never runs a second time, so a single overwrite persists forever. Extended SAFE_ENTRY to 12 bytes to accommodate the fallback-path caller's refcount write at [SAFE_ENTRY+8]; the ctor path doesn't touch +8, and both hooks now share the same struct. SBSH mailbox now has two counters (+4 ctor, +8 fallback) so a bundle names which fix fired. Only `at` and `v0` are clobbered on the second hook's path, and both are dead there (v0 was 0x089F0000 from lui, we restore it explicitly). Site scan clean -- word before is `sw v1, -0x76c8(v0)`, no delay slot. // v314: STILLBORN-SAFE HOLDER -- THE REAL FIX FOR THE NULL-HOLDER CRASH FAMILY (2026-09-03). Live-fired reproduction on the dev machine (FF1PSP_FORCE_STILLBORN=1) crashed on the first battle after boot at 0x089002c0 -- a FOURTH deref site, in function 0x08900218, with the SAME idiom the two v311 guards catch at 0x088FBA14 and 0x088FBA8C (`lw a0,(v0); lw t9,8(a0); lw t9,N(t9); jalr t9`). A module-wide scan showed 228 sites using that pattern -- guarding derefs was never going to end this. Fault is upstream: obj+0xC points at the empty fallback 0x089E8868 whose first word is 0. Fix (v2 -- v1 attempted a .bss init, live-tested and found the engine actively zeroes 0x089E8868 back to 0 during boot, unwinnable) hooks the sprite ctor 0x088fb814 at 0x088FB88C (first insn AFTER `jal 0x88e7370` returns; scanned clean, not a delay slot -- the first draft hooked 0x088FB888 which IS the jal's delay slot and would have been architecturally undefined, caught in static verification). On v0 == 0 the cave writes obj+0xC = &SAFE_HOLDER where SAFE_HOLDER is a cave-resident three-level chain: holder cell contains &INTERMEDIATE, intermediate's +8 slot contains &VTBL, VTBL is 16 slots each pointing at STUB (`jr ra; move v0, zero`). Every downstream deref chain now safely resolves through cave memory to the stub, returning 0. The two v311 null-holder guards become STRUCTURALLY UNREACHABLE because a0 is never null. Only `at` is clobbered on the fix path. LIVE-VERIFIED on the dev machine BEFORE shipping: harness ISO baked with fix, PPSSPP launched, drove into a full battle, SBSH counter = 1 (one intercepted stillborn), SNGD counters = 0/0 (guards never fired), 38 battle-class sprite objects live, PC advancing at 137M cycles/1.2s, no crash. The two earlier v312/v313 attempts shipped to a player untested and both made things worse (v312 killed PPSSPP via texture geometry mismatch, v313 was a revert that didn't fix). This one is proven. Cave bytes are new, hence the bump. // v313: v312 REVERTED -- SUBSTITUTING A TEXTURE IS UNSAFE (2026-09-02). v312 replaced a null/bad GIM with FO_SDW.GIM at 0x088FB87C so the sprite object would build completely. Live result on the player's next session: PPSSPP itself TERMINATED (process gone ~12s into the first cold-arena battle; a hard freeze became an emulator exit, which is strictly worse). Mechanism, hypothesised not proven: the texture is only ONE of the setter's arguments. The loader forwards the CALLER's cell parameters untouched -- 0x088e741c sets a2 = s1 (the ctor's a3) and a3 = s0 (the ctor's t0) and calls vtable+0x1c(obj, texture, a2, a3) -- so a 64x2 stand-in arrives carrying geometry meant for the sprite that failed (512x32 sheets in every census). Out-of-range cell rects reach PPSSPP's own texture path, and a host-side fault exits the process rather than raising the PSP crash screen. The lesson generalises: a substitute asset is only safe if it matches the geometry the caller already committed to, and at this hook that geometry is not knowable. The on-disc state returns to v311 exactly (both null-holder guards, no substitution). The correct shape is to make the object safe WITHOUT an image -- give the stillborn a valid holder whose vtable slots are `jr ra / move v0,zero` stubs, so dims stay 0, count stays 0, no geometry is ever computed, and every dereference returns 0 instead of faulting. Not attempted here. Cave bytes change (one cave removed), hence the bump. // v312: SPRITE ASSET FALLBACK -- THE ROOT FIX FOR THE NULL-HOLDER CRASH FAMILY (2026-09-02). v311 guarded both holder derefs and the game still died, now at a THIRD site (0x088fe1f8, RA 0x088fbaa0, pc 0xafb10008, hard freeze) -- proof that guarding derefs was never going to end it. RE off the retail ELF found the actual defect: the sprite constructor 0x088fb814 hands its (gim_ptr, gim_size) to the asset loader 0x088e7370, which returns 0 without ever calling the object's vtable+0x1c setter on a NULL pointer, a size of 1..3, a first word that is not "MIG." (0x2E47494D, the GIM magic), or a GIM the validator 0x88eb0b4 rejects. That setter is what installs the asset, the dims and a REAL holder, so a 0 return leaves exactly what the base ctor 0x088e5d74 left: holder = the static empty fallback 0x089E8868, asset 0, dims 0x0, count 0 -- the stillborn object measured in both freezes -- and 0x088fb8a0 walks it straight into the epilogue. Nothing on the path null-checks: the kind-3 build loop 0x0892cd9c asks a provider for a sub-image COUNT (vtable+0x14) then per-index data (vtable+0x1c) and size (vtable+0x24), and constructs with a NULL index result anyway, registering the dead object into the sprite array. New cave at 0x088FB87C (site scanned clean: neither displaced word is a branch/jump target or a data word, 0x088fb878 is `move a0,s1` so the hook is not a delay slot) tests a1 for NULL and for the GIM magic and substitutes a small valid GIM plus its size when either fails, so the object builds COMPLETELY and no downstream dereference can meet a null. The substitute is FO_SDW.GIM lifted from the player's own ICOMMON.PCK at bake time (800 B, magic re-checked before use; no game data ships in this repo) -- the very texture this sprite class already builds as the healthy 64x2 kind-3 object in every census, and ICOMMON.PCK is measured byte-identical vanilla vs patched, so no baker relocates it. A new SGAF mailbox counts substitutions so the provider bug stays visible instead of hiding behind the fix. Only at/v0/v1 are clobbered and all three are dead at the hook. The v299/v311 null-holder guards stay as belt-and-braces and should never fire again. Cave bytes are new, hence the bump. // v311: NULL-HOLDER GUARD COVERS BOTH LEGS (2026-09-02). A player bundle showed the v299/v300 guard firing twice and the game dying both times anyway -- "Bad Execution Address, CPU Jump to 00000068, RA 088fbaa0". The party-sprite epilogue dereferences the holder TWICE, not once: the width leg at 0x088FBA14 (guarded since v299, RA 0x088fba28) and a byte-identical height leg at 0x088FBA8C (RA 0x088fbaa0), differing only in the vtable selector that follows (0x30 vs 0x34). Proven against the retail ELF, not inferred: 0x088fba98 is the ONLY call in the 1.86MB module whose RA is 0x088fbaa0; both legs resolve the holder through the same 6-word sequence (vtable +0x64 = the pure leaf 0x088e9424 "return this+0xc"), byte-for-byte identical, so the height leg loads exactly the a0 the width leg just proved null; and [0x088fba28, 0x088fba98) has no path out (three branches, all internal) and one store, swc1 f0,0x86c(s1), into the object's own float field -- it cannot touch the holder pointer at s1+0xc or the null word at [holder+0]. So v299 never mitigated the freeze, it moved it 0x78 bytes. Second cave at 0x088FBA8C (site scanned clean: neither displaced word is a branch/jump target or a data word, 0x088fba88 is a plain lw so the hook is not a delay slot), skipping to 0x088FBAA0 past the jalr and its delay slot. The SNGD mailbox now carries a counter per leg (+4 width, +8 height) so a bundle names WHICH leg saved the session. FF1PSP_FORCE_NULL_HOLDER now zeroes a0 instead of jumping to the skip leg: v299's self-test forced the BRANCH with a valid holder still in a0, so the epilogue ran on healthy data and the unguarded height leg could never fail -- which is exactly why it shipped undiscovered. Cave bytes are new, hence the bump. // v310: bestiarysanity fixes, bugfixes, other improvements // v309: CANAL ART IS NOT BAKEABLE -- BRIDGE GOES BACK TO THE CLIENT (2026-09-01). v308's ASC copy reached the ISO and reached live RAM (the baked bridge signature was read back at 0x164's own ASC entry, attr 0x000f in the live ATT) and the canal rendered unchanged: for a tile id registered in MAP_00_ANM.ATI the animation system supplies the art, so ASC is dead bytes and the only thing an ATI move can do is swap in another record's animation -- which is how the original reskin became a river. The bake is back to the walk+sail attr alone; CANAL_BRIDGE_GRID_EDITS draws the bridge again, keeping its canal-open gate because the AMD grid carries the canal ids in BOTH states. The 35 s of missing bridge that started this is fixed where it belongs: the openworld loop's narrow rescan window now re-centres on the last confirmed arena address instead of guessing 0x09800000 +8MB (two sessions measured at 0x09775dda and 0x09d75dda, one either side of it), and an overworld re-entry no longer rate-limits the full sweep. MAP_00.PCK bytes change, hence the bump. // v308: CANAL BRIDGE AS BAKED ART (2026-09-01, SUPERSEDED by v309). v307 read the live grid as proof that vanilla already drew the bridge and dropped both art layers; it did not -- with nothing painting, the canal renders as open water and the bridge was GONE. The bridge really is the client's two substitute tile ids, and the river in the first report really was this bake's own 0x174 water reskin. So the art moves ON DISC as an ASC copy from those same ids (0x164<-0x161, 0x164's bank, 0x174<-0x171, the channel), which is legal here only because each donor already shares its target's ANM.ATI record -- same overlay in, same overlay out, no ATI edit at all (the water reskin needed a family move, and that move is what made it a river). The tile ids exist in the grid only while the canal is open, so the reskin needs no canal-open gate, no relocating-arena scan and cannot lose a repaint race. MAP_00.PCK bytes change, hence the bump. // v307: CANAL KEPT ITS VANILLA ART (2026-09-01, SUPERSEDED by v308). After Nerrick blew the canal the crossing rendered as animated river water, not the bridge. Two layers were painting over the ROM: this bake re-skinned tile 0x174 with donor 0xA3's ASC art and moved it into the river ANM.ATI family, and the client repainted (94,156)/(94,157)/(94,158) with substitute bridge tile ids behind a canal-open save-block gate. Neither was needed -- the blown canal's own tiles ARE the bridge, which is why the bridge came back on its own the moment the client's edits lapsed (a re-decompressed arena the narrow rescan window could not see). Both are retired; the bake is now one u16, the walk+sail attr on 0x174, and the runtime canal art, its gate and its relocation race are gone. MAP_00.PCK bytes change, hence the bump. // v306: MULTI-TARGET EFFECTS SKIP MISSING MEMBERS (2026-09-01, live follow-up to v305). v305's cursor fix verified live -- the target cursor now snaps past a missing member and a genuinely KO'd member still takes a Phoenix Down -- but a party-wide Heal still floated green numbers over the two EMPTY slots and monster group attacks still landed on them. Cause: the magic executor 0x088846D8 files the party into the result array with an UNROLLED, UNCONDITIONAL block (rows 0,1,2,3), one copy per caster side (party caster 'all allies' mode 0x08 at 0x08884838, monster caster 'all opponents' mode 0x01 at 0x088848A4) -- unlike the enemy side beside it, which filters rows through 0x08871EC4. Vanilla survives that because a REAL KO is filtered DOWNSTREAM per effect handler (entry loop 0x08884A4C -> table 0x0894C0D4), and every one of those tests reads the KO status bit that soft-dead deliberately leaves CLEAR -- so pseudo-KO passed all of them. New cave files 0xFF (the array's own unused marker, pre-set by the executor's init 0x08875500) for held rows, so the apply loop (0x08886118) and the number-popup walk (0x08881A44) both skip the slot through their existing vanilla `== 0xFF` tests: no HP, no number, no message, the effect just has fewer targets. Both block interiors are branch-target clean ELF-wide and share one tail (`b 0x08884960` + `sb zero,0x31(s4)`), so one cave serves both sites. Cave bytes are new, hence the bump. // v305: MISSING MEMBERS ARE NOT BATTLE TARGETS (2026-09-01). Live exploit: Phoenix Down / Life aimed at a held row mid-battle revived a missing member and he took turns for the rest of the fight. The field is guarded by the clear KO byte plus the item-use validity cave, but the BATTLE one-ally cursor 0x0886BCF8 is a bare 0..3 wrap with no validity test at all -- not even the engine's own KO test -- and its confirm writes the row into the actor's unit+0x41 via `sb a0,-0x38ab(v0)`, which is why no 0x41-offset store scan ever found it. Restoring HP is what breaks soft-dead, since HP 0 is what denies turns. Two caves: (17) both one-ally call sites of that cursor (target-select tick 0x0887E738 and init 0x0887EAD0, jal retargets so the delay slot still arms a1) run vanilla and then keep stepping the SAME direction the move went until the landing row is un-held, re-pointing the name-window highlight -- held rows are unreachable, exactly like out of combat; and (18) an entry detour on the HP-result applier 0x088818FC (3 jal callers, zero raw-word refs, both displaced words branch-target clean) makes a held row accept no HP from anything -- revive, single heal, party-wide heal or damage -- returning 1 so the damage leg never stamps BU_STATUS. (18) also closes the party-wide edge Phase 3 accepted (a mass heal handed a held row HP and therefore a turn). Cave bytes are new, hence the bump. // v304: TRAP CAVE AIMS SELF/ALLY ABILITIES (2026-09-01). Target modes 0x04 (self) and 0x10 (one ally) DO read unit+0x41 -- the vanilla enemy caster writes its own row for 0x04 and calls the picker 0x8872294(scene,1) for 0x10 (0x08881E3C-0x08881E8C) -- but the cave picks the caster itself at fire time, so the client cannot name that row when it arms. The mailbox target byte now takes a 0xFE sentinel meaning "the row you picked", and the cave substitutes t4 before the +0x41 store. Unlocks the Temper/Protect/Haste/NulAll/Blink/Saber traps, all six live-verified 2026-09-01 (Haste bumped the caster's +0x07 multi-hit count to 2, NulAll wrote its own 0x3FFF mask to the target's +0x2E). Any other selector value passes through untouched, so the four original traps are byte-identical. Cave bytes change, hence the bump. // v303: v303: public v0.2.0 release? // v302: FORCE A FRESH BAKE PAST A COLLIDING CACHE TAG (2026-08-31). The v301 art fix shipped, the client pinned the new pixels, and the launcher REUSED a cached ISO whose manifest already read patcher_version 301 (baked 19:55:50Z; its JOB01.GIM palette is still the pre-fix layout -- transparent on index 1, custom colours from slot 32). New pixels through the old palette is what drew the scrambled Stealth Thief in battle and on the load screen. The root cause is structural, not the number: the shipped sprite BLOBS were never part of bake_hash32, so art could change under an unchanged cache key. bake_hash32 now folds every shipped job sheet's palette+pixels in, and this bump guarantees a fresh tag against the ISOs already on disk. // v301: CUSTOM SPRITE TRANSPARENCY BACK ON PALETTE INDEX 0 (2026-08-31). A KO'd party member wearing custom art drew a solid BLACK RECTANGLE behind the sprite. merge_palette matched colours by RAW BYTES, and vanilla index 0 carries leftover RGB (82,89,102,0) while the artist path writes (0,0,0,0) -- so the match missed and all ~17k transparent texels of both shipped sheets (job01, job07) were remapped to a NEW slot, index 1. Alpha-correct draw paths were unaffected (battle and the pause menu always looked right), but the paths that colour-key on INDEX 0 drew index 1 as opaque RGB (0,0,0), which is the black box. Transparent entries now compare equal (the _visual rule already used elsewhere in the tool), so custom transparency lands on vanilla's own slot 0; re-merged art measures 49 (job07) / 72 (job01) newly-opaque pixels instead of 17685 / 17208. Baked palettes and shipped pixels both change, hence the bump. // v300: NULL-HOLDER GUARD COUNTS ITS SKIPS (2026-08-31). The v299 guard is silent, so a session that swallowed a null holder is indistinguishable from one that never saw one -- the bug would hide behind its own mitigation. The cave now bumps a u32 in a new SNGD mailbox on every skip and the client logs the count, so "the guard fired" is a number rather than an assumption. Only at/t9 are touched on that path and both are already dead there (vanilla loads t9 twice and calls through it; 0x088FBA28 rewrites a0/a1). Cave bytes change, hence the bump. // v299: BATTLE SPRITE NULL-HOLDER GUARD (2026-08-31). A party-sprite object whose asset never resolved is left STILLBORN and the initializer's epilogue calls through its holder with no null check -- "CPU Jump to 00000000", RA 0x088fba28, at battle intro. Measured in the live freeze: of 19 objects of that class in the battle, 18 had real holders, assets and dims 0x100x0x20 while exactly one had holder = the static empty fallback 0x089E8868, asset 0, dims 0x0 and count 0 -- and that object is s1 in the crash registers. Not pool exhaustion: 110 holder nodes were free. New cave at 0x088FBA14 (hook site scanned clean: neither displaced word is a branch/jump target or a data word, and 0x088FBA10 is a plain lw so the hook is not a delay slot) reads the holder, skips straight past the jalr when it is null, and is a byte-exact replay of the two displaced lw otherwise. This does not fix the unresolved asset -- the client's holder census still logs every starved object -- it just stops one from killing the session. Cave bytes are new, hence the bump. // v298: JOB SPRITE PACKS REPORT EVERY DONOR THEY TOUCH (2026-08-31). A new game crashed with "Bad Execution Address, CPU Jump to 00000000", RA 0x088fba28. Measured on the shipped ISO: 57 OVERLAPPING dpk records (vanilla has 0). job_sprite_bake's _Space.coalesce merges adjacent free extents and kept only the FIRST donor name (prev[2] = prev[2] or ext[2]); the FM_*J1/J2 donors are adjacent on disc, so one merged run covered several donor records and donors_used named only one of them. ms2_bake then handed the unreported records out: JOB_NORMAL.PCK landed across FM_DBG_CAMPJ1/J2 + FM_CAMPJ1/J2 with MS2_07B.PCK written on top of it, M_JOB_NORMAL.PCK across FM_GARELLY_LGJ1/J2 under MS2_102.PCK. The class-sprite load at new game then decompressed a boss pack and jumped through a null object -- the dpk-dead-space-ownership signature, reached from the other side. _Space now records the donor segments as handed in and reports every donor an allocation INTERSECTS, so ms2_bake reserves the whole merged run. Bake output changes, hence the bump. // v297: CLASS SPRITE PALETTES BAKED ON DISC (2026-08-30). Custom party sprites were a pure RAM pin (pixels + palette over every resident JOBxx.GIM) and rendered "golden"/blotchy in battle, on the load screen and after a steal. Measured cause: a resident sheet is NOT the only place a class palette lives -- while a party member is on screen the engine also holds standalone 0x400 palette records in a separate heap (3 copies of the vanilla Thief palette at 0x08da4380/0x08da4810/0x08dadd80, none near any GIM), built at load time from the DISC record, and several draw paths CLUT from those; the resident pixels themselves measured byte-identical to our art, so this was never a torn write, a write-ordering bug or PPSSPP lazy texture caching (all three tested and cleared). job_sprite_bake now splices each shipped class MERGED palette into all five packs that carry its sheet (JOB_NORMAL/M_JOB_NORMAL/JOB_CHANGE/M_JOB_CHANGE/JOB_ALL). The merged palette is a SUPERSET -- every index the vanilla pixels use keeps its exact vanilla colour, custom colours go in the ~225 slots vanilla never references -- so the bake is unconditional and seed-independent, vanilla art is pixel-identical, and the scroll gate stays entirely in the client PIXEL pin (_jobsprite_loop no longer writes palettes at all, and its per-tick palette hunt + battle-edge rescan are gone). A patched pack grows ~112-238 bytes (wp16 greedy is already optimal), so packs relocate: best-fit over their own freed runs plus donor extents, and the donors consumed are handed to ms2_bake as extra_reserved (one region, one owner). // v296: ROUND-ZERO TRAP CAVE DECLINES A PREEMPTIVE ROUND (2026-08-30). Live: an Ink trap fired on a preemptive-strike battle and ATE the player's free round. On preemptive (bb+0x6809 == 1) the enemies are muted but the PARTY is still enqueued, so phase 1 falls through to the hooked leg -- and the cave's cursor=12 then ends the round after its one actor, so the party's queued free strike never runs. The cave now reads bb+0x6809 and takes the vanilla path on any non-zero battle type, so the trap waits for round 2 (the byte clears after round 1) and the first strike survives. Ambush never reached this leg anyway. Cave bytes change, hence the bump. // v295: ROUND-ZERO TRAP CAVE (2026-08-30). AP traps now resolve as REAL monster abilities -- the engine's own targeting, animation, battle message and status apply -- before the party acts. New detour at the phase 1 -> 2 leg 0x0886B2E4 (hook site scanned clean: not a branch/jump target, not a delay slot, not referenced as a data word). On an armed TRP1 mailbox the cave picks a living enemy that passes the advance's can-act gate, commits +0x40/+0x41/+0x42=0x0A/+0x44 into its unit record, parks it at order[12] with cursor 12, and emits phase 4 instead of 2 by handing the ENGINE's own store (0x0886B2F4 `sb v1,-0x2e52(v0)`) a 4 in v1 -- the cave never writes the phase byte itself. Unarmed, it is a byte-exact replay of the two displaced words, which is also how "hold the trap for the next battle" is implemented. bb = s1 + 0x460, proven three ways (an earlier RE pass got this wrong by reading the sort call and missing its +0x7ff8 delay slot). Retires the old client-side status poke, which was invisible and, for Silence, never worked at all. Cave bytes are new, hence the bump. // v294: SCENE-CLASS BATTLE GATE (2026-08-29). _rp_battle_gate trusted [[0x089D7ADC]+0x68B4] as "field struct, 1 outside battle"; live measurement proved 0x089D7ADC is the CURRENT SCENE pointer (the pause menu repoints it at its own context, whose +0x68B4 reads 0) and that the field scene's own +0x68B4 drops to 0 for ANY menu, not just battle. So the gate said "battle" for the whole pause menu and the v292 flatten cave ran there with a0 = ctx+0x450: its row-2 weapon offset 0x96F hit ctx+0xDBF = pause widget record 10 = the FORMATION row-selector cursor, cleared every frame -> the cursor vanished and Formation looked frozen (swaps still worked, blind). The gate now identifies the scene CLASS by its vtable at +4 (fixed rodata): battle-module scene classes pass, the field scene passes only when field logic is not the top layer, every other scene (pause/shop/save/title) is rejected. Fixes the ctor/ctor2/ctor3/flat caves at once. Cave bytes change, hence the bump. // v293: INN-SLEEP SLEEPERS HONOUR THE HELD MASK (2026-08-29). The field event VM's spawn-party-member-actor opcode 0x12 (handler 0x08844414) ran four times regardless of who was present, so held rows walked to inn beds like everyone else -- the last cosmetic hole in reduced_party. New cave on the flag OR that follows the spawn call: the actor is still built and still runs its whole walk script, but a held row gets draw bit 0x2 of the actor's +0xB4 flags cleared, which is exactly what native opcode 0x68 does to the leader's cutscene actor. One write at spawn holds for the entire scene (live-proven). Cave bytes change, hence the bump. // v292: PER-FRAME HELD-LAYER CLEAR AT THE POPUP FLATTEN (2026-08-29). v291's classifier clears only start once the sweep ticks (~0.5s in), so the battle WALK-IN's shadow arming showed held shadows through the intro. New battle-gated cave at flatten entry 0x08887A28 (a0 = bb, runs from the first intro frame, single jal caller) clears act on all held rows' body/shadow/weapon layers (bb+row*124+0x497/0x687/0x877) every frame; the classifier cave reverts to the pure virtual-KO bit. Cave bytes change, hence the bump.
@@ -11537,6 +11939,9 @@ SIGNATURES = {
     # 0x02<<8|id -- vanilla 0x0209 (flag 9), split 0x0245 (shadow flag 69).
     "prince_gate_split": (_NGS_SITES[0][0] + 2, 0xFFFF,
                           0x0200 | (NPC_GATE_SPLIT_FLAG_BASE + 5)),
+    # First op after Garland's battle: vanilla `14 04` (u16 0x0414), patched
+    # `2d 04` set-flag-1 (u16 0x042D). Pure data.
+    "skip_lute_cutscene": (_SLC_CUT, 0xFFFF, 0x042D),   # vanilla 0x0409
     # Rewrites code @0x8820e5c..: the word @0x8820e6c is `sll at,v0,1` (low u16
     # exactly 0x0840) only when patched (vanilla = `sra s0,v0,2`, low 0x8083).
     "shop_spell_level": (0x8820e6c, 0xFFFF, 0x0840),
@@ -11607,6 +12012,8 @@ SIGNATURES = {
     # same shape as the ocean detour (vanilla `b` = 0x1000). The marsh/river hook
     # is installed by the same feature, so one of the two suffices.
     "terrain_pools": (_TP_T3_HOOK + 2, 0xFC00, 0x0800),
+    # zone-block head (vanilla `addiu v0,s1,7`, upper u16 0x2622) -> `j cave`
+    "randworld_regions": (_RW_ZONE_HOOK + 2, 0xFC00, 0x0800),
     # Hook _BLOOD_HOOK 0x08883854 (v90 site) overwritten with `j cave`: high u16
     # top 6 opcode bits are `j` (000010) only when patched (vanilla `jal`, opcode
     # 000011 -> 0x0c00). Opcode-only -> holds wherever the cave lands.
@@ -11640,6 +12047,9 @@ SIGNATURES = {
     # Giant's object-record x (u16 @ _GCG_GIANT_REC+4): 15 vanilla, 12 patched.
     # Pure data, so it reads the same wherever the caves land.
     "giant_cave_gate": (_GCG_GIANT_REC + 4, 0xFFFF, _GCG_NEW_XY[0]),
+    # The orb's exit entry (map 31 #1, 0x08942CD0) dest map: 0x20 vanilla (past
+    # 1F), 0x22 patched (Lute room). Pure data, so it holds wherever caves land.
+    "shortened_temple_of_fiends": (0x08942CD0, 0xFFFF, 0x22),
     # Object-reader hook @0x0883FC70 overwritten with `j cave`: top 6 opcode bits
     # are `j` (000010) only when patched (vanilla `lw s3,0(v0)`, opcode 100011 ->
     # 0x8c00). Opcode-only -> holds wherever the cave lands.
@@ -11715,33 +12125,102 @@ def is_patched_running(read_u16, feats: dict, bake_hash32=None) -> bool:
     return patched_running_verdict(read_u16, feats, bake_hash32) == "ok"
 
 
-def _stage_reporter(progress):
-    """Wrap the caller's line sink into (stage, copy) emitters. The ISO copy is
-    minutes of dead air on a slow disk, so it reports byte percentage: every
-    10%, and never more than one line per 2s (the AP client log is append-only,
-    so these are added lines, not an in-place bar)."""
-    say = progress or (lambda _msg: None)
-    state = {"next": 10, "last": 0.0, "any": False}
+# Relative cost of each patch_iso step, in seconds, from four bakes with the
+# 2026-10-30 wp16 compressor (14-26 s each, i7-1165G7): vanilla map, vanilla
+# with the trails/Gulg menu-map paint, random map, key names only. Only the
+# ratios matter: the overall bake percentage is (weight of steps finished) /
+# (weight of steps this seed runs). "minions" is scaled from three real
+# 43-feature bakes (82-120 s before the compressor rewrite), whose plans carry
+# ~5x the packs of the test plan; "exe" is 2-4 s, 8.6 s when it builds the
+# trails/Gulg paint. A step missing from this table counts as 1.
+_BAKE_STEP_WEIGHTS = {
+    "exe": 4, "copy": 1, "rw_grid": 2, "rw_minimap": 3, "mapfx": 3.5,
+    "popup": 0.1, "palettes": 2.5, "minions": 3.5, "giant": 1.5,
+    "levelup": 0.4, "canal": 2, "ow_grid": 2, "remote_plan": 0.3,
+    "names": 0.8, "keynames": 0.8, "obtain": 1.5, "caravan": 0.4,
+    "chestbox": 0.3, "campus": 0.05, "keydesc": 0.1, "finish": 0.1,
+}
 
-    def copy(done, total):
-        if not total:
-            return
-        pct = int(done * 100 / total)
-        if pct < state["next"]:
-            return
-        now = time.monotonic()
-        state["next"] = (pct // 10) * 10 + 10
-        if now - state["last"] < 2.0 and pct < 100:
-            return
-        state["last"] = now
-        state["any"] = True
-        say(f"[bake]     copying… {min(pct, 100)}%")
 
-    def done_copying():
-        if state["any"] and state["next"] <= 100:
-            say("[bake]     copying… 100%")
+def _bake_plan(feats, *, key_names=None, remote_names=None, dyn_name_slots=0,
+               obtain_names=None, caravan_offer=None, pad_key_ids=None,
+               mapfx=False):
+    """The steps patch_iso will announce for this seed, in order. MIRRORS the
+    gates in patch_iso -- a drift only skews the percentage (an unplanned step
+    still advances it, clamped below 100), it never fails a bake."""
+    rw = bool(feats.get("_rw_world"))
+    plan = ["exe", "copy"]
+    if rw:
+        plan += ["rw_grid", "rw_minimap"]
+    elif mapfx:
+        plan.append("mapfx")
+    plan += ["popup", "palettes"]
+    if feats.get("boss_minions") and feats.get("boss_minions_plan"):
+        plan.append("minions")
+    if feats.get("giant_cave_gate"):
+        plan.append("giant")
+    if feats.get("slot_magic"):
+        plan.append("levelup")
+    plan.append("canal")
+    if (feats.get("_ow_map") or feats.get("_world_gates")) and not rw:
+        plan.append("ow_grid")
+    want_remote = bool((remote_names or dyn_name_slots)
+                       and feats.get("remote_chest_names"))
+    if feats.get("spell_tomes") or want_remote:
+        if want_remote:
+            plan.append("remote_plan")
+        plan.append("names")
+    elif (key_names or feats.get("blood_magic") or pad_key_ids
+          or slot_magic_item_descs(feats.get("slot_magic"))):
+        plan.append("keynames")
+    if obtain_names:
+        plan.append("obtain")
+    if caravan_offer and caravan_offer.get("name"):
+        plan.append("caravan")
+    if feats.get("remote_chest_names"):
+        plan.append("chestbox")
+    if (feats.get("job_scroll_boosts") or feats.get("equipment_rune_gate")
+            or feats.get("lute_block_gate")):
+        plan.append("campus")
+    if (feats.get("equipment_rune_gate") or feats.get("lute_block_gate")
+            or feats.get("levistone_shard_gate")):
+        plan.append("keydesc")
+    plan.append("finish")
+    return plan
 
-    return say, copy, done_copying
+
+class _BakeProgress:
+    """One overall percentage for the whole bake, so a first-time player can
+    see how close they are to playing. The AP client log is append-only, so
+    each step is one added line, "[bake] 37% class sprite palettes…", carrying
+    the share of the bake already FINISHED (weighted by _BAKE_STEP_WEIGHTS)
+    when that step starts. detail() lines are indented and carry no number."""
+
+    def __init__(self, progress):
+        self.say = progress or (lambda _msg: None)
+        self.total = 0.0
+        self.done = 0.0
+        self.cur = None
+        self.planned = []       # tests compare these two
+        self.announced = []
+
+    def plan(self, steps):
+        self.planned = list(steps)
+        self.total = float(sum(_BAKE_STEP_WEIGHTS.get(s, 1) for s in steps))
+
+    def step(self, key, msg):
+        self.announced.append(key)
+        if self.cur is not None:
+            self.done += _BAKE_STEP_WEIGHTS.get(self.cur, 1)
+        self.cur = key
+        pct = min(99, int(self.done * 100 / self.total)) if self.total else 0
+        self.say(f"[bake] {pct}% {msg}")
+
+    def detail(self, msg):
+        self.say(f"[bake]     {msg}")
+
+    def finish(self):
+        self.say("[bake] 100% done")
 
 
 def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
@@ -11784,8 +12263,13 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
     the Onrac Caravan's presale row, authored into FM_SHOPUS.PCK's shop-UI text
     bank + shop-font key-desc bank (extern_bake.bake_caravan_offer). Cosmetic
     and independent of every other bake."""
-    say, copy_prog, copy_done = _stage_reporter(progress)
-    say("[bake] 1/4 patching the game executable…")
+    prog = _BakeProgress(progress)
+    say = prog.say
+    prog.step("exe", "patching the game executable…")
+    with open(iso_in, "rb") as f:
+        if E.iso_already_baked(f):
+            raise E.UnsupportedIsoRevision(E.ALREADY_BAKED_MSG[0].upper()
+                                           + E.ALREADY_BAKED_MSG[1:])
     elf = E.load_boot_elf(iso_in)
     # COPY FIRST, before ANY function that can mint a mailbox into feats.
     # Several helpers (_mp_mb, _delaypop_mb) thread a cave vaddr
@@ -11808,21 +12292,64 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
     # blood_magic heal-item).
     feats["_delaypop_mb"] = _install_delayed_popup(elf)
     apply_strength_popups(elf, feats)            # always on (yellow attack-gain number)
+    # FOG OF WAR (random_map + fog_of_war, slot_data["randworld"]["world"]["fog"]):
+    # the menu-map fog cave is placed NOW (add_segment_cave cannot follow the
+    # bss tails the FEATURES loop reserves) and assembled after them (it needs
+    # its own bss tail for the pristine picture).
+    # The same cave also carries the menu map's WORLD EFFECTS (mapfx_bake:
+    # canal, King's bridge, Lufenian Bridge, trail Nitros, Gulg seal), fog or
+    # not; its table is sized now, so the effects are computed before reserve.
+    # Cosmetic: a failure leaves the menu map static.
+    _fog = bool((feats.get("_rw_world") or {}).get("fog"))
+    _fx = None
+    try:
+        from . import mapfx_bake as _MFX
+        _fx = _MFX.build(feats, iso_in, log=say)
+    except Exception as e:  # noqa: BLE001
+        say(f"[mapfx] menu-map world effects skipped ({e!r}); the menu map stays static")
+    _fx_table = _fx.table if _fx is not None else b""
+    prog.plan(_bake_plan(feats, key_names=key_names, remote_names=remote_names,
+                         dyn_name_slots=dyn_name_slots,
+                         obtain_names=obtain_names, caravan_offer=caravan_offer,
+                         pad_key_ids=pad_key_ids,
+                         mapfx=bool(_fx is not None and _fx.pcks)))
+    _fog_at = None
+    if _fog or _fx_table:
+        from . import mapfog_bake as _MF
+        _fog_at = _MF.reserve(elf, fx=_fx_table)
     for name, fn in FEATURES.items():
         if feats.get(name):
             fn(elf, feats)
     # MUST follow the loop: reserves a bss tail, and cave_bss_tail has to come
     # after every add_segment_cave (spell_tomes emits the last one).
     install_magic_power_tables(elf, feats)
-    try:
-        _gb = os.path.getsize(iso_in) / (1 << 30)
-        say(f"[bake] 2/4 copying your ISO ({_gb:.2f} GB)…")
-    except OSError:
-        say("[bake] 2/4 copying your ISO…")
-    E.build_iso(elf, iso_out, src_iso=iso_in,
-                progress=copy_prog if progress else None)
-    copy_done()
-    say("[bake] 3/4 writing text banks (item/shop names)…")
+    if _fog_at is not None:
+        # cosmetic: on failure the placeholder stays inert (no detours) and the
+        # menu map simply shows everything
+        try:
+            from . import minimap_bake as _MMB
+            _MF.finish(elf, _fog_at, _MMB.read_vanilla(iso_in)[0], log=say,
+                       flags=1 if _fog else 0, fx=_fx_table)
+        except Exception as e:  # noqa: BLE001
+            say(f"[mapfog] menu map hooks skipped ({e!r}); the menu map shows the "
+                f"whole world and does not follow world changes")
+    # RANDOM OVERWORLD (slot_data["randworld"]["world"]): move every entrance
+    # record, exit return, menu-map cursor and script object with its stamp,
+    # rewrite the terrain class map, keep the King's bridge built. After the
+    # FEATURES loop: world_gates checks remap table B is still vanilla.
+    if feats.get("_rw_world"):
+        from . import randworld_bake as _RWB
+        _RWB.apply_elf(elf, feats["_rw_world"], log=say)
+    # No byte percentage for the copy: it takes about a second, and the overall
+    # bake percentage already says where the player stands.
+    prog.step("copy", "copying your ISO…")
+    E.build_iso(elf, iso_out, src_iso=iso_in)
+    # LOAD-BEARING -- random overworld: the generated grid into MAP_00. The ELF
+    # half above already points every entrance at it; a failure must abort.
+    if feats.get("_rw_world"):
+        from . import randworld_bake as _RWB
+        prog.step("rw_grid", "writing the generated overworld…")
+        _RWB.bake_grid(iso_out, feats["_rw_world"], log=say)
     # Post-build dpk edits fall in two classes, and the split MUST be kept
     # honest (live lesson 2026-07-15, ms2/extern donor collision):
     #  - LOAD-BEARING: the code patches baked above reference these dpk
@@ -11842,19 +12369,44 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
             print(f"[patch] cosmetic {label} skipped ({e!r}); all functional "
                   f"features still applied.")
 
-    # Stage 3 is a chain of independent dpk rebuilds (each one decompresses,
-    # re-lays and recompresses a container) and is the second-longest stretch
-    # of the bake, so every block that actually runs announces itself -- a
-    # single "writing text banks" line would sit there for a minute.
-    def sub(msg):
-        say(f"[bake]     {msg}")
+    # The rest is a chain of independent dpk rebuilds (each one decompresses,
+    # re-lays and recompresses a container) and is most of the bake, so every
+    # block that actually runs announces itself as its own progress step --
+    # a single "writing text banks" line would sit there for a minute. Bakers
+    # take `sub` as their log sink for indented detail lines.
+    sub = prog.detail
+
+    # COSMETIC -- random overworld: repaint the menu world map (MINIMAP0/1/2.PCK)
+    # for the generated grid, in minimap_bake.DEFAULT_STYLE (flat Map-tab
+    # colours + coast line, ~2 s; the painted styles stay internal). Markers
+    # come from the painting in the player's own (untouched) ISO and move with
+    # their stamps. The cursor points already moved on the ELF, so a failure
+    # only leaves the vanilla picture -- soft guard. Its inputs are the world
+    # itself, which bake_hash32 already folds (randworld_bake.world_digest);
+    # a style change needs a PATCHER_VERSION bump.
+    if feats.get("_rw_world"):
+        def _bake_minimap():
+            from . import minimap_bake
+            minimap_bake.bake_minimap(iso_out, feats["_rw_world"], iso_in, log=sub)
+        prog.step("rw_minimap", "menu world map (random overworld)…")
+        _soft("random-overworld menu map", _bake_minimap)
+    # COSMETIC -- vanilla map with the trails / Gulg key options: the painting
+    # gets their always-on paint (stub piers, corridor, shut boulders, the
+    # seal) in all three MINIMAPn.PCK; the effects above open it per item.
+    # Computed and slot-checked at ELF time (mapfx_bake.build).
+    if _fx is not None and _fx.pcks and not feats.get("_rw_world"):
+        def _bake_mapfx():
+            from . import mapfx_bake
+            mapfx_bake.write_bases(iso_out, _fx, log=sub)
+        prog.step("mapfx", "menu world map (trails / Gulg seal)…")
+        _soft("menu map world items", _bake_mapfx)
 
     # LOAD-BEARING -- popup colours (always on): add the recoloured digit/MISS!!
     # row + the grown defs 25-29 (popup_bake.DEF_*) to BATTLEICON.PCK. The caves
     # installed above select those kinds, which only exist once this bake has
     # run, so a failure here would draw garbage glyphs rather than merely look
     # plain.
-    sub("battle damage-number colours…")
+    prog.step("popup", "battle damage-number colours…")
     popup_bake.bake_popup_colours(iso_out)
     # When spell_tomes / key_names / blood_magic / remote_chest_names are ALL
     # off, extern_bake never runs -- hand the dpk dead-space bakers the two J1
@@ -11896,12 +12448,12 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
     if caravan_active:
         pool.claim(_CARAVAN_J)
     from . import job_sprite_bake
-    sub("class sprite palettes…")
+    prog.step("palettes", "class sprite palettes…")
     job_sprite_bake.bake_job_palettes(iso_out, pool)
     # LOAD-BEARING -- boss_minions: rebuild MS2_<fid>.PCK sprite packs in the
     # copied ISO's dpk so every planned add monster has its GIM pair.
     if feats.get("boss_minions") and feats.get("boss_minions_plan"):
-        sub("boss minion sprite packs…")
+        prog.step("minions", "boss minion sprite packs…")
         _ms2.bake_minion_packs(iso_out, feats["boss_minions_plan"], pool)
     # LOAD-BEARING -- giant_cave_gate: place the paired boulder at (11,13) in
     # MAP_06_00.PCK's grid. The ELF half already moved the Giant onto (12,13);
@@ -11909,7 +12461,7 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
     # nothing, so a failure here must abort the bake rather than ship half of it.
     if feats.get("giant_cave_gate"):
         from . import map_bake
-        sub("Giant's Cave boulder…")
+        prog.step("giant", "Giant's Cave boulder…")
         map_bake.place_giant_rock(iso_out)
     # COSMETIC -- slot_magic: re-word the level-up "MP increased by {N}." battle
     # message to "New spell slots {N}" ON DISC. The client's resident-bank poll
@@ -11920,7 +12472,7 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
         def _bake_slot_line():
             from . import battlemsg_bake
             battlemsg_bake.bake_slot_line(iso_out)
-        sub("level-up battle message…")
+        prog.step("levelup", "level-up battle message…")
         _soft("slot_magic level-up line", _bake_slot_line)
     # COSMETIC -- canal CROSSING: draw the blown canal's centre column x=94 as
     # the BRIDGE (ASC copies from the vanilla bridge ids, same anim family) and
@@ -11931,7 +12483,7 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
     def _bake_canal_crossing():
         from . import map_bake
         map_bake.bake_canal_crossing(iso_out)
-    sub("canal crossing tile…")
+    prog.step("canal", "canal crossing tile…")
     _soft("canal crossing", _bake_canal_crossing)
     # OPEN PROGRESSION on disc -- foot trails, canoe rivers and the northern docks
     # written straight into MAP_00_AMD.BIN, so the cells are already correct when
@@ -11946,7 +12498,7 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
     # world_gates (v331): the trails base paint and the gate ids ride the same
     # grid bake (map_bake._ow_edits); the cave above resolves the gate ids.
     _wg = feats.get("_world_gates") or {}
-    if _ow_map or _wg:
+    if (_ow_map or _wg) and not feats.get("_rw_world"):   # vanilla-coordinate edits
         def _bake_ow_grid():
             from . import map_bake
             map_bake.bake_openworld_grid(iso_out, bool(_ow_map.get("early")),
@@ -11954,7 +12506,7 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
                                          bool(_ow_map.get("docks")),
                                          trails=bool(_wg.get("trails")),
                                          gulg=bool(_wg.get("gulg")))
-        sub("open-progression map edits…")
+        prog.step("ow_grid", "open-progression map edits…")
         _soft("open-progression grid", _bake_ow_grid)
     # LOAD-BEARING -- spell_tomes / remote_chest_names: grow the item NAME/DESC
     # banks in the copied ISO's dpk (must run AFTER build_iso, which produces
@@ -11993,13 +12545,13 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
         remote_capped = None
         dyn_slots = int(dyn_name_slots or 0) if want_remote else 0
         if want_remote:
-            sub("planning remote item names…")
+            prog.step("remote_plan", "planning remote item names…")
             remote_capped, _base = extern_bake.plan_remote(
                 iso_out, remote_names or [], levels=levels,
                 key_names=key_names, blood=blood, tomes=tomes_on,
                 pad_ids=pad_key_ids, item_descs=item_descs,
                 dyn_slots=dyn_slots, log=sub)
-        sub("item + spell name/description banks (the long one)…")
+        prog.step("names", "item + spell name/description banks…")
         extern_bake.bake_names(iso_out, levels=levels, remote=remote_capped,
                                key_names=key_names, blood=blood, tomes=tomes_on,
                                pad_ids=pad_key_ids, item_descs=item_descs,
@@ -12014,7 +12566,7 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
             extern_bake.bake_names(iso_out, key_names=key_names, items=False,
                                    blood=blood, pad_ids=pad_key_ids,
                                    item_descs=item_descs)
-        sub("key-item name bank…")
+        prog.step("keynames", "key-item name bank…")
         _soft("key-item/blood/soma desc bank", _keys)
     # COSMETIC -- per-map key-item obtain boxes ("You obtain the warp cube."):
     # author the AP name into each USEVM<mapid>.PCK's MAP<id>.MSG so every RAM
@@ -12029,8 +12581,11 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
     if obtain_names:
         def _evm():
             from . import evm_bake
-            evm_bake.bake_obtain_boxes(iso_out, obtain_names)
-        sub("map obtain boxes…")
+            evm_bake.bake_obtain_boxes(
+                iso_out, obtain_names,
+                extra=(evm_bake.SKIP_LUTE_EXTRA
+                       if feats.get("skip_lute_cutscene") else None))
+        prog.step("obtain", "map obtain boxes…")
         _soft("map obtain boxes", _evm)
     # COSMETIC -- the Onrac Caravan's presale row (its own shop-UI string bank,
     # see shop_font). Soft: a miss leaves the vanilla "Faerie's Bottle" row.
@@ -12042,7 +12597,7 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
             caravan_baked = extern_bake.bake_caravan_offer(
                 iso_out, caravan_offer["name"],
                 caravan_offer.get("descs") or [])
-        sub("Caravan presale row…")
+        prog.step("caravan", "Caravan presale row…")
         _soft("caravan presale line", _caravan)
     # COSMETIC -- shorten the chest reward box to "{NAME}!" so long remote AP
     # names get the full box width (the old template was the display cap).
@@ -12050,7 +12605,7 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
         def _box():
             from . import box_template
             box_template.patch_chest_box(iso_out)
-        sub("chest reward box…")
+        prog.step("chestbox", "chest reward box…")
         _soft("chest box template", _box)
     # COSMETIC -- job_scroll_boosts: pad the FM_CAMPUS class-name bank so the scroll-gated
     # class renames (client _classname_loop) aren't length-capped by the vanilla
@@ -12066,7 +12621,7 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
         def _campus():
             from . import campus_bake
             campus_bake.pad_class_bank(iso_out)
-        sub("class-name bank…")
+        prog.step("campus", "class-name bank…")
         _soft("class-name bank pad", _campus)
     # COSMETIC -- progress-line KEY_EXP descriptions (the Key Items menu's
     # bottom bar). Baked, not written at runtime: these sentences outgrow their
@@ -12142,13 +12697,14 @@ def patch_iso(iso_in: str, iso_out: str, feats: dict, data_patches=None,
                 out[1] = enc          # Lute (aliased by the id-37 tablet line)
                 out[19] = enc         # Ocarina -- MUST match, see above
             campus_bake.author_key_desc(iso_out, out)
-        sub("Key Items menu descriptions…")
+        prog.step("keydesc", "Key Items menu descriptions…")
         _soft("key-item progress descriptions", _keydescs)
     # LOAD-BEARING: refuse to ship a dpk where two live records overlap.
     assert_no_dpk_collisions(iso_out)
-    say("[bake] 4/4 finishing up…")
+    prog.step("finish", "finishing up…")
     _gatecheck_iso(iso_out, feats, remote_names, caravan_baked,
                    dyn_name_slots=dyn_name_slots)
+    prog.finish()
     return iso_out
 
 
